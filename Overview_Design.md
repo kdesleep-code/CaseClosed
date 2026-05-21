@@ -168,6 +168,27 @@
 作業時間の消化とタスク完了は別管理とする。  
 見積もり時間を消化しても自動完了にはせず、完了はユーザーが明示的に行う。
 
+
+### 外部Todo連携
+
+Taskの正本は、CaseClosed内のDBに保持する。
+
+GmailやGoogle Calendarとは異なり、Taskは案件、メール、作業時間見積もり、カレンダー上の作業ブロック、Case Context、イベントログと密接に結びつくため、外部Todoサービスを正本とはしない。
+
+ただし、外部表示・通知・モバイル確認を目的として、Taskを外部Todoサービスへエクスポートすることは想定する。
+
+特に、本アプリはGmailおよびGoogle Calendar連携を前提とするため、外部表示先の第一候補は **Google Tasks** とする。
+
+Google Tasks連携は、以下の方針とする。
+
+- CaseClosed内TaskをGoogle Tasksへミラーまたはエクスポートする
+- Google Tasks側は閲覧・通知・簡易確認用として扱う
+- Google TasksをTaskの正本とはしない
+- Google Tasks側からCaseClosedへTaskをImportすることはMVPでは想定しない
+- Google Tasks側での変更をどこまで反映するかは将来検討とする
+
+これにより、CaseClosed内の案件管理構造を保ちつつ、iPhone / iPad等からGoogle Tasks経由で今日のタスクを確認できるようにする。
+
 ---
 
 ## 4.3 Inbox / なんでも箱
