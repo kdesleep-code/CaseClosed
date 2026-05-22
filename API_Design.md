@@ -1,8 +1,9 @@
 # CaseClosed API詳細設計書
 
-Version: 0.2  
+Version: 0.3  
 作成日: 2026-05-22  
 対象: 個人用案件管理Webアプリ CaseClosed  
+関連文書: `CaseClosed_Overview_Design_v0.4.md`, `CaseClosed_Detailed_Design_v0.4.md`, `CaseClosed_DB_Design_v0.3.md`
 
 ---
 
@@ -1572,6 +1573,7 @@ Response:
   "input_hash": "...",
   "input_source_json": {},
   "input_diagnostic_json": {},
+  "applied_instruction_rule_ids_json": [],
   "output_json": {},
   "status": "succeeded",
   "error_type": null,
@@ -1625,7 +1627,44 @@ POST /api/v1/cases/{case_id}/update-context
 POST /api/v1/contacts/{contact_id}/update-context
 ```
 
-## 14.7 Cost Limit超過時の挙動
+## 14.7 Prompt Version一覧
+
+```http
+GET /api/v1/llm/prompt-versions
+```
+
+Query:
+
+```text
+function_type=...
+is_active=1
+```
+
+## 14.8 Prompt Version詳細
+
+```http
+GET /api/v1/llm/prompt-versions/{prompt_version_id}
+```
+
+仕様:
+
+- system/user/retry prompt templateを確認する。
+- output_schema_jsonを確認する。
+- LLM入力全文・過去実行入力全文は表示しない。
+
+## 14.9 Prompt Version作成
+
+```http
+POST /api/v1/llm/prompt-versions
+```
+
+仕様:
+
+- 既存versionを上書きしない。
+- function_typeごとにversion_noを増やす。
+- schema変更時も新versionを作成する。
+
+## 14.10 Cost Limit超過時の挙動
 
 LLM実行前にCost Limit超過が予測される場合、APIは以下を行う。
 
@@ -2064,6 +2103,8 @@ PATCH /api/v1/settings
 
 - 設定変更は監査ログに記録する。
 - セキュリティ・外部副作用に関わる設定は確認対象にする。
+- LLM追加指示ルールはRule APIで管理する。
+- Prompt VersionはLLM APIで管理する。
 
 ---
 
