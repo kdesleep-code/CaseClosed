@@ -3,7 +3,6 @@
 Version: 0.3  
 作成日: 2026-05-22  
 対象: 個人用案件管理Webアプリ CaseClosed  
-関連文書: `Overview_Design.md`, `Detailed_Design.md`
 
 ---
 
