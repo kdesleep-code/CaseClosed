@@ -1664,6 +1664,7 @@ LLM実行履歴、失敗、コスト、プロンプト改善材料を確認す�
 - input_hash
 - input_source_json
 - input_diagnostic_json
+- applied_instruction_rule_ids_json
 - output_json
 - status
 - error_type
@@ -1688,6 +1689,7 @@ GET /llm-runs/{llm_run_id}
 - 関連Contact候補を開く
 - 再実行
 - prompt_version確認
+- 適用されたLLM追加指示ルール確認
 
 注意:
 
@@ -1768,7 +1770,9 @@ GET /audit-exposure-batches
 - 通知設定
 - メール重要度ルール
 - Case候補ルール
+- LLM追加指示ルール
 - prompt version管理
+- 出力JSON schema確認
 
 ## 18.3 必須操作
 
@@ -1778,6 +1782,12 @@ GET /audit-exposure-batches
 - ルール並び替え
 - ルール無効化
 - prompt version確認
+- prompt version作成
+- 出力schema確認
+- LLM追加指示ルール追加
+- LLM追加指示ルール編集
+- LLM追加指示ルール並び替え
+- LLM追加指示ルール無効化
 
 API:
 
@@ -1790,12 +1800,21 @@ PATCH /mail-importance-rules/{rule_id}
 GET /case-candidate-rules
 POST /case-candidate-rules
 PATCH /case-candidate-rules/{rule_id}
+GET /llm-instruction-rules
+POST /llm-instruction-rules
+PATCH /llm-instruction-rules/{rule_id}
+GET /llm/prompt-versions
+POST /llm/prompt-versions
 ```
 
 ## 18.4 注意
 
 From単独Skipルールは作成不可。  
 FromだけでSkipしたい場合はContact skippedを使う。
+
+LLM追加指示ルールは、送信者、Contactタグ、Caseタグ、件名、本文キーワード等を条件として設定できる。
+
+Prompt Versionの既存版は上書きせず、変更時は新versionを作成する。
 
 ---
 
