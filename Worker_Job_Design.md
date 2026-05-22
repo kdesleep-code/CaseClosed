@@ -1,8 +1,9 @@
 # CaseClosed Worker / Job / External Operation設計書
 
-Version: 0.1  
+Version: 0.2  
 作成日: 2026-05-22  
 対象: 個人用案件管理Webアプリ CaseClosed  
+関連文書: `CaseClosed_Overview_Design_v0.4.md`, `CaseClosed_Detailed_Design_v0.4.md`, `CaseClosed_DB_Design_v0.3.md`, `CaseClosed_API_Design_v0.2.md`
 
 ---
 
@@ -702,13 +703,21 @@ mail_importance_classification job
 ### 共通責務
 
 - prompt_version取得
+- output_schema_json取得
+- 適用対象のllm_instruction_rules取得
 - input_source_json生成
 - input_hash生成
 - input_diagnostic_json生成
+- applied_instruction_rule_ids_json生成
 - LLM API呼び出し
 - JSON Schema検証
 - llm_runs保存
+- Cost Limit判定
 - 必要なwrite_requests作成
+
+LLM Workerは、プロンプト本文をハードコードせず、`prompt_versions` と `llm_instruction_rules` を参照して実行入力を組み立てる。
+
+適用された追加指示ルールIDは `llm_runs.applied_instruction_rule_ids_json` に保存する。
 
 ### JSON不正時
 
