@@ -1,8 +1,9 @@
 # CaseClosed DB詳細設計書
 
-Version: 0.3  
+Version: 0.4  
 作成日: 2026-05-22  
 対象: 個人用案件管理Webアプリ CaseClosed  
+関連文書: `CaseClosed_Overview_Design_v0.4.md`, `CaseClosed_Detailed_Design_v0.4.md`, `CaseClosed_LLM_Prompt_Design_v0.1.md`
 
 ---
 
@@ -80,9 +81,11 @@ Repository層またはVIEWで計算する。
 ```text
 effective_importance =
   user_importance
-  > external_importance
+  > Contact skipped
   > rule_importance
+  > external_importance
   > llm_importance
+  > Pending
 ```
 
 ただし、検索・表示性能上必要な場合は、将来的にキャッシュカラムを追加してよい。
@@ -548,6 +551,10 @@ source_id            TEXT NOT NULL
 suggested_title      TEXT NOT NULL
 suggested_detail     TEXT NULL
 suggested_due_at     TEXT NULL
+suggested_estimate_minutes INTEGER NULL
+suggested_priority_hint TEXT NULL
+suggestion_kind      TEXT NOT NULL DEFAULT 'task'  -- task/subtask/preparation/reminder
+parent_task_id       TEXT NULL REFERENCES tasks(id)
 llm_run_id           TEXT NULL REFERENCES llm_runs(id)
 status               TEXT NOT NULL DEFAULT 'pending'
 accepted_task_id     TEXT NULL REFERENCES tasks(id)
@@ -777,10 +784,12 @@ Pending中であっても、Contact登録画面の自動Fillを目的とするLL
 
 ```text
 user_importance
-> external_importance
+> Contact skipped
 > rule_importance
+> external_importance
 > llm_importance
 > system_importance
+> Pending
 ```
 
 ただし `Pinned` はユーザーまたは重要度フィルタのみが付与可能。LLMは出力不可。
@@ -875,9 +884,10 @@ version                  INTEGER NOT NULL DEFAULT 1
 draft
 sent
 discarded
-send_failed
-unknown
+failed
 ```
+
+Gmail送信中の不明状態はDraftではなく `external_operations.status = unknown` で扱う。
 
 ---
 
@@ -1114,6 +1124,43 @@ Google Calendarの予定本文には以下を記載する。
 
 アプリ内リンクは入れない。
 
+## 8.2 calendar_event_candidates
+
+メール本文等からLLMが抽出したGoogle Calendar登録前の予定候補。
+
+予定候補は、ユーザーが確認・編集・承認するまでGoogle Calendarへ登録しない。
+
+```text
+id                          TEXT PRIMARY KEY
+source_message_id             TEXT NULL REFERENCES gmail_messages(id)
+case_id                      TEXT NULL REFERENCES cases(id)
+task_id                      TEXT NULL REFERENCES tasks(id)
+title                       TEXT NOT NULL
+start_at                    TEXT NULL
+end_at                      TEXT NULL
+timezone                    TEXT NULL DEFAULT 'Asia/Tokyo'
+location                    TEXT NULL
+description                 TEXT NULL
+source_text                 TEXT NULL
+confidence                  REAL NULL
+llm_run_id                  TEXT NULL REFERENCES llm_runs(id)
+status                      TEXT NOT NULL DEFAULT 'pending'
+created_at                  TEXT NOT NULL
+updated_at                  TEXT NOT NULL
+```
+
+### status
+
+```text
+pending
+accepted
+edited_and_accepted
+rejected
+superseded
+```
+
+承認後、Google Calendar作成 `external_operations` を作成し、成功後に `calendar_event_links` を作成する。
+
 ---
 
 # 9. File / Storage系テーブル
@@ -1226,22 +1273,48 @@ created_at               TEXT NOT NULL
 updated_at               TEXT NOT NULL
 ```
 
+## 9.6 file_summaries
+
+ファイル本文をLLMに投入して生成した要約。
+
+`llm_policy` により実行可否を制御する。
+
+```text
+id                      TEXT PRIMARY KEY
+file_id                  TEXT NOT NULL REFERENCES files(id)
+summary_text             TEXT NOT NULL
+key_points_json          TEXT NULL
+action_items_json        TEXT NULL
+sensitive_content_warning INTEGER NOT NULL DEFAULT 0
+llm_run_id               TEXT NULL REFERENCES llm_runs(id)
+created_at               TEXT NOT NULL
+```
+
 ---
 
 # 10. LLM系テーブル
 
 ## 10.1 prompt_versions
 
-LLMプロンプトの版管理。
+LLMプロンプトと出力schemaの版管理。
+
+プロンプト本文の最終形は実装中に調整してよいが、function_typeごとにversion管理する。
 
 ```text
-id                  TEXT PRIMARY KEY
-function_type        TEXT NOT NULL
-version_no           INTEGER NOT NULL
-prompt_template       TEXT NOT NULL
-schema_json           TEXT NULL
-created_at           TEXT NOT NULL
-is_active            INTEGER NOT NULL DEFAULT 1
+id                          TEXT PRIMARY KEY
+function_type                TEXT NOT NULL
+version_no                   INTEGER NOT NULL
+system_prompt_template        TEXT NULL
+user_prompt_template          TEXT NULL
+retry_prompt_template         TEXT NULL
+output_schema_json            TEXT NULL
+default_model_name            TEXT NULL
+default_provider_name         TEXT NULL
+temperature                   REAL NULL
+is_active                    INTEGER NOT NULL DEFAULT 1
+memo                         TEXT NULL
+created_at                   TEXT NOT NULL
+updated_at                   TEXT NOT NULL
 ```
 
 ### 制約
@@ -1250,7 +1323,71 @@ is_active            INTEGER NOT NULL DEFAULT 1
 UNIQUE(function_type, version_no)
 ```
 
-## 10.2 llm_runs
+### function_type例
+
+```text
+mail_importance_classification
+contact_registration_prefill
+mail_summary_ja
+mail_case_selection
+mail_thread_summary
+reply_draft_generation
+new_mail_draft_generation
+mail_task_suggestion
+subtask_suggestion
+calendar_candidate_extraction
+preparation_task_suggestion
+reminder_mail_generation
+case_context_update
+contact_context_update
+file_security_meta_classification
+file_summary
+handover_log_generation
+```
+
+## 10.2 llm_instruction_rules
+
+ユーザーが登録するLLM追加指示。
+
+送信者、Contactタグ、Caseタグ、件名、本文キーワード等に応じて、各LLM機能へ追加指示を適用する。
+
+```text
+id                      TEXT PRIMARY KEY
+name                    TEXT NOT NULL
+condition_json           TEXT NOT NULL
+instruction_text         TEXT NOT NULL
+function_types_json      TEXT NULL
+priority_order           INTEGER NOT NULL DEFAULT 100
+is_enabled               INTEGER NOT NULL DEFAULT 1
+created_at               TEXT NOT NULL
+updated_at               TEXT NOT NULL
+deleted_at               TEXT NULL
+version                  INTEGER NOT NULL DEFAULT 1
+```
+
+### condition_json例
+
+```json
+{
+  "contact_tags_any": ["学生"],
+  "subject_contains": ["相談", "確認"],
+  "case_tags_any": ["授業"]
+}
+```
+
+### function_types_json例
+
+```json
+[
+  "mail_summary_ja",
+  "reply_draft_generation",
+  "mail_task_suggestion"
+]
+```
+
+複数ルールが一致する場合、`priority_order` の小さい順に適用する。
+
+## 10.3 llm_runs
 
 全LLM実行履歴。
 
@@ -1266,12 +1403,14 @@ prompt_version_id             TEXT NULL REFERENCES prompt_versions(id)
 input_hash                   TEXT NULL
 input_source_json             TEXT NOT NULL
 input_diagnostic_json         TEXT NULL
+applied_instruction_rule_ids_json TEXT NULL
 output_json                  TEXT NULL
 output_text_preview           TEXT NULL
 status                       TEXT NOT NULL
 error_type                   TEXT NULL
 error_message                TEXT NULL
 retry_count                  INTEGER NOT NULL DEFAULT 0
+max_retry_count               INTEGER NOT NULL DEFAULT 3
 prompt_tokens                INTEGER NULL
 completion_tokens            INTEGER NULL
 total_tokens                 INTEGER NULL
@@ -1302,6 +1441,7 @@ canceled
   "message_ids": ["..."],
   "case_id": "...",
   "case_context_version_id": "...",
+  "contact_context_version_id": "...",
   "file_ids": [],
   "user_additional_prompt_hash": "..."
 }
@@ -1315,17 +1455,38 @@ canceled
 
 ```json
 {
+  "mail_count": 1,
+  "has_thread_context": true,
+  "included_fields": ["subject", "from", "body_text", "attachments_meta"],
   "input_character_count": 12000,
-  "included_sections": ["mail_body", "case_context", "user_instruction"],
+  "body_char_count": 9500,
+  "truncated": false,
   "schema_name": "mail_importance_v2",
-  "normalization_version": "2026-05-22"
+  "normalization_version": "2026-05-22",
+  "instruction_profile": ["student_mail", "concise_reply"]
 }
 ```
 
+### input_hash
+
+`input_hash` は、LLMに渡した入力を正規化したうえで算出する。
+
+正規化対象:
+
+- system prompt
+- user prompt
+- prompt_version
+- user追加プロンプト
+- 入力本文・Context・候補リスト
+- 出力schema
+
+ハッシュ算出後、入力全文は保存しない。
+
 ### リトライ方針
 
-JSON不正、schema不一致など機械的失敗はリトライする。  
-リトライ時には、プロンプトに「必ず指定JSON schemaに従う」等の修正を加えてよい。
+JSON不正、schema不一致、必須フィールド欠落、enum違反など機械的失敗はリトライする。
+
+リトライ時には、`retry_prompt_template` を用いて「必ず指定JSON schemaに従う」等の修正を加えてよい。
 
 人間が見て品質が低いLLM出力は、原則として失敗扱いしない。  
 ユーザーが手動修正できる形で提示する。
@@ -1337,6 +1498,36 @@ LLMコスト上限を超過しそうな場合、以下を行う。
 1. 対象LLM処理を停止または延期する。
 2. `system_maintenance` Case配下に確認Taskを自動生成する。
 3. system_logsに記録する。
+
+## 10.4 handover_logs
+
+LLMにより生成されたCase引継ぎログの編集前・確定前メタ情報。
+
+確定版はGenerated Fileとして `files` に保存する。
+
+```text
+id                          TEXT PRIMARY KEY
+case_id                      TEXT NOT NULL REFERENCES cases(id)
+title                       TEXT NOT NULL
+markdown_body                TEXT NOT NULL
+contains_sensitive_information INTEGER NOT NULL DEFAULT 0
+sensitivity_notes_json        TEXT NULL
+unresolved_items_json         TEXT NULL
+llm_run_id                   TEXT NULL REFERENCES llm_runs(id)
+status                       TEXT NOT NULL DEFAULT 'draft'
+generated_file_id             TEXT NULL REFERENCES files(id)
+created_at                   TEXT NOT NULL
+updated_at                   TEXT NOT NULL
+```
+
+### status
+
+```text
+draft
+confirmed
+rejected
+superseded
+```
 
 ---
 
@@ -1931,16 +2122,18 @@ worker_max_count = 4
 例:
 
 ```text
-mail_importance
-mail_summary
-case_judgement
-reply_draft
-task_suggestion
-calendar_candidate
-file_security_meta
+mail_importance_classification
 contact_registration_prefill
+mail_summary_ja
+mail_case_selection
+reply_draft_generation
+new_mail_draft_generation
+mail_task_suggestion
+calendar_candidate_extraction
 case_context_update
-handover_generation
+contact_context_update
+file_security_meta_classification
+handover_log_generation
 ```
 
 ---
@@ -1966,6 +2159,8 @@ handover_generation
 17. `inbox_required` はInboxへ自動紐づけ。
 18. `external_operations.unknown` は自動再実行しない。
 19. LLM入力全文は `llm_runs` に保存しない。
+20. LLM追加指示は `llm_instruction_rules` として版・優先順位つきで管理する。
+21. LLM出力schemaは `prompt_versions.output_schema_json` で管理し、schema変更時はversionを上げる。
 20. Cost Limit超過時は `system_maintenance` Case配下にTaskを作る。
 
 ---
