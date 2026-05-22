@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "caseclosed"
+version = "0.1.0"
+description = "Case-centered personal work support application."
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.15,<2",
+    "fastapi>=0.115,<1",
+    "sqlalchemy>=2.0,<3",
+    "uvicorn[standard]>=0.34,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx>=0.28,<1",
+    "pytest>=8.4,<9",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/caseclosed"]
+

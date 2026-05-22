@@ -1,0 +1,2 @@
+"""CaseClosed backend package."""
+

@@ -1,0 +1,18 @@
+.app-shell {
+  min-height: 100vh;
+  background: linear-gradient(180deg, #f7f8fb 0%, #eef2f8 100%);
+}
+
+.brand {
+  width: min(100%, 1280px);
+  margin: 0 auto;
+  padding: 32px clamp(20px, 4vw, 48px);
+}
+
+.brand h1 {
+  margin: 0;
+  color: #172033;
+  font-size: 1.75rem;
+  font-weight: 650;
+  letter-spacing: 0;
+}
