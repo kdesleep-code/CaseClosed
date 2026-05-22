@@ -3,7 +3,6 @@
 Version: 0.1  
 作成日: 2026-05-22  
 対象: 個人用案件管理Webアプリ CaseClosed  
-関連文書: `CaseClosed_Overview_Design_v0.4.md`, `CaseClosed_Detailed_Design_v0.4.md`, `CaseClosed_DB_Design_v0.3.md`, `CaseClosed_API_Design_v0.2.md`
 
 ---
 
