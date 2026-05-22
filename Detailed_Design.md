@@ -1,6 +1,6 @@
 # CaseClosed 詳細設計書
 
-Version: 0.4  
+Version: 0.5  
 作成日: 2026-05-22  
 対象: 個人用案件管理Webアプリ CaseClosed
 
@@ -859,7 +859,8 @@ DB設計では `case_mail_links` のようなリンクテーブルを採用し�
 - prompt_version_id
 - input_hash
 - input_source_json
-- input_reconstruction_policy
+- input_diagnostic_json
+- applied_instruction_rule_ids_json
 - output_json
 - status
 - error_type
@@ -874,9 +875,39 @@ DB設計では `case_mail_links` のようなリンクテーブルを採用し�
 - ファイル本文全文
 - LLM入力全文
 
-ただし、プロンプトエンジニアリングと品質改善のため、入力を再構成するための参照情報、バージョン、hash、抽象化された入力概要は保存する。
+ただし、プロンプトエンジニアリングと品質改善のため、入力を再構成するための参照情報、バージョン、hash、抽象化された入力概要、適用された追加指示ルールIDは保存する。
 
-## 12.2 自動実行LLM
+## 12.2 Prompt Version / Output Schema
+
+LLMプロンプトと出力JSON schemaは `prompt_versions` でfunction_typeごとに版管理する。
+
+保存対象:
+
+- system_prompt_template
+- user_prompt_template
+- retry_prompt_template
+- output_schema_json
+- default model / provider
+- temperature等の基本パラメータ
+
+schema変更時はprompt_versionを上げる。過去の `llm_runs` は実行時の `prompt_version_id` を参照する。
+
+## 12.3 LLM追加指示ルール
+
+ユーザーは、送信者、Contactタグ、Caseタグ、件名、本文キーワード等に応じて、LLMへの追加指示を登録できる。
+
+例:
+
+- 学生からのメールでは、学生が行うべきことと自分が行うべきことを分けて書く
+- 事務メールでは、締切と提出先を強調する
+- 返信文面は簡潔にし、今後の対応を中心に書く
+- 査読依頼では、専門分野との合致度を表示する
+
+追加指示は `llm_instruction_rules` に保存し、対象function_type、条件、優先順位、有効/無効を管理する。
+
+複数ルールが一致した場合は、優先順位順に適用する。適用されたルールIDは `llm_runs.applied_instruction_rule_ids_json` に保存する。
+
+## 12.4 自動実行LLM
 
 - メール重要度判定
 - High / Middleメールの和訳要約
@@ -888,7 +919,7 @@ DB設計では `case_mail_links` のようなリンクテーブルを採用し�
 
 Lowメールは重要度判定の出力としては許可するが、自動要約・自動Case判定は行わない。
 
-## 12.3 手動実行LLM
+## 12.5 手動実行LLM
 
 - 返信草案生成
 - 新規メール草案生成
@@ -900,7 +931,7 @@ Lowメールは重要度判定の出力としては許可するが、自動要�
 - 引継ぎログ生成
 - ファイル本文要約
 
-## 12.4 LLM失敗時の扱い
+## 12.6 LLM失敗時の扱い
 
 ### システム連携上の失敗
 
@@ -934,7 +965,7 @@ Lowメールは重要度判定の出力としては許可するが、自動要�
 - ユーザーが手動修正できるようにする
 - 再生成・追加プロンプトによる修正を可能にする
 
-## 12.5 Cost Limit
+## 12.7 Cost Limit
 
 LLM cost limitを設定可能にする。
 
@@ -942,7 +973,7 @@ cost limitを超過しそうな場合、または超過した場合は、シス�
 
 自動LLM処理は停止または制限する。手動LLM実行については、UIで警告した上で実行可否を判断する。
 
-## 12.6 和訳要約
+## 12.8 和訳要約
 
 High / Middleメールは読み込み時に和訳要約を自動生成する。
 
@@ -954,7 +985,7 @@ High / Middleメールは読み込み時に和訳要約を自動生成する。
 - 次アクション
 - key_points
 
-## 12.7 返信草案
+## 12.9 返信草案
 
 - ユーザー操作時のみ生成
 - Gmail Draftではなくアプリ内draft
@@ -1648,7 +1679,9 @@ MVPという用語は用いない。以下の順に段階的に実装する。
 1. mail_importance_rules
 2. Contact Skip優先処理
 3. llm_runs
-4. LLM重要度判定
+4. prompt_versions
+5. llm_instruction_rules
+6. LLM重要度判定
 5. High/Middle和訳要約
 6. Lowでは要約しない制御
 7. Gmailスター付与external_operation
@@ -1783,6 +1816,7 @@ MVPという用語は用いない。以下の順に段階的に実装する。
 ## Calendar
 
 - calendar_event_links
+- calendar_event_candidates
 
 ## File
 
@@ -1791,11 +1825,14 @@ MVPという用語は用いない。以下の順に段階的に実装する。
 - file_links
 - file_versions
 - file_security_rules
+- file_summaries
 
 ## LLM
 
 - llm_runs
 - prompt_versions
+- llm_instruction_rules
+- handover_logs
 
 ## Logs / Events
 
@@ -1820,6 +1857,7 @@ MVPという用語は用いない。以下の順に段階的に実装する。
 - app_settings
 - mail_importance_rules
 - case_candidate_rules
+- llm_instruction_rules
 
 ## Recurring
 
