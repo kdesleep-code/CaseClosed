@@ -1,6 +1,6 @@
 # CaseClosed 詳細設計書
 
-Version: 0.3  
+Version: 0.4  
 作成日: 2026-05-22  
 対象: 個人用案件管理Webアプリ CaseClosed
 
@@ -576,7 +576,7 @@ FromメールアドレスがContactsに存在しない場合の判定保留状�
 
 ```text
 user_importance
-> Contact/Address Skip
+> Contact Skip
 > rule_importance
 > external_importance
 > llm_importance
@@ -615,7 +615,7 @@ processed
 - 要約を読む
 - 本文を開く
 - 返信草案を作る
-- 案件に紐づける
+- Caseの関連メール集合に追加する
 - 新規案件を作る
 - Contact確認
 
@@ -674,11 +674,13 @@ Skip
 
 および、LLM重要度判定用の追加プロンプト。
 
-## 9.4 From単独Skip
+## 9.4 From条件とSkip
 
-From単独Skipは原則としてContact/Address Skipに誘導する。
+メールアドレス単独Skipという概念は持たない。
 
-ただし、以下のような複合条件Skipは重要度フィルタとして許可する。
+Fromだけを理由に今後Skipしたい場合は、そのメールアドレスをContactに登録し、Contact自体を `skipped` にする。
+
+重要度フィルタでは、Fromのみを条件とするSkipルールは作成しない。From条件を使う場合でも、Subject / Body / 添付 / Gmailラベルなどを含む複合条件Skipとして扱う。
 
 ```text
 From = X
@@ -712,17 +714,16 @@ archived
 
 ## 10.4 Email Address状態
 
-Email Addressには以下の状態を持たせる。
+Email Addressには以下の状態のみを持たせる。
 
 ```text
 unresolved
 linked
-skipped
 ```
 
-`skipped` は、そのメールアドレス単位でSkipすることを意味する。
+Email Address単位のSkip状態は持たない。
 
-旧記述の `skipped_address` という状態名は使用せず、状態名は `skipped` に統一する。
+メールアドレス単独Skipという概念も持たない。Fromだけを理由に今後Skipしたい場合は、そのメールアドレスをContactに登録し、Contact自体を `skipped` にする。
 
 ## 10.5 未知メールアドレス
 
@@ -730,19 +731,41 @@ skipped
 
 メール重要度判定でPendingになるかどうかの監視対象はFromのみである。
 
-## 10.6 Contact Skip / Address Skip
+## 10.6 Pending Contact登録支援
+
+Contact未登録Fromから来たメールはPendingになる。
+
+Pending中は、重要度判定、Case判定、自動和訳要約を停止する。
+
+ただし、Contact登録画面の自動Fillを目的とするLLM処理だけは例外的に実行可能とする。これは初期運用時にPendingが大量発生する負担を下げるためである。
+
+LLMは、メール本文、署名、件名、送信者アドレスなどから以下を候補生成する。
+
+```text
+表示名
+所属・組織
+役職・立場
+推奨タグ
+メモ
+Skip候補理由
+信頼度
+```
+
+生成結果は正式Contactではなく、ユーザーが採用・編集・破棄する候補として保存する。
+
+## 10.7 Contact Skip
 
 Contactが `skipped` の場合、そのContactに紐づくメールアドレスからのメールは重要度判定前にSkip扱いとする。
 
-Email Addressが `skipped` の場合、そのメールアドレスからのメールはSkip扱いとする。
+Address Skipは存在しない。
 
 ただし、個別メールに対するユーザー明示的な重要度変更は優先する。
 
-## 10.7 Contact Merge
+## 10.8 Contact Merge
 
 既存Contact同士を1人の人物として統合できるようにする。マージ履歴を保存する。
 
-## 10.8 Contact Tags
+## 10.9 Contact Tags
 
 タグは自由入力。初期タグは用意しない。
 
@@ -810,13 +833,15 @@ Inbox Caseに自動紐づけする。
 
 判断不能としてユーザー確認に回す。
 
-## 11.4 メールとCaseの多重関係
+## 11.4 Caseが持つ関連メール集合
 
-自動判定は1メール1Caseとする。
+本アプリでは、概念上「メールがCaseに紐づく」というより、Caseが関連メール集合を持つものとして扱う。
 
-手動操作として「別の案件にコピー」を許可する。この場合、主Caseとは別に副次Caseからも参照できる。
+自動判定では、1通のメールは原則として1つのprimary Caseの関連メール集合に追加される。
 
-DB設計では `mail_case_links` のようなリンクテーブルを採用し、`is_primary` を持たせることを推奨する。
+手動操作として「別の案件にコピー」を許可する。この場合、主Caseとは別に、副次Caseの関連メール集合にも同じメールを表示できる。
+
+DB設計では `case_mail_links` のようなリンクテーブルを採用し、`link_role = primary / copy` を持たせることを推奨する。
 
 ---
 
@@ -1093,7 +1118,7 @@ Event Log
 - Gmailスター付与
 - Task完了
 - Task論理削除
-- Case紐づけ変更
+- Case関連メール変更
 - 証明書失効
 
 ## 17.3 メール一覧表示ログ
@@ -1170,7 +1195,7 @@ POST /files/{file_id}/trash
 
 ## 18.3 optimistic_state
 
-メール処理済み化、Task完了、Case紐づけ変更など軽い操作では、APIレスポンスに `optimistic_state` を返し、UIを即時反映する。
+メール処理済み化、Task完了、Case関連メール変更など軽い操作では、APIレスポンスに `optimistic_state` を返し、UIを即時反映する。
 
 ### 推奨仕様
 
@@ -1523,8 +1548,8 @@ UIの完全自動テストより、以下のロジックテストを重視する
 - 未知Fromメールアドレスはunresolvedになる
 - unresolvedを既存Contactに紐づけられる
 - Contact mergeでメールアドレス・タグ・関連Caseが統合される
-- From単独SkipはContact/Address Skipに誘導される
-- Email Address skippedがSkipとして機能する
+- Fromだけを理由にSkipしたい場合はContactを `skipped` にする
+- Email Address単位のSkip状態は存在しない
 
 ### LLM
 
@@ -1599,7 +1624,7 @@ MVPという用語は用いない。以下の順に段階的に実装する。
 6. contact_email_addresses
 7. contact_tags
 8. unresolved address
-9. Contact Skip / Address Skip
+9. Contact Skip
 10. Contact merge
 11. contact_group_aliases
 
@@ -1632,7 +1657,7 @@ MVPという用語は用いない。以下の順に段階的に実装する。
 ## Stage 6：Case判定・Context更新
 
 1. case_candidate_rules
-2. mail_case_links
+2. case_mail_links
 3. LLM Case判定
 4. existing_case紐づけ
 5. inbox_required自動紐づけ
@@ -1742,7 +1767,7 @@ MVPという用語は用いない。以下の順に段階的に実装する。
 - mail_summaries
 - mail_thread_summaries
 - mail_drafts
-- mail_case_links
+- case_mail_links
 - follow_up_watches
 
 ## Contact
