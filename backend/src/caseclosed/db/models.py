@@ -272,3 +272,107 @@ class SchemaVersion(Base):
     component: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     version: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class Contact(Base):
+    __tablename__ = "contacts"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    avatar_url: Mapped[str | None] = mapped_column(Text)
+    memo: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
+    deleted_at: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class ContactEmailAddress(Base):
+    __tablename__ = "contact_email_addresses"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    contact_id: Mapped[str | None] = mapped_column(ForeignKey("contacts.id"))
+    email_address: Mapped[str] = mapped_column(Text, nullable=False)
+    normalized_email_address: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        unique=True,
+    )
+    resolution_status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="unresolved",
+    )
+    is_primary: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    source: Mapped[str | None] = mapped_column(Text)
+    first_seen_at: Mapped[str | None] = mapped_column(Text)
+    last_seen_at: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
+    has_inbound_message_history: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+    deactivated_at: Mapped[str | None] = mapped_column(Text)
+    deleted_at: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class ContactTag(Base):
+    __tablename__ = "contact_tags"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    contact_id: Mapped[str] = mapped_column(ForeignKey("contacts.id"), nullable=False)
+    tag: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class ContactRegistrationSuggestion(Base):
+    __tablename__ = "contact_registration_suggestions"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    email_address_id: Mapped[str] = mapped_column(
+        ForeignKey("contact_email_addresses.id"),
+        nullable=False,
+    )
+    source_message_id: Mapped[str | None] = mapped_column(Text)
+    suggested_display_name: Mapped[str | None] = mapped_column(Text)
+    suggested_organization: Mapped[str | None] = mapped_column(Text)
+    suggested_role: Mapped[str | None] = mapped_column(Text)
+    suggested_tags_json: Mapped[str | None] = mapped_column(Text)
+    suggested_memo: Mapped[str | None] = mapped_column(Text)
+    suggested_skip_reason: Mapped[str | None] = mapped_column(Text)
+    confidence: Mapped[float | None] = mapped_column(Float)
+    llm_run_id: Mapped[str | None] = mapped_column(ForeignKey("llm_runs.id"))
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="suggested")
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class ContactContextVersion(Base):
+    __tablename__ = "contact_context_versions"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    contact_id: Mapped[str] = mapped_column(ForeignKey("contacts.id"), nullable=False)
+    version_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    context_markdown: Mapped[str] = mapped_column(Text, nullable=False)
+    llm_run_id: Mapped[str | None] = mapped_column(ForeignKey("llm_runs.id"))
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class ContactMergeHistory(Base):
+    __tablename__ = "contact_merge_history"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    source_contact_id: Mapped[str] = mapped_column(Text, nullable=False)
+    target_contact_id: Mapped[str] = mapped_column(
+        ForeignKey("contacts.id"),
+        nullable=False,
+    )
+    merged_at: Mapped[str] = mapped_column(Text, nullable=False)
+    merged_by: Mapped[str] = mapped_column(Text, nullable=False)
+    snapshot_json: Mapped[str | None] = mapped_column(Text)

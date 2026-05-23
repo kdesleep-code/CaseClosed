@@ -11,6 +11,12 @@ dist/
 
 # Local configuration and data
 .env
+*.db
 *.sqlite
 *.sqlite3
-
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+data/
+logs/
+storage/

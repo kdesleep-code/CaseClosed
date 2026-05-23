@@ -9,6 +9,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from caseclosed.auth import router as auth_router
+from caseclosed.contacts import router as contacts_router
 from caseclosed.db.runtime import bootstrap_database
 from caseclosed.db.runtime import rebuild_runtime_database
 from caseclosed.external_operations import router as external_operations_router
@@ -25,6 +26,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="CaseClosed", lifespan=lifespan)
 app.include_router(auth_router)
+app.include_router(contacts_router)
 app.include_router(jobs_router)
 app.include_router(external_operations_router)
 app.include_router(maintenance_router)

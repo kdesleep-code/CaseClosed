@@ -5,10 +5,17 @@ from datetime import datetime
 from datetime import timedelta
 
 from caseclosed.db.models import Job
+from caseclosed.services.contact_registration_prefill import (
+    handle_contact_registration_prefill,
+)
 from caseclosed.services.queue import QueueInterface
 from caseclosed.services.queue import SQLiteQueue
 
 JobHandler = Callable[[Job], dict[str, object]]
+
+DEFAULT_HANDLERS: dict[str, JobHandler] = {
+    "contact_registration_prefill": handle_contact_registration_prefill,
+}
 
 
 class Orchestrator:
@@ -19,7 +26,7 @@ class Orchestrator:
         queue: QueueInterface | None = None,
         worker_id: str = "worker-main",
     ) -> None:
-        self.handlers = handlers or {}
+        self.handlers = handlers if handlers is not None else DEFAULT_HANDLERS
         self.queue = queue or SQLiteQueue()
         self.worker_id = worker_id
 

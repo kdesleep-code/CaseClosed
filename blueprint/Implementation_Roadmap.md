@@ -350,6 +350,21 @@ LLM:
 - no-replyやMLをskipped化しやすいか
 - LLM自動Fillが邪魔ではないか
 - 「Address Skip」が混入していないか
+- メールアドレス解除後、既存メールが古いContactに残って見えないか
+- skipped Contact解決時に重要度判定へ進まずSkip扱いになるか
+
+### Phase 4開始前の持ち越しメモ
+
+- `source_suggestion_id` が指定されたContact作成では、採用元候補のstatusを更新する。
+- Contactからメールアドレスを外す処理は、`has_inbound_message_history = 0` なら物理削除、`1` なら `inactive` 化する。削除時にメールテーブルを全走査しない。
+- `inactive` は受信時のContact解決には使い、送信先・Primary候補には使わない。
+- Phase 4のGmail Syncでは、Fromとして観測したアドレスの `has_inbound_message_history` を必ず `1` にする。
+- From履歴があるメールアドレスのUI操作は `Remove` ではなく `Deactivate` 等、履歴を残す操作だと分かる表現にする。
+- `inactive` メールアドレスは `Activate` 操作で再有効化できる。
+- Contact間でメールアドレスを明示的に移動できるAPI/UIを持つ。Moveは所属Contactの変更であり、`active` / `inactive` 状態は維持する。
+- 押せないボタンは待機カーソルではなく、hover時に押せない理由を説明する。
+- フロントエンドの表示文言は文言キー経由にし、`window.CASECLOSED_LANGUAGE_PATCH` / HTML内JSON / localStorageで言語パッチを当てられるようにする。既存画面は主要文言から順次移行する。
+- フロントエンドの見た目はDesign Set / Theme Presetとして切替可能にする。Settings UIは後続でよいが、`window.CASECLOSED_THEME` / localStorage / `data-theme` / CSS custom propertiesで切替可能な土台を維持する。
 
 ---
 

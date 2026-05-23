@@ -7,7 +7,9 @@ from datetime import timezone
 
 from sqlalchemy import Engine
 from sqlalchemy import create_engine
+from sqlalchemy import inspect
 from sqlalchemy import select
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 
@@ -60,11 +62,25 @@ def rebuild_runtime_database() -> None:
 
 def bootstrap_database() -> None:
     Base.metadata.create_all(engine)
+    ensure_runtime_schema()
 
     with SessionLocal() as session:
         seed_settings(session)
         seed_system_cases(session)
         session.commit()
+
+
+def ensure_runtime_schema() -> None:
+    inspector = inspect(engine)
+    if "contacts" not in inspector.get_table_names():
+        return
+
+    contact_columns = {column["name"] for column in inspector.get_columns("contacts")}
+    if "avatar_url" in contact_columns:
+        return
+
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE contacts ADD COLUMN avatar_url TEXT"))
 
 
 def seed_settings(session: Session) -> None:

@@ -900,6 +900,21 @@ cursor=...
 GET /api/v1/contacts/{contact_id}
 ```
 
+Response:
+
+```json
+{
+  "contact": {},
+  "related_cases": []
+}
+```
+
+仕様:
+
+- `related_cases` は `contact_case_links` を起点に、このContactが関係するCaseを参照表示するための一覧である。
+- Contact詳細では関連Caseを閲覧できるが、関連付けの主たる作成・編集導線はCase側に置く。
+- Contact側の関連Case一覧は「この人が今どの案件に関係しているか」を確認するための補助ビューである。
+
 ## 8.3 未解決From一覧
 
 ```http
@@ -983,6 +998,7 @@ Request:
 
 - Contact作成後、該当FromのPendingメールについて重要度判定Jobを再開する。
 - `status = skipped` で作成された場合、該当メールは重要度判定前にSkip扱いにする。
+- `source_suggestion_id` が指定された場合、採用元の `contact_registration_suggestions.status` を `adopted` または `edited_and_adopted` に更新する。
 
 ## 8.6 Contact更新
 
@@ -1023,7 +1039,58 @@ Request:
 }
 ```
 
-## 8.10 Contact Merge
+## 8.10 Contactからメールアドレスを外す
+
+```http
+DELETE /api/v1/contacts/{contact_id}/email-addresses/{email_address_id}
+```
+
+仕様:
+
+- DB内にそのアドレス由来のメールが存在しない場合は、typo等の誤登録として物理削除してよい。
+- `contact_email_addresses.has_inbound_message_history = 1` の場合は、物理削除せず `contact_email_addresses.status = inactive` にする。
+- `inactive` のメールアドレスもFrom Contact解決には使う。過去メールや新規受信メールが「該当Contactなし」にならないようにする。
+- `inactive` のメールアドレスは送信先候補、返信先候補、Primary指定の対象にしない。
+- 同じアドレスが別Contactへ追加された場合は、新しい行を作らず既存の `contact_email_addresses` を再利用し、`active` / `inactive` 状態を維持したままContactを付け替える。
+- `has_inbound_message_history` はGmail Sync等でFromとして観測した時点で `1` にする。削除時にメールテーブルを全走査しない。
+- UIでは `has_inbound_message_history = 1` のアドレスに対して、単純な `Remove` ではなく `Deactivate` 等の履歴を残す操作だと分かる表現を使う。
+
+## 8.11 Contactメールアドレスを再有効化する
+
+```http
+POST /api/v1/contacts/{contact_id}/email-addresses/{email_address_id}/activate
+```
+
+仕様:
+
+- `inactive` のメールアドレスを同じContact内で `active` に戻す。
+- Contactにactiveアドレスがない場合、再有効化したアドレスをPrimaryにする。
+- Contactに他のactiveアドレスがある場合、再有効化したアドレスはPrimaryにしない。
+
+## 8.12 Contact間でメールアドレスを移動する
+
+```http
+POST /api/v1/contacts/{contact_id}/email-addresses/{email_address_id}/move
+```
+
+Request:
+
+```json
+{
+  "target_contact_id": "contact_..."
+}
+```
+
+仕様:
+
+- `contact_id` は移動元Contactである。
+- 移動後も、対象メールアドレスの `active` / `inactive` 状態は維持する。
+- 移動元ContactでPrimaryだった場合、移動元に他のactiveアドレスがあればPrimaryを付け替える。
+- 移動先Contactにactiveアドレスがなく、移動したアドレスが `active` の場合、移動したアドレスをPrimaryにする。
+- `has_inbound_message_history` は維持する。
+- `inactive` アドレスも移動可能であり、移動先でも `inactive` のまま保持する。
+
+## 8.13 Contact Merge
 
 ```http
 POST /api/v1/contacts/{contact_id}/merge

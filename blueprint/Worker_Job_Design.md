@@ -688,6 +688,7 @@ System Maintenance Caseに確認Taskを作る。
 FromがContacts未登録:
 
 ```text
+contact_email_addresses.has_inbound_message_history = 1
 mail_auto_state.pending_reason = unresolved_from_contact
 contact_registration_prefill job may be created
 ```
@@ -695,6 +696,7 @@ contact_registration_prefill job may be created
 Fromが解決済み:
 
 ```text
+contact_email_addresses.has_inbound_message_history = 1
 mail_importance_classification job
 ```
 
@@ -835,6 +837,26 @@ confidence
 ```
 
 正式Contactには反映しない。ユーザーがContact登録画面で採用・編集・破棄する。
+
+### Phase 3最小実装メモ
+
+- Phase 3では外部LLM/Gmail本文にはまだ接続せず、`contact_registration_prefill` Job handlerがFromアドレスから決定的な仮候補を作る。
+- 本格実装時は `prompt_versions`, `llm_runs`, `llm_instruction_rules` を通して実行し、候補採用時に `contact_registration_suggestions.status` を `adopted` / `edited_and_adopted` へ更新する。
+
+## 6.5.1 Contact Resolution Follow-up Worker
+
+### 実行条件
+
+```text
+未解決FromアドレスがContactへ紐づいた
+```
+
+### 責務
+
+- `contact_resolution_followup` Jobを起点に、Pendingで止まっていた後続処理を再開する。
+- Contactが `active` の場合は、該当Fromのメールについて重要度判定・Case判定・自動要約の再開候補にする。
+- Contactが `skipped` の場合は、重要度判定へ進めずSkip扱いにする。
+- Phase 3最小実装ではJobを積むところまで。実際のメール再判定・Skip反映はMail系テーブル実装後に行う。
 
 ## 6.6 Summary Worker
 

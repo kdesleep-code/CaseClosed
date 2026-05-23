@@ -3,31 +3,39 @@ import type { FormEvent } from 'react'
 import { AuthApiError, login, readSession } from './authApi'
 import type { SessionData } from './authApi'
 import loginDoorTanuki from './assets/login-door-tanuki.png'
+import ContactsView from './ContactsView'
 import MaintenanceView from './MaintenanceView'
+import { t } from './i18n'
+import type { MessageKey } from './i18n'
 import './App.css'
 
-const pageLinks = [
-  { label: 'Mail', href: '/mail' },
-  { label: 'Cases', href: '/cases' },
-  { label: 'Tasks', href: '/tasks' },
-  { label: 'Calendar', href: '/calendar' },
-  { label: 'Contacts', href: '/contacts' },
-  { label: 'Files', href: '/files' },
-  { label: 'Logs', href: '/logs' },
-  { label: 'Settings', href: '/settings' },
-  { label: 'Maintenance', href: '/maintenance' },
+type LinkItem = {
+  labelKey: MessageKey
+  href: string
+}
+
+const pageLinks: LinkItem[] = [
+  { labelKey: 'nav.mail', href: '/mail' },
+  { labelKey: 'nav.cases', href: '/cases' },
+  { labelKey: 'nav.tasks', href: '/tasks' },
+  { labelKey: 'nav.calendar', href: '/calendar' },
+  { labelKey: 'nav.contacts', href: '/contacts' },
+  { labelKey: 'nav.files', href: '/files' },
+  { labelKey: 'nav.logs', href: '/logs' },
+  { labelKey: 'nav.settings', href: '/settings' },
+  { labelKey: 'nav.maintenance', href: '/maintenance' },
 ]
 
-const workLinks = [
-  { label: 'Compose Mail', href: '/mail/compose' },
-  { label: 'New Case', href: '/cases/new' },
-  { label: 'New Task', href: '/tasks/new' },
-  { label: 'Pending Contacts', href: '/contacts/pending' },
+const workLinks: LinkItem[] = [
+  { labelKey: 'work.composeMail', href: '/mail/compose' },
+  { labelKey: 'work.newCase', href: '/cases/new' },
+  { labelKey: 'work.newTask', href: '/tasks/new' },
+  { labelKey: 'work.pendingContacts', href: '/contacts/pending' },
 ]
 
 function formatJstDateTime(value: string | null) {
   if (value === null) {
-    return 'Unavailable'
+    return t('time.unavailable')
   }
 
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -103,7 +111,7 @@ function App() {
         setError(loginError.message)
         setIsLocked(loginError.code === 'LOGIN_LOCKED')
       } else {
-        setError('Authentication request failed.')
+        setError(t('auth.requestFailed'))
       }
     } finally {
       setIsSubmitting(false)
@@ -114,46 +122,52 @@ function App() {
     if (window.location.pathname === '/maintenance') {
       return <MaintenanceView />
     }
+    if (window.location.pathname === '/contacts') {
+      return <ContactsView mode="list" />
+    }
+    if (window.location.pathname === '/contacts/pending') {
+      return <ContactsView mode="pending" />
+    }
 
     return (
       <main className="app-shell">
         <div className="top-shell">
           <header className="top-header">
             <div>
-              <p>CaseClosed</p>
-              <h1>Top</h1>
+              <p>{t('app.name')}</p>
+              <h1>{t('top.heading')}</h1>
             </div>
 
-            <p aria-label="Current session" className="session-meta">
-              Session:{' '}
+            <p aria-label={t('session.current.label')} className="session-meta">
+              {t('session.prefix')}{' '}
               {session.device_name ??
                 (session.ip_address !== null
                   ? `IP ${session.ip_address}`
-                  : 'Login source unavailable')}{' '}
-              | Expires:{' '}
+                  : t('session.loginSourceUnavailable'))}{' '}
+              | {t('session.expires')}{' '}
               {formatJstDateTime(sessionExpiresAt)}
             </p>
           </header>
 
           <section aria-labelledby="pages-heading" className="hub-section">
-            <h2 id="pages-heading">Pages</h2>
+            <h2 id="pages-heading">{t('top.pages.heading')}</h2>
 
-            <nav aria-label="Main pages" className="hub-links">
+            <nav aria-label={t('top.pages.navLabel')} className="hub-links">
               {pageLinks.map((link) => (
                 <a href={link.href} key={link.href}>
-                  {link.label}
+                  {t(link.labelKey)}
                 </a>
               ))}
             </nav>
           </section>
 
           <section aria-labelledby="work-heading" className="hub-section">
-            <h2 id="work-heading">Work</h2>
+            <h2 id="work-heading">{t('top.work.heading')}</h2>
 
-            <nav aria-label="Main work" className="work-links">
+            <nav aria-label={t('top.work.navLabel')} className="work-links">
               {workLinks.map((link) => (
                 <a href={link.href} key={link.href}>
-                  {link.label}
+                  {t(link.labelKey)}
                 </a>
               ))}
             </nav>
@@ -164,7 +178,7 @@ function App() {
   }
 
   if (!isSessionChecked) {
-    return <main aria-label="Checking session" className="app-shell" />
+    return <main aria-label={t('session.checking.label')} className="app-shell" />
   }
 
   return (
@@ -172,12 +186,12 @@ function App() {
       <div className="login-layout">
         <section className="login-panel">
           <header className="login-heading">
-            <h1>CaseClosed</h1>
+            <h1>{t('app.name')}</h1>
           </header>
 
           <form className="login-form" onSubmit={handleSubmit}>
             <label className="password-field">
-              <span>Password</span>
+              <span>{t('login.password.label')}</span>
               <input
                 autoComplete="current-password"
                 name="password"
@@ -188,16 +202,16 @@ function App() {
             </label>
 
             {error !== null && <p role="alert">{error}</p>}
-            {isLocked && <p className="lock-status">Locked</p>}
+            {isLocked && <p className="lock-status">{t('login.locked')}</p>}
 
             <button disabled={isSubmitting} type="submit">
-              Log in
+              {t('login.submit')}
             </button>
           </form>
         </section>
 
         <figure className="login-illustration">
-          <img alt="CaseClosed mascot" src={loginDoorTanuki} />
+          <img alt={t('login.mascot.alt')} src={loginDoorTanuki} />
         </figure>
       </div>
     </main>

@@ -931,10 +931,14 @@ contact_id               TEXT NULL REFERENCES contacts(id)
 email_address            TEXT NOT NULL
 normalized_email_address  TEXT NOT NULL UNIQUE
 resolution_status         TEXT NOT NULL DEFAULT 'unresolved'
+status                    TEXT NOT NULL DEFAULT 'active'
+has_inbound_message_history INTEGER NOT NULL DEFAULT 0
 is_primary               INTEGER NOT NULL DEFAULT 0
 source                   TEXT NULL   -- gmail/manual/import
 first_seen_at             TEXT NULL
 last_seen_at              TEXT NULL
+deactivated_at            TEXT NULL
+deleted_at                TEXT NULL
 created_at               TEXT NOT NULL
 updated_at               TEXT NOT NULL
 version                  INTEGER NOT NULL DEFAULT 1
@@ -947,12 +951,29 @@ unresolved
 linked
 ```
 
+### status
+
+```text
+active
+inactive
+deleted
+```
+
 注意:
 
 - `skipped_address` は用意しない。
 - メールアドレス単独Skipという概念自体を持たない。
 - Fromだけを理由にSkipしたい場合は、そのメールアドレスをContactに紐づけ、Contact側を `skipped` にする。
 - `resolution_status = linked` の場合、`contact_id` はNOT NULLであるべき。
+- `contact_email_addresses` は正規化メールアドレスごとのcanonical rowとして扱う。
+- `status = active` は現在そのContactで使用中のメールアドレスである。
+- `status = inactive` は現在は送信先として使わないが、過去メール・新規受信メールのFrom Contact解決には使うメールアドレスである。
+- `has_inbound_message_history = 1` は、このメールアドレスがFromとしてDB内メールに一度でも登場したことを示す。
+- Gmail Sync等でFromアドレスを観測した時点で `has_inbound_message_history = 1` にする。削除時にメールテーブルを全走査しない。
+- `has_inbound_message_history = 1` の場合、通常操作では物理削除せず `status = inactive`, `is_primary = 0`, `deactivated_at = now` とする。
+- `has_inbound_message_history = 0` の場合は、typo等の誤登録として物理削除してよい。
+- `inactive` アドレスが別Contactへ追加・移動された場合は、新規rowを作らず、同じ `normalized_email_address` のrowを再利用して `contact_id` を付け替える。`active` / `inactive` 状態と `deactivated_at` は維持する。
+- `inactive` アドレスは送信先候補、返信先候補、Primary指定の対象にしない。
 
 ## 7.3 contact_registration_suggestions
 
@@ -1007,6 +1028,11 @@ Contact登録画面で以下を事前入力する。
 - skippedにすべき可能性の説明
 
 ただし、LLM候補は正式Contactではない。ユーザーが採用・編集・破棄するまで `contacts` には反映しない。
+
+採用時:
+
+- Contact作成時に `source_suggestion_id` が指定された場合、この候補を採用済みにする。
+- 候補値をそのまま採用した場合は `adopted`、ユーザー編集後に採用した場合は `edited_and_adopted` とする。
 
 ## 7.4 contact_tags
 

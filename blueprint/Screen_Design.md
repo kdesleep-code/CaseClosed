@@ -79,6 +79,39 @@ CaseClosed のUIは、以下を目的とする。
 
 全画面または主要画面に共通して以下を持つ。
 
+### 表示文言と言語パッチ
+
+フロントエンドの表示文言は、Reactコンポーネント内に直接固定せず、文言キーを通して取得する。  
+初期状態では英語文言をデフォルト値として持ってよいが、Publicリポジトリ上でも利用者が言語・表現を差し替えられるよう、外部パッチを読み込める構造にする。
+
+現時点の実装では、以下から言語パッチを適用できる。
+
+- `window.CASECLOSED_LANGUAGE_PATCH`
+- HTML内の `id="caseclosed-language-patch"` を持つJSON script要素
+- `localStorage["caseclosed.languagePatch"]`
+
+パッチ例は `frontend/public/language-patch.example.json` に置く。  
+Settings画面に言語切替UIを持つ必要はないが、将来追加できるよう文言キーの追加を基本とする。
+
+### Design Set / Theme Preset
+
+フロントエンドの配色・カード背景・影・角丸・密度など、全体の見た目に関わる値はCSS custom propertiesを通して管理する。  
+Reactコンポーネントや画面固有CSSに直接テーマ依存値を散らさず、`data-theme` によるDesign Set切替を可能にする。
+
+現時点の実装では、以下からテーマを指定できる。
+
+- `window.CASECLOSED_THEME`
+- `localStorage["caseclosed.theme"]`
+
+未指定または不正な値の場合は `warm-default` を使う。  
+Settings画面にテーマ切替UIを持つ必要はないが、将来追加できるよう、テーマIDとCSS変数による切替構造を維持する。
+
+初期テーマ:
+
+- `warm-default`: 現行の暖色・マスコット寄りテーマ
+- `compact-work`: 情報密度を少し上げた作業向けテーマ
+- `high-contrast`: 視認性重視テーマ
+
 ### グローバルナビゲーション
 
 - Top
@@ -1359,11 +1392,16 @@ POST /contacts/merge
 - Contact Context
 - Merge履歴
 
+関連Caseは、Contact側では参照表示を主とする。
+「この人が現在どの案件に関係しているか」を確認するために、Case名、状態、最終更新日、関係種別が分かる一覧として表示する。
+関連付けの作成・編集は原則としてCase側の画面を主導線にする。
+
 ## 12.2 必須操作
 
 - 編集
 - メールアドレス追加
 - メールアドレス削除
+- メールアドレス移動
 - 優先メールアドレス変更
 - skipped化
 - active化
@@ -1378,6 +1416,15 @@ POST /contacts/merge
 Email Address単独Skipは存在しない。
 
 Fromだけを理由にメールをSkipしたい場合は、Contact自体を skipped にする。
+
+From履歴があるメールアドレスは、削除操作で物理削除されず `inactive` になる。  
+この場合、画面上の操作ラベルは `Remove` ではなく `Deactivate` 等、履歴を残して無効化することが分かる表現にする。
+
+`inactive` のメールアドレスには `Deactivate` ではなく `Activate` を表示し、同じContact内で再有効化できるようにする。
+
+メールアドレスはContact間で移動できる。移動は所属Contactの変更であり、移動後も `active` / `inactive` 状態は維持する。
+
+押せないボタンは待機カーソルにしない。カーソルオーバー時に、未選択・処理中・未実装など押せない理由が分かる説明を表示する。
 
 ---
 

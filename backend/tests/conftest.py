@@ -38,6 +38,15 @@ PHASE_2_TABLES = {
     "write_requests",
 }
 
+PHASE_3_TABLES = {
+    "contact_context_versions",
+    "contact_email_addresses",
+    "contact_merge_history",
+    "contact_registration_suggestions",
+    "contact_tags",
+    "contacts",
+}
+
 
 @pytest.fixture
 def database_path(tmp_path: Path) -> Path:
@@ -164,6 +173,36 @@ def insert_phase_2_external_operation(
                 1 if status == "unknown" else 0,
                 "2026-05-22T10:00:00+09:00",
                 "2026-05-22T10:00:00+09:00",
+            ),
+        )
+        connection.commit()
+
+
+def insert_unresolved_contact_email(
+    database_path: Path,
+    *,
+    email_address: str,
+    email_address_id: str = "email_unresolved",
+) -> None:
+    normalized_email_address = email_address.strip().lower()
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO contact_email_addresses (
+                id, contact_id, email_address, normalized_email_address,
+                resolution_status, status, has_inbound_message_history,
+                is_primary, source, first_seen_at,
+                last_seen_at, created_at, updated_at, version
+            ) VALUES (?, NULL, ?, ?, 'unresolved', 'active', 1, 0, 'gmail', ?, ?, ?, ?, 1)
+            """,
+            (
+                email_address_id,
+                email_address,
+                normalized_email_address,
+                "2026-05-23T09:00:00+09:00",
+                "2026-05-23T10:00:00+09:00",
+                "2026-05-23T09:00:00+09:00",
+                "2026-05-23T10:00:00+09:00",
             ),
         )
         connection.commit()
