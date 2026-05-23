@@ -60,3 +60,10 @@ def test_pending_job_is_not_retried(client, database_path: Path) -> None:
 
     assert response.status_code == 409
     assert response.json()["ok"] is False
+
+
+def test_run_next_job_reports_when_no_job_exists(client) -> None:
+    response = client.post(f"{JOBS_URL}/run-next")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["job_id"] is None

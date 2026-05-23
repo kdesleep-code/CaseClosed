@@ -700,9 +700,21 @@ contact_email_addresses.has_inbound_message_history = 1
 mail_importance_classification job
 ```
 
+Phase 4初期はGmail Sync Worker本体に入る前に、外部通信しない疑似メール投入APIで同じ保存・Pending判定・Job作成の流れを固定する。Fromが `mailing_list` かつ `sender_resolution_mode = reply_to` の場合は、`Reply-To` を実送信者候補として再解決し、未登録ならPendingで止める。
+
+Pending Contactが解決された場合、`contact_resolution_followup` Jobが `mail_auto_state.pending_reason` と `pending_from_address_id` を解除する。解決先Contactがskippedでなければ、該当メールに対して `mail_importance_classification` Jobを作成する。skippedの場合は `effective_importance = skip` にして後続自動処理へ進めない。
+
 ## 6.2 LLM Worker
 
 ### 共通責務
+
+Phase 4初期の `mail_importance_classification` は、外部LLM APIへ接続しない deterministic mock provider で実装する。目的は、Job実行、`mail_auto_state.suggested_importance` 更新、`effective_importance` 確定、メール一覧への反映という保存・状態遷移の流れを先に固定することである。
+
+mock providerは件名・snippet・本文の短い規則で `high` / `middle` / `low` を返す。Gmailスター由来の `external_importance = high` がある場合は、mock判定がlowでも `effective_importance = high` を維持する。
+
+mock providerであっても `llm_runs` を作成し、実際に使った `provider_name = mock` と `model_name` を保存する。`mail_auto_state.llm_run_id` から最新の重要度判定runを追跡できるようにする。ただし、メール本文全文は `llm_runs.input_source_json` には保存せず、message id、Gmail message id、件名などの最小参照情報だけを保存する。
+
+`contact_registration_prefill` も同じ `LlmProvider` 境界を使う。初期mock providerはメールアドレスから決定的な候補を作るが、`contact_registration_suggestions.llm_run_id` と `llm_runs` を保存し、後からOpenAI providerやオンプレミスproviderへ差し替えても保存形式を変えない。ここでもメール本文全文は `llm_runs.input_source_json` に保存しない。
 
 - prompt_version取得
 - output_schema_json取得

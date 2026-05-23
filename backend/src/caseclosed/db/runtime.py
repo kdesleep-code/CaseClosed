@@ -72,15 +72,36 @@ def bootstrap_database() -> None:
 
 def ensure_runtime_schema() -> None:
     inspector = inspect(engine)
-    if "contacts" not in inspector.get_table_names():
+    table_names = inspector.get_table_names()
+    if "contacts" not in table_names:
         return
 
     contact_columns = {column["name"] for column in inspector.get_columns("contacts")}
-    if "avatar_url" in contact_columns:
-        return
+    mail_auto_state_columns = (
+        {column["name"] for column in inspector.get_columns("mail_auto_state")}
+        if "mail_auto_state" in table_names
+        else set()
+    )
+    mail_user_state_columns = (
+        {column["name"] for column in inspector.get_columns("mail_user_state")}
+        if "mail_user_state" in table_names
+        else set()
+    )
 
     with engine.begin() as connection:
-        connection.execute(text("ALTER TABLE contacts ADD COLUMN avatar_url TEXT"))
+        if "avatar_url" not in contact_columns:
+            connection.execute(text("ALTER TABLE contacts ADD COLUMN avatar_url TEXT"))
+        if "mail_auto_state" in table_names and "llm_run_id" not in mail_auto_state_columns:
+            connection.execute(text("ALTER TABLE mail_auto_state ADD COLUMN llm_run_id TEXT"))
+        if "mail_user_state" in table_names and "read_status" not in mail_user_state_columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE mail_user_state "
+                    "ADD COLUMN read_status TEXT NOT NULL DEFAULT 'unread'"
+                )
+            )
+        if "mail_user_state" in table_names and "read_at" not in mail_user_state_columns:
+            connection.execute(text("ALTER TABLE mail_user_state ADD COLUMN read_at TEXT"))
 
 
 def seed_settings(session: Session) -> None:

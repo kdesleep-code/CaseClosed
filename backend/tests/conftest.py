@@ -47,6 +47,13 @@ PHASE_3_TABLES = {
     "contacts",
 }
 
+PHASE_4_TABLES = {
+    "gmail_messages",
+    "gmail_threads",
+    "mail_auto_state",
+    "mail_user_state",
+}
+
 
 @pytest.fixture
 def database_path(tmp_path: Path) -> Path:

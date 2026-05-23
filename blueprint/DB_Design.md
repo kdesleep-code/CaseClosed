@@ -694,6 +694,14 @@ Phase 4 v1のPending判定は従来どおり `from_address` を対象とする�
 
 `list_id` が存在する場合、そのメールはメーリングリスト由来である可能性が高い。Phase 4 v1では `list_id` の存在だけでPendingを回避しないが、後続PhaseでContact/Tag/Case推定の補助情報として使う。
 
+Phase 4初期の実装固定では、Gmail API接続前に疑似メール投入APIで以下を先に検証する。
+
+- `gmail_messages.gmail_message_id` と `message_id_header` を別物として保存する。
+- `from_address` / `sender_address` / `reply_to_address` / `to_addresses_json` / `cc_addresses_json` / `bcc_addresses_json` / `list_id` を保存する。
+- Contact未登録Fromは `contact_email_addresses` に unresolved として作成し、`has_inbound_message_history = 1` にする。
+- Fromが `mailing_list` Contactかつ `sender_resolution_mode = reply_to` の場合、`reply_to_address` を実送信者候補としてContact解決し、未登録ならPendingにする。
+- Pendingでない既知Contact由来のメールだけ、後続の `mail_importance_classification` Jobへ進める。
+
 ## 6.3 gmail_attachments_meta
 
 Gmail添付メタ情報。
@@ -730,6 +738,8 @@ user_importance              TEXT NULL
 process_status               TEXT NOT NULL DEFAULT 'unprocessed'
 processed_at                 TEXT NULL
 processed_reason             TEXT NULL
+read_status                  TEXT NOT NULL DEFAULT 'unread'
+read_at                      TEXT NULL
 primary_case_id              TEXT NULL REFERENCES cases(id)
 manual_case_set_at            TEXT NULL
 user_note                    TEXT NULL
@@ -957,6 +967,8 @@ created_at           TEXT NOT NULL
 updated_at           TEXT NOT NULL
 version              INTEGER NOT NULL DEFAULT 1
 ```
+
+実装上の初期名として `suggested_importance` / `llm_run_id` を使う場合も、意味は `llm_importance` / `llm_importance_run_id` と同じである。後続で命名をそろえる場合はマイグレーションで吸収する。
 
 ### status
 

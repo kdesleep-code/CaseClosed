@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from urllib.parse import unquote
 from uuid import uuid4
 
@@ -15,7 +16,9 @@ from caseclosed.db.models import Contact
 from caseclosed.db.models import ContactEmailAddress
 from caseclosed.db.models import ContactRegistrationSuggestion
 from caseclosed.db.models import ContactTag
+from caseclosed.db.models import GmailMessage
 from caseclosed.db.models import Job
+from caseclosed.db.models import MailAutoState
 from caseclosed.db.runtime import get_session
 from caseclosed.db.runtime import jst_iso
 
@@ -62,6 +65,10 @@ class PrefillRequest(BaseModel):
 
 
 class ContactEmailAddressMove(BaseModel):
+    target_contact_id: str
+
+
+class ContactMerge(BaseModel):
     target_contact_id: str
 
 
@@ -116,6 +123,68 @@ def validate_contact_tags(*, kind: str, tags: list[str]) -> None:
             "VALIDATION_ERROR",
             "Mailing list contacts do not use contact tags.",
         )
+
+
+def display_name_from_email_address(email_address: str) -> str:
+    local_part = email_address.split("@", maxsplit=1)[0]
+    words = [word for word in re.split(r"[._+\-]+", local_part) if word]
+    if not words:
+        return email_address
+    return " ".join(word.capitalize() for word in words)
+
+
+def inferred_pending_display_name(
+    email_address: ContactEmailAddress,
+    latest_message: GmailMessage | None,
+    latest_auto_state: MailAutoState | None,
+) -> str:
+    if (
+        latest_auto_state is None
+        or latest_auto_state.pending_reason != "unresolved_reply_to_contact"
+    ) and latest_message is not None and latest_message.from_name is not None:
+        from_name = latest_message.from_name.strip()
+        if from_name != "":
+            return from_name
+    return display_name_from_email_address(email_address.email_address)
+
+
+def inferred_pending_kind(
+    latest_message: GmailMessage | None,
+    latest_auto_state: MailAutoState | None,
+) -> str:
+    if (
+        latest_auto_state is not None
+        and latest_auto_state.pending_reason == "unresolved_reply_to_contact"
+    ):
+        return "person"
+    if (
+        latest_message is not None
+        and latest_message.reply_to_address is not None
+        and latest_message.reply_to_address.strip().lower()
+        != latest_message.from_address.strip().lower()
+    ):
+        return "mailing_list"
+    return "person"
+
+
+def inferred_pending_sender_resolution(
+    latest_message: GmailMessage | None,
+    latest_auto_state: MailAutoState | None,
+) -> str:
+    return (
+        "reply_to"
+        if inferred_pending_kind(latest_message, latest_auto_state) == "mailing_list"
+        else "self"
+    )
+
+
+def body_preview(message: GmailMessage | None) -> str | None:
+    if message is None:
+        return None
+    text_value = message.snippet or message.body_text
+    if text_value is None:
+        return None
+    return " ".join(text_value.split())[:280]
 
 
 def normalize_optional_text(value: str | None) -> str | None:
@@ -208,6 +277,33 @@ def contact_data(contact: Contact, session: DatabaseSession) -> dict[str, object
         "updated_at": contact.updated_at,
         "version": contact.version,
     }
+
+
+def unique_contact_display_name(
+    session: DatabaseSession,
+    desired_display_name: str,
+    *,
+    exclude_contact_id: str | None = None,
+) -> str:
+    existing_names = set(
+        session.scalars(
+            select(Contact.display_name).where(Contact.deleted_at.is_(None))
+        ).all()
+    )
+    if exclude_contact_id is not None:
+        current_name = session.scalar(
+            select(Contact.display_name).where(Contact.id == exclude_contact_id)
+        )
+        if current_name is not None:
+            existing_names.discard(current_name)
+
+    if desired_display_name not in existing_names:
+        return desired_display_name
+
+    suffix = 2
+    while f"{desired_display_name}_{suffix}" in existing_names:
+        suffix += 1
+    return f"{desired_display_name}_{suffix}"
 
 
 def set_contact_tags(
@@ -459,6 +555,14 @@ def list_unresolved_from_addresses(
 
     items = []
     for email_address in email_addresses:
+        pending_rows = session.execute(
+            select(GmailMessage, MailAutoState)
+            .join(MailAutoState, MailAutoState.message_id == GmailMessage.id)
+            .where(MailAutoState.pending_from_address_id == email_address.id)
+            .order_by(GmailMessage.received_at.desc(), GmailMessage.id.desc())
+        ).all()
+        latest_message = pending_rows[0][0] if len(pending_rows) > 0 else None
+        latest_auto_state = pending_rows[0][1] if len(pending_rows) > 0 else None
         suggestion = session.scalar(
             select(ContactRegistrationSuggestion)
             .where(
@@ -474,9 +578,29 @@ def list_unresolved_from_addresses(
                 "email_address_id": email_address.id,
                 "email_address": email_address.email_address,
                 "normalized_email_address": email_address.normalized_email_address,
-                "message_count": 0,
-                "latest_message_id": None,
-                "latest_subject": None,
+                "message_count": len(pending_rows),
+                "latest_message_id": latest_message.id if latest_message is not None else None,
+                "latest_subject": latest_message.subject if latest_message is not None else None,
+                "latest_from_name": latest_message.from_name if latest_message is not None else None,
+                "latest_from_address": latest_message.from_address if latest_message is not None else None,
+                "latest_reply_to_address": (
+                    latest_message.reply_to_address if latest_message is not None else None
+                ),
+                "latest_received_at": latest_message.received_at if latest_message is not None else None,
+                "latest_body_preview": body_preview(latest_message),
+                "inferred_display_name": inferred_pending_display_name(
+                    email_address,
+                    latest_message,
+                    latest_auto_state,
+                ),
+                "inferred_kind": inferred_pending_kind(
+                    latest_message,
+                    latest_auto_state,
+                ),
+                "inferred_sender_resolution": inferred_pending_sender_resolution(
+                    latest_message,
+                    latest_auto_state,
+                ),
                 "suggestion_status": "succeeded" if suggestion is not None else "not_started",
                 "suggestion": None
                 if suggestion is None
@@ -564,6 +688,7 @@ def create_contact(
     display_name = payload.display_name.strip()
     if display_name == "":
         raise json_error(422, "VALIDATION_ERROR", "Display name is required.")
+    display_name = unique_contact_display_name(session, display_name)
 
     now = jst_iso()
     contact = Contact(
@@ -642,7 +767,11 @@ def update_contact(
         display_name = payload.display_name.strip()
         if display_name == "":
             raise json_error(422, "VALIDATION_ERROR", "Display name is required.")
-        contact.display_name = display_name
+        contact.display_name = unique_contact_display_name(
+            session,
+            display_name,
+            exclude_contact_id=contact.id,
+        )
     if payload.avatar_url is not None:
         contact.avatar_url = payload.avatar_url.strip() or None
     if payload.memo is not None:
@@ -841,6 +970,75 @@ def move_contact_email_address(
         "ok": True,
         "data": {
             "source_contact": contact_data(source_contact, session),
+            "target_contact": contact_data(target_contact, session),
+        },
+    }
+
+
+@router.post("/{contact_id}/merge")
+def merge_contact(
+    contact_id: str,
+    payload: ContactMerge,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    source_contact = get_contact_or_404(session, contact_id)
+    target_contact = get_contact_or_404(session, payload.target_contact_id)
+    if source_contact.id == target_contact.id:
+        raise json_error(409, "CONFLICT", "Target contact must be different.")
+    if (
+        source_contact.kind != "person"
+        or target_contact.kind != "person"
+        or source_contact.status != "active"
+        or target_contact.status != "active"
+    ):
+        raise json_error(
+            409,
+            "CONFLICT",
+            "Only active person contacts can be merged.",
+        )
+
+    now = jst_iso()
+    older_contact, newer_contact = (
+        (source_contact, target_contact)
+        if source_contact.created_at <= target_contact.created_at
+        else (target_contact, source_contact)
+    )
+    target_contact.memo = (
+        older_contact.memo
+        if normalize_optional_text(older_contact.memo) is not None
+        else newer_contact.memo
+    )
+    target_has_active_primary = any(
+        email_address.is_primary
+        for email_address in active_contact_email_addresses(session, target_contact.id)
+    )
+    for email_address in contact_email_addresses(session, source_contact.id):
+        email_address.contact_id = target_contact.id
+        email_address.resolution_status = "linked"
+        if email_address.status == "active" and not target_has_active_primary:
+            email_address.is_primary = 1
+            target_has_active_primary = True
+        else:
+            email_address.is_primary = 0
+        email_address.updated_at = now
+        email_address.version += 1
+
+    merged_tags = sorted(
+        set(contact_tags(session, source_contact.id))
+        | set(contact_tags(session, target_contact.id))
+    )
+    set_contact_tags(session, target_contact.id, merged_tags, now)
+    set_contact_tags(session, source_contact.id, [], now)
+    source_contact.deleted_at = now
+    source_contact.version += 1
+    source_contact.updated_at = now
+    target_contact.version += 1
+    target_contact.updated_at = now
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "deleted_contact_id": source_contact.id,
             "target_contact": contact_data(target_contact, session),
         },
     }

@@ -435,9 +435,29 @@ API:
 - Gmailスター読み込み時点のexternal_importance
 - Gmail message ID / RFC Message-ID / thread IDを区別して保存
 - From / Sender / Reply-To / List-Id等の住所系ヘッダ保存
+- 初期固定では外部Gmail APIへ接続せず、`POST /api/v1/mails/mock-ingest` で疑似メールを投入してDB保存・Pending判定・後続Job作成を検証する。
+- Fromが `mailing_list` かつ `sender_resolution_mode = reply_to` の場合は、疑似メールでも `Reply-To` を実送信者候補として再解決する。
+- Pending Contactが解決されたら `contact_resolution_followup` Jobで該当メールの `pending_reason` / `pending_from_address_id` を解除し、通常の重要度判定Jobへ戻す。
+- `mail_importance_classification` は初期段階では外部LLMへ接続せず、deterministic mock providerで `high` / `middle` / `low` を返してDB更新の流れを固定する。
+- LLM処理は `LlmProvider` 相当の境界を通し、mock providerでも `llm_runs` に provider/model/output と最小の input source を保存する。メール本文全文は `llm_runs.input_source_json` に保存しない。
+- `contact_registration_prefill` も同じprovider境界を通し、mock providerで候補を作成しつつ `contact_registration_suggestions.llm_run_id` と `llm_runs` を残す。
+- `GET /api/v1/mails` は初期段階から `tab` / `processed` / `importance` / `contact_status` / `read` / `date_from` / `date_to` / `q` / `limit` / `cursor` の一覧フィルタを持つ。`q` は空白区切りAND検索とする。
+- Mail UIは受信日ごとの日別表示、`pending` / `unprocessed` / `processed` / `skip` タブ、アプリ内 `read_status`、検索時のフラット一覧を前提にする。検索結果の優先度順並べ替えは、APIが返す `importance_rank` を使って表示中N件の範囲で行う。
+- `GET /api/v1/mails/{message_id}` は、本文、主要ヘッダ、thread messages、user/auto state、available actionsを返す。
+- `POST /api/v1/mails/{message_id}/importance` / `process` / `unprocess` は、外部副作用なしでDB状態更新のみを先に固定する。
 
 ### 完了条件
 
+- 外部サービスなしの疑似メール投入で、メール一次情報と `mail_user_state` / `mail_auto_state` を保存できる
+- Contact未登録FromまたはML Reply-ToはPendingになり、既知Contactは重要度判定Jobに進む
+- Pending Contact解決後、止まっていたメールが重要度判定Jobへ進む
+- mock重要度判定Jobが `mail_auto_state.suggested_importance` / `effective_importance` を更新できる
+- mock重要度判定Jobが `llm_runs` を作成し、`mail_auto_state.llm_run_id` から追跡できる
+- Contact Prefill Jobが `llm_runs` を作成し、suggestionから追跡できる
+- Pending ContactをPrefill候補から作成する場合、`source_suggestion_id` を渡して候補を `adopted` / `edited_and_adopted` に更新し、`contact_resolution_followup` から `mail_importance_classification` まで詰まらず進む
+- メール詳細APIで本文・ヘッダ・状態・利用可能操作を取得できる
+- メール一覧APIで重要度、処理状態、検索語による基本フィルタが動く
+- メール重要度変更、処理済み化、未処理戻しがDB上で動く
 - Gmailからメールを取得できる
 - 本文をDBに保存できる
 - Contact未登録FromはPendingになる

@@ -9,6 +9,7 @@ from caseclosed.auth import json_error
 from caseclosed.db.models import Job
 from caseclosed.db.runtime import get_session
 from caseclosed.db.runtime import jst_iso
+from caseclosed.services.orchestrator import Orchestrator
 
 router = APIRouter(prefix="/api/v1/jobs", tags=["jobs"])
 
@@ -39,6 +40,12 @@ def list_jobs(
 
     jobs = session.scalars(statement).all()
     return {"ok": True, "data": {"items": [job_data(job) for job in jobs]}}
+
+
+@router.post("/run-next")
+def run_next_job() -> dict[str, object]:
+    job_id = Orchestrator(worker_id="worker-manual-api").run_once()
+    return {"ok": True, "data": {"job_id": job_id}}
 
 
 @router.post("/{job_id}/retry")

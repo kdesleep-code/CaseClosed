@@ -640,6 +640,55 @@ DELETE /api/v1/cases/{case_id}/mails/{message_id}
 
 # 7. Mail / Gmail API
 
+## 7.0 疑似メール投入API
+
+Phase 4初期は外部Gmail APIに接続せず、疑似メール投入APIでDB保存・Pending判定・後続Job作成を固定する。
+
+```http
+POST /api/v1/mails/mock-ingest
+```
+
+Request:
+
+```json
+{
+  "gmail_message_id": "gmail_...",
+  "gmail_thread_id": "thread_...",
+  "message_id_header": "<...>",
+  "subject": "...",
+  "from_address": "...",
+  "sender_address": "...",
+  "reply_to_address": "...",
+  "to_addresses": ["..."],
+  "cc_addresses": ["..."],
+  "bcc_addresses": ["..."],
+  "list_id": "...",
+  "received_at": "2026-05-23T10:00:00+09:00",
+  "body_text": "...",
+  "external_starred": false
+}
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "message_id": "mail_...",
+    "gmail_message_id": "gmail_...",
+    "pending": true,
+    "pending_address": "unknown@example.com",
+    "pending_reason": "unresolved_from_contact",
+    "queued_job_id": null
+  }
+}
+```
+
+このAPIは開発・テスト用の固定点であり、外部サービス副作用を持たない。
+
+疑似メールで作られたPending Contactを通常のContact登録導線で解決した場合、`contact_resolution_followup` Jobにより該当メールのPending状態を解除し、skippedでなければ重要度判定Jobへ戻す。
+
 ## 7.1 メール一覧
 
 ```http
@@ -650,16 +699,32 @@ Query:
 
 ```text
 folder=inbox|sent|all
+tab=all|pending|unprocessed|processed|skip
 processed=0|1|all
 importance=Pinned|High|Middle|Low|Skip|Pending|all
 case_id=...
 contact_status=pending|resolved|all
+read=all|read|unread
 q=...
 date_from=...
 date_to=...
 limit=50
 cursor=...
 ```
+
+Phase 4 initial implementation scope:
+
+- `tab`: `all` / `pending` / `unprocessed` / `processed` / `skip`. This maps directly to the main mail UI tabs.
+- `processed`: `all` / `0` / `1` / `unprocessed` / `processed`
+- `importance`: `all` / `Pinned` / `High` / `Middle` / `Low` / `Skip` / `Pending` / `Unclassified`
+- `contact_status`: `all` / `pending` / `resolved`
+- `read`: `all` / `read` / `unread`. This is CaseClosed app read state, not necessarily Gmail read state.
+- `q`: whitespace-separated AND search. Each token is matched against subject, From, From name, Sender, Reply-To, address JSON fields, Message-ID, List-ID, snippet, and body text.
+- `date_from` / `date_to`: inclusive JST ISO string range over `received_at`.
+- `limit`: 1-100. Values above 100 are clamped to 100.
+- `cursor`: opaque cursor returned as `next_cursor`; ordering is `received_at DESC, id ASC`.
+- List items include `received_date`, `read_status`, `read_at`, and `importance_rank` so the frontend can group by received day and sort the visible page by priority without changing cursor semantics.
+- For the daily mail UI, the frontend should use `tab` and date range filters for date masks. For search UI, it should use `q` with `limit/cursor`; sorting such as "newest first" vs "priority first" is applied to the currently visible N results.
 
 Response item:
 
@@ -672,8 +737,11 @@ Response item:
   "from_address": "...",
   "from_contact_id": null,
   "received_at": "...",
+  "received_date": "2026-05-23",
   "processed_status": "unprocessed",
+  "read_status": "unread",
   "effective_importance": "Pending",
+  "importance_rank": 5,
   "initial_is_starred": false,
   "external_importance": null,
   "summary_status": "not_started",
@@ -682,6 +750,8 @@ Response item:
   "has_attachments": true
 }
 ```
+
+Phase 4初期では、本文、主要ヘッダ、同一スレッド内メール、`mail_user_state`、`mail_auto_state`、空のsummary/case/attachment/draft配列、利用可能操作を返すところまでを固定する。
 
 監査ログ:
 
@@ -757,6 +827,8 @@ Request:
 - `Skip` はProcessedとは別扱い。
 - 手動でHigh/Middleへ変更した場合はCase判定Jobを発火する。
 
+Phase 4初期の外部接続前実装では、Gmailスター付与などの外部副作用はまだ作らず、`mail_user_state.user_importance` と `mail_auto_state.effective_importance` の更新だけを行う。
+
 ## 7.5 メール処理済み化
 
 ```http
@@ -776,12 +848,27 @@ Request:
 
 - `processed_status = processed` を設定する。
 - 要約閲覧、本文閲覧、返信草案作成、Caseへの追加、Contact確認だけでは処理済みにしない。
+- Phase 4初期では `mail_user_state.processed_status` / `processed_at` の更新を固定する。Case/Task/Event側の副作用は後続Phaseで追加する。
 
 ## 7.6 メール未処理へ戻す
 
 ```http
 POST /api/v1/mails/{message_id}/unprocess
 ```
+
+## 7.6.1 Mail read state
+
+```http
+POST /api/v1/mails/{message_id}/read
+POST /api/v1/mails/{message_id}/unread
+```
+
+Phase 4 initial implementation:
+
+- Newly ingested mail starts as `read_status = unread`.
+- `read` sets `read_status = read` and `read_at = now(JST)`.
+- `unread` sets `read_status = unread` and clears `read_at`.
+- This state is an app-side visual state for the mail UI. It is separate from Gmail read/unread labels and from `processed_status`.
 
 ## 7.7 メールから新規Case候補作成
 
@@ -929,6 +1016,14 @@ Response item:
   "message_count": 3,
   "latest_message_id": "mail_...",
   "latest_subject": "...",
+  "latest_from_name": "...",
+  "latest_from_address": "...",
+  "latest_reply_to_address": "...",
+  "latest_received_at": "2026-05-24T10:00:00+09:00",
+  "latest_body_preview": "...",
+  "inferred_display_name": "...",
+  "inferred_kind": "person|mailing_list",
+  "inferred_sender_resolution": "self|reply_to",
   "suggestion_status": "not_started|running|succeeded|failed",
   "suggestion": {}
 }
@@ -938,6 +1033,10 @@ Response item:
 
 - Fromに出現したContact未登録メールアドレスを表示する。
 - To/Cc/Bccの未知アドレスはPending対象ではない。
+- `inferred_display_name` はFrom表示名があればそれを使い、なければメールアドレスのlocal partから生成する。
+- 原則としてFromとReply-Toが異なる場合は `inferred_kind = mailing_list` / `inferred_sender_resolution = reply_to` とする。
+- ただし、既知Mailing Listの `reply_to` 解決によりReply-To側がPendingになった場合、そのPending対象は実送信者候補なので `person` / `self` と推定する。
+- Pending Contact UIではActive/Skipを明示選択させる。Active選択時にContact Prefill Jobを補助的にキュー投入してよいが、LLM Prefill完了はPending解決の必須条件ではない。
 
 ## 8.4 Contact登録画面の自動Fill生成
 
@@ -1002,7 +1101,9 @@ Request:
 - Contact作成後、該当FromのPendingメールについて重要度判定Jobを再開する。
 - `status = skipped` で作成された場合、該当メールは重要度判定前にSkip扱いにする。
 - `source_suggestion_id` が指定された場合、採用元の `contact_registration_suggestions.status` を `adopted` または `edited_and_adopted` に更新する。
+- Pending Contact画面からPrefill候補を採用してContactを作成する場合は、UI/APIとも `source_suggestion_id` を渡す。これにより候補採用履歴、`contact_resolution_followup`、`mail_importance_classification` までの導線を1本の状態遷移として追跡できる。
 - `kind` 未指定時は `person` とする。
+- 同一display_nameのContactを新規作成または更新しようとした場合、保存時に `_2`, `_3` のようなsuffixを付けて一意化する。
 - `sender_resolution_mode` 未指定時は `self` とする。
 - `person` は `sender_resolution_mode = self` のみ許可する。
 - `mailing_list` は `sender_resolution_mode = self|reply_to` を許可する。
@@ -1012,6 +1113,31 @@ Request:
 - `mailing_list` はContact tagsを持たない。`tags` は空配列にする。
 - `mailing-list` は予約タグとして使用不可。
 - `mailing_list_recipient_expression` は将来の宛先置き換え用タグ式であり、Phase 3では保存・表示のみ行う。
+
+## 8.5.1 Contact統合
+
+```http
+POST /api/v1/contacts/{source_contact_id}/merge
+```
+
+Request:
+
+```json
+{
+  "target_contact_id": "contact_..."
+}
+```
+
+仕様:
+
+- 通常Person Contact同士を統合する。
+- Source ContactのメールアドレスをTarget Contactへ移動する。
+- Source/TargetのContact tagsは和集合にする。
+- Target Contactの表示名、statusはTarget側を維持する。
+- memoは作成日時が古いContactのmemoを採用する。ただし古いContactのmemoが空の場合は新しいContactのmemoを採用する。
+- Source Contactは削除扱いにする。
+- Mailing List Contactは統合対象外とする。
+- Pending Contact解決画面では既存Contact追加を行わず、誤って分かれたContactはこの統合機能で後から解消する。
 
 ## 8.6 Contact更新
 

@@ -29,6 +29,7 @@ function activeSessionResponse() {
 
 afterEach(() => {
   resetLanguagePatch()
+  window.history.pushState({}, '', '/')
 })
 
 describe('Phase 1 login screen', () => {
@@ -118,12 +119,15 @@ describe('Phase 1 login screen', () => {
           },
         }),
       )
+      .mockImplementationOnce(() =>
+        apiResponse(200, { ok: true, data: { items: [] } }),
+      )
 
     render(<App />)
     await user.type(await screen.findByLabelText('Password'), 'phase-one-password')
     await user.click(screen.getByRole('button', { name: 'Log in' }))
 
-    expect(fetchMock).toHaveBeenLastCalledWith(
+    expect(fetchMock).toHaveBeenCalledWith(
       '/api/v1/auth/login',
       expect.objectContaining({
         credentials: 'include',
@@ -202,7 +206,16 @@ describe('Phase 1 login screen', () => {
   it('enters the authenticated shell when an active session exists', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(() => activeSessionResponse()),
+      vi.fn((input: string | URL | Request) => {
+        const path = input.toString()
+        if (path === '/api/v1/auth/session') {
+          return activeSessionResponse()
+        }
+        if (path === '/api/v1/contacts/unresolved-from-addresses') {
+          return apiResponse(200, { ok: true, data: { items: [] } })
+        }
+        throw new Error(`Unexpected request: ${path}`)
+      }),
     )
 
     render(<App />)
@@ -213,6 +226,233 @@ describe('Phase 1 login screen', () => {
     expect(screen.getByLabelText('Current session')).toHaveTextContent(
       'Bootstrap device',
     )
+  })
+
+  it('locks the top page except pending contacts when pending contacts exist', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request) => {
+        const path = input.toString()
+        if (path === '/api/v1/auth/session') {
+          return activeSessionResponse()
+        }
+        if (path === '/api/v1/contacts/unresolved-from-addresses') {
+          return apiResponse(200, {
+            ok: true,
+            data: {
+              items: [
+                {
+                  email_address_id: 'email_pending_top',
+                  email_address: 'pending.top@example.com',
+                  normalized_email_address: 'pending.top@example.com',
+                  message_count: 1,
+                  latest_message_id: 'mail_pending_top',
+                  latest_subject: 'Pending top',
+                  suggestion_status: 'not_started',
+                  suggestion: null,
+                },
+              ],
+            },
+          })
+        }
+        throw new Error(`Unexpected request: ${path}`)
+      }),
+    )
+
+    render(<App />)
+
+    expect(
+      await screen.findByRole('heading', {
+        name: 'Pending contacts are blocking the workspace',
+      }),
+    ).toBeInTheDocument()
+    expect(screen.getByText('Pending contacts: 1')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Mail' })).not.toBeInTheDocument()
+    expect(screen.getByText('Mail')).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.getByRole('link', { name: 'Open Pending Contacts' })).toHaveAttribute(
+      'href',
+      '/contacts/pending',
+    )
+  })
+})
+
+describe('Phase 4 mail screen', () => {
+  it('ingests a mock mail and opens the detail view', async () => {
+    const user = userEvent.setup()
+    const createdMail = {
+      id: 'mail_new',
+      gmail_message_id: 'mock_created',
+      gmail_thread_id: 'mock_thread_created',
+      thread_id: 'thread_db',
+      received_at: '2026-05-23T13:00:00+09:00',
+      received_date: '2026-05-23',
+      subject: 'Review mock mail',
+      from_address: 'review.mock.sender@example.com',
+      from_name: null,
+      reply_to_address: null,
+      list_id: null,
+      processed_status: 'unprocessed',
+      read_status: 'unread',
+      read_at: null,
+      user_importance: null,
+      effective_importance: 'pending',
+      importance_rank: 5,
+      external_importance: null,
+      suggested_importance: null,
+      llm_run_id: null,
+      pending_reason: 'unresolved_from_contact',
+    }
+    let ingested = false
+    const fetchMock = vi.fn((input: string | URL | Request, init?: RequestInit) => {
+      const path = input.toString()
+      if (path === '/api/v1/auth/session') {
+        return activeSessionResponse()
+      }
+      if (path === '/api/v1/contacts/unresolved-from-addresses') {
+        return apiResponse(200, { ok: true, data: { items: [] } })
+      }
+      if (path.startsWith('/api/v1/mails?') && init?.method === undefined) {
+        return apiResponse(200, {
+          ok: true,
+          data: { items: ingested ? [createdMail] : [], next_cursor: null, limit: 25 },
+        })
+      }
+      if (path === '/api/v1/mails/mock-ingest' && init?.method === 'POST') {
+        ingested = true
+        return apiResponse(200, {
+          ok: true,
+          data: {
+            message_id: 'mail_new',
+            pending: true,
+            pending_address: 'review.mock.sender@example.com',
+            queued_job_id: null,
+          },
+        })
+      }
+      if (path === '/api/v1/mails/mail_new') {
+        return apiResponse(200, {
+          ok: true,
+          data: {
+            message: {
+              ...createdMail,
+              thread_id: 'thread_db',
+              from_name: null,
+              sender_address: null,
+              to_addresses: [],
+              cc_addresses: [],
+              bcc_addresses: [],
+              message_id_header: '<mock@test>',
+              in_reply_to_header: null,
+              references_header: null,
+              snippet: null,
+              gmail_link: null,
+              external_starred: false,
+              body_text: 'This is a mock mail for review.',
+              body_html: null,
+              created_at: '2026-05-23T13:00:00+09:00',
+              updated_at: '2026-05-23T13:00:00+09:00',
+              version: 1,
+            },
+            thread_messages: [createdMail],
+            user_state: {
+              user_importance: null,
+              processed_status: 'unprocessed',
+              processed_at: null,
+              read_status: 'unread',
+              read_at: null,
+              version: 1,
+            },
+            auto_state: {
+              external_importance: null,
+              suggested_importance: null,
+              llm_run_id: null,
+              effective_importance: 'pending',
+              pending_reason: 'unresolved_from_contact',
+            },
+            available_actions: ['resolve_contact'],
+          },
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path} ${init?.method ?? 'GET'}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    window.history.pushState({}, '', '/mail')
+
+    render(<App />)
+
+    expect(await screen.findByText('Mock mail intake')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Ingest mock mail' }))
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/mails/mock-ingest',
+      expect.objectContaining({
+        credentials: 'include',
+        method: 'POST',
+      }),
+    )
+    expect(await screen.findByText('Pending contact created for review.mock.sender@example.com.')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /Review mock mail/ }))
+    const detailHeading = screen.getByRole('heading', { name: 'Review mock mail' })
+    const detailCard = detailHeading.closest('article')
+    expect(detailCard).not.toBeNull()
+    expect(
+      within(detailCard as HTMLElement).getByText(
+        'This mail is locked until the sender contact is resolved.',
+      ),
+    ).toBeInTheDocument()
+
+    window.history.pushState({}, '', '/')
+  })
+
+  it('blocks the mail list when pending contacts remain', async () => {
+    const fetchMock = vi.fn((input: string | URL | Request) => {
+      const path = input.toString()
+      if (path === '/api/v1/auth/session') {
+        return activeSessionResponse()
+      }
+      if (path === '/api/v1/contacts/unresolved-from-addresses') {
+        return apiResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                email_address_id: 'email_pending',
+                email_address: 'pending@example.com',
+                normalized_email_address: 'pending@example.com',
+                message_count: 1,
+                latest_message_id: 'mail_pending',
+                latest_subject: 'Pending mail',
+                suggestion_status: 'not_started',
+                suggestion: null,
+              },
+            ],
+          },
+        })
+      }
+      throw new Error(`Unexpected request: ${path}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    window.history.pushState({}, '', '/mail')
+
+    render(<App />)
+
+    expect(
+      await screen.findByRole('heading', {
+        name: 'Pending contacts must be resolved first',
+      }),
+    ).toBeInTheDocument()
+    expect(screen.getByText('Pending contacts: 1')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Open Pending Contacts' })).toHaveAttribute(
+      'href',
+      '/contacts/pending',
+    )
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringMatching(/^\/api\/v1\/mails/),
+      expect.anything(),
+    )
+
+    window.history.pushState({}, '', '/')
   })
 })
 
@@ -745,10 +985,7 @@ describe('Phase 3 contacts screen', () => {
       'placeholder',
       'Search contacts',
     )
-    expect(screen.getAllByRole('link', { name: 'Pending' })[0]).toHaveAttribute(
-      'href',
-      '/contacts/pending',
-    )
+    expect(screen.queryByRole('link', { name: 'Pending' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'New Contact' })).toBeInTheDocument()
     expect(screen.getByLabelText('Sort contacts')).toHaveValue('name')
     expect(screen.queryByRole('option', { name: 'Status' })).not.toBeInTheDocument()
@@ -1442,7 +1679,7 @@ describe('Phase 3 contacts screen', () => {
     expect(screen.queryByText('student.alt@example.com')).not.toBeInTheDocument()
   })
 
-  it('shows unresolved From addresses and can request a prefill job', async () => {
+  it('shows unresolved From addresses and can resolve them', async () => {
     const user = userEvent.setup()
     const fetchMock = vi.fn((input: string | URL | Request, init?: RequestInit) => {
       const path = input.toString()
@@ -1493,6 +1730,14 @@ describe('Phase 3 contacts screen', () => {
                 message_count: 0,
                 latest_message_id: null,
                 latest_subject: null,
+                latest_from_name: null,
+                latest_from_address: null,
+                latest_reply_to_address: null,
+                latest_received_at: null,
+                latest_body_preview: null,
+                inferred_display_name: 'Unknown Sender',
+                inferred_kind: 'person',
+                inferred_sender_resolution: 'self',
                 suggestion_status: 'not_started',
                 suggestion: null,
               },
@@ -1503,6 +1748,14 @@ describe('Phase 3 contacts screen', () => {
                 message_count: 0,
                 latest_message_id: null,
                 latest_subject: null,
+                latest_from_name: null,
+                latest_from_address: null,
+                latest_reply_to_address: null,
+                latest_received_at: null,
+                latest_body_preview: null,
+                inferred_display_name: 'List Sender',
+                inferred_kind: 'mailing_list',
+                inferred_sender_resolution: 'reply_to',
                 suggestion_status: 'not_started',
                 suggestion: null,
               },
@@ -1513,6 +1766,14 @@ describe('Phase 3 contacts screen', () => {
                 message_count: 0,
                 latest_message_id: null,
                 latest_subject: null,
+                latest_from_name: null,
+                latest_from_address: null,
+                latest_reply_to_address: null,
+                latest_received_at: null,
+                latest_body_preview: null,
+                inferred_display_name: 'Existing Sender',
+                inferred_kind: 'person',
+                inferred_sender_resolution: 'self',
                 suggestion_status: 'not_started',
                 suggestion: null,
               },
@@ -1602,24 +1863,8 @@ describe('Phase 3 contacts screen', () => {
     expect(await screen.findByText('unknown.sender@example.com')).toBeInTheDocument()
     expect(await screen.findByText('list.sender@example.com')).toBeInTheDocument()
     expect(await screen.findByText('existing.sender@example.com')).toBeInTheDocument()
-    expect(screen.getAllByText('not_started')).toHaveLength(3)
 
-    await user.click(screen.getAllByRole('button', { name: 'Generate prefill' })[0])
-
-    expect(fetchMock).toHaveBeenCalledWith(
-      '/api/v1/contacts/unresolved-from-addresses/unknown.sender%40example.com/generate-prefill',
-      expect.objectContaining({
-        credentials: 'include',
-        method: 'POST',
-        body: JSON.stringify({ message_id: null }),
-      }),
-    )
-    expect(await screen.findByText('Prefill job queued: job_contact_prefill_test')).toBeInTheDocument()
-
-    await user.type(
-      screen.getByLabelText('Display name for unknown.sender@example.com'),
-      'Unknown Sender',
-    )
+    await user.click(screen.getAllByRole('button', { name: 'active' })[0])
     await user.click(
       screen.getByRole('button', { name: 'Create contact for unknown.sender@example.com' }),
     )
@@ -1639,17 +1884,15 @@ describe('Phase 3 contacts screen', () => {
           email_addresses: [
             { email_address: 'unknown.sender@example.com', is_primary: true },
           ],
+          source_suggestion_id: null,
         }),
       }),
     )
     expect(screen.queryByText('unknown.sender@example.com')).not.toBeInTheDocument()
 
-    await user.type(
-      screen.getByLabelText('Display name for list.sender@example.com'),
-      'List Sender',
-    )
+    await user.click(screen.getAllByRole('button', { name: 'skipped' })[0])
     await user.click(
-      screen.getByRole('button', { name: 'Create skipped contact for list.sender@example.com' }),
+      screen.getByRole('button', { name: 'Create contact for list.sender@example.com' }),
     )
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/v1/contacts',
@@ -1660,39 +1903,18 @@ describe('Phase 3 contacts screen', () => {
           display_name: 'List Sender',
           memo: '',
           status: 'skipped',
-          kind: 'person',
-          sender_resolution_mode: 'self',
+          kind: 'mailing_list',
+          sender_resolution_mode: 'reply_to',
           mailing_list_recipient_expression: null,
           tags: [],
           email_addresses: [
             { email_address: 'list.sender@example.com', is_primary: true },
           ],
+          source_suggestion_id: null,
         }),
       }),
     )
     expect(screen.queryByText('list.sender@example.com')).not.toBeInTheDocument()
-
-    await user.selectOptions(
-      screen.getByLabelText('Existing contact for existing.sender@example.com'),
-      'contact_existing',
-    )
-    await user.click(
-      screen.getByRole('button', {
-        name: 'Add existing.sender@example.com to existing contact',
-      }),
-    )
-    expect(fetchMock).toHaveBeenCalledWith(
-      '/api/v1/contacts/contact_existing/email-addresses',
-      expect.objectContaining({
-        credentials: 'include',
-        method: 'POST',
-        body: JSON.stringify({
-          email_address: 'existing.sender@example.com',
-          is_primary: false,
-        }),
-      }),
-    )
-    expect(screen.queryByText('existing.sender@example.com')).not.toBeInTheDocument()
   })
 
   it('creates a contact from the contact form', async () => {

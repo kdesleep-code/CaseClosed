@@ -35,6 +35,14 @@ export type UnresolvedFromAddress = {
   message_count: number
   latest_message_id: string | null
   latest_subject: string | null
+  latest_from_name: string | null
+  latest_from_address: string | null
+  latest_reply_to_address: string | null
+  latest_received_at: string | null
+  latest_body_preview: string | null
+  inferred_display_name: string
+  inferred_kind: 'person' | 'mailing_list'
+  inferred_sender_resolution: 'self' | 'reply_to'
   suggestion_status: string
   suggestion: {
     id: string
@@ -57,6 +65,7 @@ export type ContactCreatePayload = {
     email_address: string
     is_primary: boolean
   }>
+  source_suggestion_id?: string | null
 }
 
 export type ContactUpdatePayload = {
@@ -81,6 +90,11 @@ type ContactDetailResponse = {
 
 type ContactEmailAddressMoveResponse = {
   source_contact: Contact
+  target_contact: Contact
+}
+
+type ContactMergeResponse = {
+  deleted_contact_id: string
   target_contact: Contact
 }
 
@@ -246,6 +260,20 @@ export function moveContactEmailAddress(
     `/api/v1/contacts/${encodeURIComponent(
       sourceContactId,
     )}/email-addresses/${encodeURIComponent(emailAddressId)}/move`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target_contact_id: targetContactId }),
+    },
+  )
+}
+
+export function mergeContact(
+  sourceContactId: string,
+  targetContactId: string,
+): Promise<ContactMergeResponse> {
+  return request<ContactMergeResponse>(
+    `/api/v1/contacts/${encodeURIComponent(sourceContactId)}/merge`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

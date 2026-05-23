@@ -5,8 +5,14 @@ from datetime import datetime
 from datetime import timedelta
 
 from caseclosed.db.models import Job
+from caseclosed.services.contact_resolution_followup import (
+    handle_contact_resolution_followup,
+)
 from caseclosed.services.contact_registration_prefill import (
     handle_contact_registration_prefill,
+)
+from caseclosed.services.mail_importance_classification import (
+    handle_mail_importance_classification,
 )
 from caseclosed.services.queue import QueueInterface
 from caseclosed.services.queue import SQLiteQueue
@@ -15,6 +21,8 @@ JobHandler = Callable[[Job], dict[str, object]]
 
 DEFAULT_HANDLERS: dict[str, JobHandler] = {
     "contact_registration_prefill": handle_contact_registration_prefill,
+    "contact_resolution_followup": handle_contact_resolution_followup,
+    "mail_importance_classification": handle_mail_importance_classification,
 }
 
 

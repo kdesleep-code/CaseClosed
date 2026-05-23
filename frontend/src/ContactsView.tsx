@@ -6,9 +6,9 @@ import {
   createContact,
   deleteContact,
   deleteContactEmailAddress,
-  generateContactPrefill,
   listContacts,
   listUnresolvedFromAddresses,
+  mergeContact,
   moveContactEmailAddress,
   setContactPrimaryEmailAddress,
   updateContact,
@@ -113,8 +113,10 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
   const [pendingDisplayNames, setPendingDisplayNames] = useState<Record<string, string>>(
     {},
   )
-  const [pendingExistingContactIds, setPendingExistingContactIds] = useState<
-    Record<string, string>
+  const [pendingDecisions, setPendingDecisions] = useState<Record<string, 'active' | 'skipped'>>({})
+  const [pendingKinds, setPendingKinds] = useState<Record<string, ContactKind>>({})
+  const [pendingSenderResolutions, setPendingSenderResolutions] = useState<
+    Record<string, SenderResolutionMode>
   >({})
   const [displayName, setDisplayName] = useState('')
   const [emailAddress, setEmailAddress] = useState('')
@@ -122,6 +124,7 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [isCreateOpen, setIsCreateOpen] = useState(false)
+  const [isMergeToolOpen, setIsMergeToolOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedTagFilter, setSelectedTagFilter] = useState<string | null>(null)
   const [sortMode, setSortMode] = useState<'name' | 'updated'>('name')
@@ -150,8 +153,12 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
   const [moveTargetContactIds, setMoveTargetContactIds] = useState<Record<string, string>>(
     {},
   )
+  const [mergeSourceQuery, setMergeSourceQuery] = useState('')
+  const [mergeDestinationQuery, setMergeDestinationQuery] = useState('')
   const [busyEmailAddress, setBusyEmailAddress] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [hasLoadedPendingContacts, setHasLoadedPendingContacts] = useState(false)
+  const [hasHadPendingContacts, setHasHadPendingContacts] = useState(false)
 
   useEffect(() => {
     let isMounted = true
@@ -172,6 +179,10 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
           ]
           setUnresolvedFromAddresses(pendingItems)
           setContacts(contactItems)
+          setHasLoadedPendingContacts(true)
+          if (pendingItems.length > 0) {
+            setHasHadPendingContacts(true)
+          }
         } else {
           setContacts(items as Contact[])
         }
@@ -186,6 +197,17 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
       isMounted = false
     }
   }, [mode])
+
+  useEffect(() => {
+    if (
+      mode === 'pending' &&
+      hasLoadedPendingContacts &&
+      hasHadPendingContacts &&
+      unresolvedFromAddresses.length === 0
+    ) {
+      window.location.href = '/'
+    }
+  }, [hasHadPendingContacts, hasLoadedPendingContacts, mode, unresolvedFromAddresses.length])
 
   async function handleCreateContact(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -226,37 +248,39 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
     }
   }
 
-  async function handleGeneratePrefill(item: UnresolvedFromAddress) {
-    setError(null)
-    setNotice(null)
-    setBusyEmailAddress(item.email_address)
-
-    try {
-      const response = await generateContactPrefill(
-        item.email_address,
-        item.latest_message_id,
-      )
-      setNotice(t('contacts.prefill.queued', { jobId: response.job_id }))
-      setUnresolvedFromAddresses((currentItems) =>
-        currentItems.map((currentItem) =>
-          currentItem.email_address_id === item.email_address_id
-            ? { ...currentItem, suggestion_status: 'running' }
-            : currentItem,
-        ),
-      )
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setBusyEmailAddress(null)
-    }
-  }
-
   function pendingDisplayName(item: UnresolvedFromAddress) {
     return (
       pendingDisplayNames[item.email_address] ??
       item.suggestion?.suggested_display_name ??
+      item.inferred_display_name ??
       item.email_address.split('@')[0]
     )
+  }
+
+  function pendingDecision(item: UnresolvedFromAddress) {
+    return pendingDecisions[item.email_address] ?? 'active'
+  }
+
+  function pendingKind(item: UnresolvedFromAddress): ContactKind {
+    return pendingKinds[item.email_address] ?? item.inferred_kind ?? 'person'
+  }
+
+  function pendingSenderResolution(item: UnresolvedFromAddress): SenderResolutionMode {
+    return (
+      pendingSenderResolutions[item.email_address] ??
+      item.inferred_sender_resolution ??
+      'self'
+    )
+  }
+
+  function handlePendingDecision(
+    item: UnresolvedFromAddress,
+    decision: 'active' | 'skipped',
+  ) {
+    setPendingDecisions((currentDecisions) => ({
+      ...currentDecisions,
+      [item.email_address]: decision,
+    }))
   }
 
   function removePendingEmailAddress(emailAddress: string) {
@@ -268,10 +292,20 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
       delete nextNames[emailAddress]
       return nextNames
     })
-    setPendingExistingContactIds((currentIds) => {
-      const nextIds = { ...currentIds }
-      delete nextIds[emailAddress]
-      return nextIds
+    setPendingDecisions((currentDecisions) => {
+      const nextDecisions = { ...currentDecisions }
+      delete nextDecisions[emailAddress]
+      return nextDecisions
+    })
+    setPendingKinds((currentKinds) => {
+      const nextKinds = { ...currentKinds }
+      delete nextKinds[emailAddress]
+      return nextKinds
+    })
+    setPendingSenderResolutions((currentResolutions) => {
+      const nextResolutions = { ...currentResolutions }
+      delete nextResolutions[emailAddress]
+      return nextResolutions
     })
   }
 
@@ -302,34 +336,13 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
         email_addresses: [
           { email_address: item.email_address, is_primary: true },
         ],
+        source_suggestion_id: item.suggestion?.id ?? null,
       })
       setContacts((currentContacts) => [...currentContacts, createdContact])
       removePendingEmailAddress(item.email_address)
       setNotice(
         status === 'skipped' ? t('contacts.skippedCreated') : t('contacts.created'),
       )
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setBusyEmailAddress(null)
-    }
-  }
-
-  async function handleAddPendingToExistingContact(item: UnresolvedFromAddress) {
-    const contactId = pendingExistingContactIds[item.email_address]
-    if (contactId === undefined || contactId === '') {
-      return
-    }
-
-    setError(null)
-    setNotice(null)
-    setBusyEmailAddress(item.email_address)
-
-    try {
-      const updatedContact = await addContactEmailAddress(contactId, item.email_address)
-      updateContactInState(updatedContact)
-      removePendingEmailAddress(item.email_address)
-      setNotice(t('contacts.addedToExisting'))
     } catch (requestError) {
       setError(describeError(requestError))
     } finally {
@@ -606,6 +619,54 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
     }
   }
 
+  async function handleMergeContactsTool(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const sourceContact = contacts.find(
+      (contact) =>
+        !isMailingListContact(contact) && contact.display_name === mergeSourceQuery,
+    )
+    const destinationContact = contacts.find(
+      (contact) =>
+        !isMailingListContact(contact) &&
+        contact.display_name === mergeDestinationQuery,
+    )
+    if (
+      sourceContact === undefined ||
+      destinationContact === undefined ||
+      sourceContact.id === destinationContact.id
+    ) {
+      return
+    }
+
+    setError(null)
+    setNotice(null)
+    setIsSubmitting(true)
+
+    try {
+      const response = await mergeContact(
+        sourceContact.id,
+        destinationContact.id,
+      )
+      setContacts((currentContacts) =>
+        currentContacts
+          .filter((contact) => contact.id !== response.deleted_contact_id)
+          .map((contact) =>
+            contact.id === response.target_contact.id ? response.target_contact : contact,
+          ),
+      )
+      openContactDetail(response.target_contact)
+      setIsContactDetailEditing(false)
+      setMergeSourceQuery('')
+      setMergeDestinationQuery('')
+      setIsMergeToolOpen(false)
+      setNotice(t('contacts.detail.merged'))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
   function handleAddCustomTab(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const label = (customTabName.trim() || customTabExpression.trim()).slice(
@@ -652,6 +713,18 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
       contact.id !== selectedContactId &&
       isMailingListContact(contact) === selectedIsMailingList,
   )
+  const mergeToolContacts = contacts.filter(
+    (contact) => !isMailingListContact(contact) && contact.status === 'active',
+  )
+  const mergeDestinationContacts = mergeToolContacts.filter(
+    (contact) => contact.display_name !== mergeSourceQuery,
+  )
+  const mergeSourceContact = mergeToolContacts.find(
+    (contact) => contact.display_name === mergeSourceQuery,
+  )
+  const mergeDestinationContact = mergeToolContacts.find(
+    (contact) => contact.display_name === mergeDestinationQuery,
+  )
   const shouldShowContactDetailFeedback =
     mode === 'list' && selectedContact !== undefined && (error !== null || notice !== null)
   const canDeleteSelectedContact =
@@ -678,7 +751,6 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
         ? 'add'
         : statusFilter
       : activeCustomTabId
-
   const visibleContacts = contacts
     .filter((contact) => {
       if (activeCustomTab !== undefined) {
@@ -747,8 +819,9 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
             </h1>
           </div>
           <nav aria-label={t('contacts.navLabel')}>
-            <a href="/contacts">{t('contacts.heading')}</a>
-            <a href="/contacts/pending">{t('contacts.pending.short')}</a>
+            {mode === 'pending' ? (
+              <a href="/contacts">{t('contacts.heading')}</a>
+            ) : null}
             <a href="/">{t('top.heading')}</a>
           </nav>
         </header>
@@ -761,28 +834,15 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
         )}
 
         {mode === 'pending' ? (
-          <section aria-labelledby="pending-contacts-heading" className="contact-panel">
+          <section aria-labelledby="pending-contacts-heading" className="contact-panel pending-workbench">
             <div className="section-heading">
               <h2 id="pending-contacts-heading">{t('contacts.unresolvedFrom.heading')}</h2>
+              <span>{t('contacts.pending.count', { count: unresolvedFromAddresses.length })}</span>
             </div>
             <div className="contact-list">
               {unresolvedFromAddresses.map((item) => (
-                <article className="contact-row" key={item.email_address_id}>
-                  <div>
-                    <h3>{item.email_address}</h3>
-                    <p>
-                      {item.latest_subject ?? 'メール本文の情報はまだありません。'}
-                    </p>
-                  </div>
-                  <div className="pending-contact-actions">
-                    <span>{item.suggestion_status}</span>
-                    <button
-                      disabled={busyEmailAddress === item.email_address}
-                      onClick={() => handleGeneratePrefill(item)}
-                      type="button"
-                    >
-                      {t('contacts.prefill.generate')}
-                    </button>
+                <article className="pending-resolution-card" key={item.email_address_id}>
+                  <div className="pending-info-panel">
                     <label>
                       <span>{t('contacts.displayName')}</span>
                       <input
@@ -795,97 +855,144 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                             [item.email_address]: event.target.value,
                           }))
                         }
-                        placeholder={pendingDisplayName(item)}
-                        value={pendingDisplayNames[item.email_address] ?? ''}
+                        placeholder={item.inferred_display_name}
+                        value={
+                          pendingDisplayNames[item.email_address] ??
+                          item.inferred_display_name
+                        }
                       />
                     </label>
+                    <div>
+                      <span>{t('contacts.emailAddress')}</span>
+                      <p>{item.email_address}</p>
+                    </div>
+                    <div>
+                      <span>{t('contacts.pending.snippet')}</span>
+                      <p>
+                        {item.latest_body_preview ??
+                          item.latest_subject ??
+                          t('contacts.noMessageBody')}
+                      </p>
+                    </div>
+                    <p>
+                      {item.latest_subject ?? 'メール本文の情報はまだありません。'}
+                    </p>
+                  </div>
+                  <div className="pending-contact-actions">
+                    <div className="pending-mail-meta">
+                      <span>{item.latest_from_name ?? t('common.none')}</span>
+                      <span>{item.latest_reply_to_address ?? t('contacts.pending.noReplyTo')}</span>
+                    </div>
+                    <div className="pending-toggle-field">
+                      <span>{t('contacts.pending.decision')}</span>
                     <div className="pending-contact-buttons">
                       <button
-                        aria-label={t('contacts.createFor', {
-                          email: item.email_address,
-                        })}
+                        aria-pressed={pendingDecision(item) === 'active'}
                         disabled={busyEmailAddress === item.email_address}
-                        onClick={() => handleCreatePendingContact(item, 'active')}
+                        onClick={() => handlePendingDecision(item, 'active')}
                         type="button"
                       >
-                        {t('contacts.create')}
+                        {t('common.active')}
                       </button>
                       <button
-                        aria-label={t('contacts.createSkippedFor', {
-                          email: item.email_address,
-                        })}
+                        aria-pressed={pendingDecision(item) === 'skipped'}
                         disabled={busyEmailAddress === item.email_address}
-                        onClick={() => handleCreatePendingContact(item, 'skipped')}
+                        onClick={() => handlePendingDecision(item, 'skipped')}
                         type="button"
                       >
-                        {t('contacts.createSkipped')}
+                        {t('common.skipped')}
                       </button>
+                    </div>
+                    </div>
+                    <div className="pending-toggle-field">
+                      <span>{t('contacts.kind.label')}</span>
+                    <div className="pending-contact-buttons">
                       <button
-                        aria-label={t('contacts.kind.mailingList')}
-                        disabled={busyEmailAddress === item.email_address}
+                        aria-pressed={pendingKind(item) === 'person'}
                         onClick={() =>
-                          handleCreatePendingContact(
-                            item,
-                            'active',
-                            'mailing_list',
-                            'self',
-                          )
+                          setPendingKinds((currentKinds) => ({
+                            ...currentKinds,
+                            [item.email_address]: 'person',
+                          }))
                         }
                         type="button"
-                        title={t('contacts.senderResolution.self')}
+                      >
+                        {t('contacts.kind.person')}
+                      </button>
+                      <button
+                        aria-pressed={pendingKind(item) === 'mailing_list'}
+                        onClick={() =>
+                          setPendingKinds((currentKinds) => ({
+                            ...currentKinds,
+                            [item.email_address]: 'mailing_list',
+                          }))
+                        }
+                        type="button"
                       >
                         {t('contacts.kind.mailingList')}
                       </button>
-                      <button
-                        disabled={busyEmailAddress === item.email_address}
-                        onClick={() =>
-                          handleCreatePendingContact(
-                            item,
-                            'active',
-                            'mailing_list',
-                            'reply_to',
-                          )
-                        }
-                        type="button"
-                        title={t('contacts.senderResolution.replyTo')}
-                      >
-                        ML Reply-To
-                      </button>
                     </div>
-                    <label>
-                      <span>{t('contacts.existingContact')}</span>
-                      <select
-                        aria-label={t('contacts.existingContactFor', {
-                          email: item.email_address,
-                        })}
-                        onChange={(event) =>
-                          setPendingExistingContactIds((currentIds) => ({
-                            ...currentIds,
-                            [item.email_address]: event.target.value,
+                    </div>
+                    <div
+                      className={`pending-toggle-field${
+                        pendingKind(item) !== 'mailing_list'
+                          ? ' pending-toggle-field-disabled'
+                          : ''
+                      }`}
+                    >
+                      <span>{t('contacts.pending.replyTarget')}</span>
+                    <div className="pending-contact-buttons">
+                      <button
+                        aria-pressed={
+                          pendingKind(item) === 'mailing_list' &&
+                          pendingSenderResolution(item) === 'self'
+                        }
+                        disabled={pendingKind(item) !== 'mailing_list'}
+                        onClick={() =>
+                          setPendingSenderResolutions((currentResolutions) => ({
+                            ...currentResolutions,
+                            [item.email_address]: 'self',
                           }))
                         }
-                        value={pendingExistingContactIds[item.email_address] ?? ''}
+                        type="button"
                       >
-                        <option value="">{t('contacts.selectContact')}</option>
-                        {contacts.map((contact) => (
-                          <option key={contact.id} value={contact.id}>
-                            {contact.display_name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
+                        {t('contacts.pending.sender.self')}
+                      </button>
+                      <button
+                        aria-pressed={
+                          pendingKind(item) === 'mailing_list' &&
+                          pendingSenderResolution(item) === 'reply_to'
+                        }
+                        disabled={pendingKind(item) !== 'mailing_list'}
+                        onClick={() =>
+                          setPendingSenderResolutions((currentResolutions) => ({
+                            ...currentResolutions,
+                            [item.email_address]: 'reply_to',
+                          }))
+                        }
+                        type="button"
+                      >
+                        {t('contacts.pending.sender.replyTo')}
+                      </button>
+                    </div>
+                    </div>
                     <button
-                      aria-label={t('contacts.addToExistingFor', {
+                      aria-label={t('contacts.createFor', {
                         email: item.email_address,
                       })}
-                      disabled={
-                        busyEmailAddress === item.email_address ||
-                        (pendingExistingContactIds[item.email_address] ?? '') === ''
+                      className="pending-create-button"
+                      disabled={busyEmailAddress === item.email_address}
+                      onClick={() =>
+                        handleCreatePendingContact(
+                          item,
+                          pendingDecision(item),
+                          pendingKind(item),
+                          pendingSenderResolution(item),
+                        )
                       }
-                      onClick={() => handleAddPendingToExistingContact(item)}
                       type="button"
                     >
-                      {t('contacts.addToExisting')}
+                      {t('contacts.create')}
                     </button>
                   </div>
                 </article>
@@ -953,12 +1060,24 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                 <div className="contact-tool-actions">
                   <button
                     aria-expanded={isCreateOpen}
-                    onClick={() => setIsCreateOpen((isOpen) => !isOpen)}
+                    onClick={() => {
+                      setIsCreateOpen((isOpen) => !isOpen)
+                      setIsMergeToolOpen(false)
+                    }}
                     type="button"
                   >
                     {t('contacts.new')}
                   </button>
-                  <a href="/contacts/pending">{t('contacts.pending.short')}</a>
+                  <button
+                    aria-expanded={isMergeToolOpen}
+                    onClick={() => {
+                      setIsMergeToolOpen((isOpen) => !isOpen)
+                      setIsCreateOpen(false)
+                    }}
+                    type="button"
+                  >
+                    {t('contacts.merge.tool')}
+                  </button>
                 </div>
               </div>
               {isCreateOpen && (
@@ -996,6 +1115,56 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                   </label>
                   <button disabled={isSubmitting} type="submit">
                     {t('contacts.create')}
+                  </button>
+                </form>
+              )}
+              {isMergeToolOpen && (
+                <form className="contact-merge-tool-form" onSubmit={handleMergeContactsTool}>
+                  <div className="section-heading">
+                    <h2 id="merge-contact-heading">{t('contacts.merge.tool')}</h2>
+                  </div>
+                  <label>
+                    <span>{t('contacts.merge.source')}</span>
+                    <input
+                      aria-label={t('contacts.merge.source')}
+                      list="merge-source-suggestions"
+                      onChange={(event) => setMergeSourceQuery(event.target.value)}
+                      placeholder={t('contacts.merge.select')}
+                      value={mergeSourceQuery}
+                    />
+                    <datalist id="merge-source-suggestions">
+                      {mergeToolContacts.map((contact) => (
+                        <option key={contact.id} value={contact.display_name} />
+                      ))}
+                    </datalist>
+                  </label>
+                  <label>
+                    <span>{t('contacts.merge.target')}</span>
+                    <input
+                      aria-label={t('contacts.merge.target')}
+                      list="merge-target-suggestions"
+                      onChange={(event) =>
+                        setMergeDestinationQuery(event.target.value)
+                      }
+                      placeholder={t('contacts.merge.select')}
+                      value={mergeDestinationQuery}
+                    />
+                    <datalist id="merge-target-suggestions">
+                      {mergeDestinationContacts.map((contact) => (
+                        <option key={contact.id} value={contact.display_name} />
+                      ))}
+                    </datalist>
+                  </label>
+                  <button
+                    disabled={
+                      isSubmitting ||
+                      mergeSourceContact === undefined ||
+                      mergeDestinationContact === undefined ||
+                      mergeSourceContact.id === mergeDestinationContact.id
+                    }
+                    type="submit"
+                  >
+                    {t('contacts.merge.execute')}
                   </button>
                 </form>
               )}

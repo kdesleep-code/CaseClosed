@@ -373,6 +373,148 @@ def test_contact_can_be_deleted_when_all_addresses_are_removable(
     assert email_row == (0,)
 
 
+def test_person_contacts_can_be_merged(client) -> None:
+    source_id = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Same Person",
+            "status": "active",
+            "tags": ["source-tag"],
+            "email_addresses": [
+                {"email_address": "source@example.com", "is_primary": True}
+            ],
+        },
+    ).json()["data"]["id"]
+    target_id = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Same Person",
+            "status": "active",
+            "tags": ["target-tag"],
+            "email_addresses": [
+                {"email_address": "target@example.com", "is_primary": True}
+            ],
+        },
+    ).json()["data"]["id"]
+
+    response = client.post(
+        f"{CONTACTS_URL}/{source_id}/merge",
+        json={"target_contact_id": target_id},
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["deleted_contact_id"] == source_id
+    assert data["target_contact"]["id"] == target_id
+    assert sorted(data["target_contact"]["tags"]) == ["source-tag", "target-tag"]
+    assert sorted(
+        email_address["email_address"]
+        for email_address in data["target_contact"]["email_addresses"]
+    ) == ["source@example.com", "target@example.com"]
+
+    list_response = client.get(CONTACTS_URL)
+    assert [item["id"] for item in list_response.json()["data"]["items"]] == [target_id]
+
+
+def test_contact_merge_uses_older_memo_unless_it_is_empty(client) -> None:
+    older_id = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Older Memo",
+            "memo": "older memo",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "older-memo@example.com", "is_primary": True}
+            ],
+        },
+    ).json()["data"]["id"]
+    newer_id = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Newer Memo",
+            "memo": "newer memo",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "newer-memo@example.com", "is_primary": True}
+            ],
+        },
+    ).json()["data"]["id"]
+
+    response = client.post(
+        f"{CONTACTS_URL}/{newer_id}/merge",
+        json={"target_contact_id": older_id},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["target_contact"]["memo"] == "older memo"
+
+    empty_older_id = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Empty Older",
+            "memo": "",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "empty-older@example.com", "is_primary": True}
+            ],
+        },
+    ).json()["data"]["id"]
+    filled_newer_id = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Filled Newer",
+            "memo": "fallback memo",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "filled-newer@example.com", "is_primary": True}
+            ],
+        },
+    ).json()["data"]["id"]
+
+    fallback_response = client.post(
+        f"{CONTACTS_URL}/{filled_newer_id}/merge",
+        json={"target_contact_id": empty_older_id},
+    )
+
+    assert fallback_response.status_code == 200
+    assert fallback_response.json()["data"]["target_contact"]["memo"] == "fallback memo"
+
+
+def test_duplicate_contact_display_name_gets_number_suffix(client) -> None:
+    first_response = client.post(
+        CONTACTS_URL,
+        json={"display_name": "Duplicate Name", "status": "active"},
+    )
+    second_response = client.post(
+        CONTACTS_URL,
+        json={"display_name": "Duplicate Name", "status": "active"},
+    )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert first_response.json()["data"]["display_name"] == "Duplicate Name"
+    assert second_response.json()["data"]["display_name"] == "Duplicate Name_2"
+
+
+def test_only_active_person_contacts_can_be_merged(client) -> None:
+    active_id = client.post(
+        CONTACTS_URL,
+        json={"display_name": "Active Merge", "status": "active"},
+    ).json()["data"]["id"]
+    skipped_id = client.post(
+        CONTACTS_URL,
+        json={"display_name": "Skipped Merge", "status": "skipped"},
+    ).json()["data"]["id"]
+
+    response = client.post(
+        f"{CONTACTS_URL}/{skipped_id}/merge",
+        json={"target_contact_id": active_id},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "CONFLICT"
+
+
 def test_contact_cannot_be_deleted_when_address_has_inbound_history(
     client,
     database_path: Path,
@@ -687,6 +829,14 @@ def test_unresolved_from_addresses_are_listed_and_prefill_job_can_be_created(
             "message_count": 0,
             "latest_message_id": None,
             "latest_subject": None,
+            "latest_from_name": None,
+            "latest_from_address": None,
+            "latest_reply_to_address": None,
+            "latest_received_at": None,
+            "latest_body_preview": None,
+            "inferred_display_name": "Unknown Sender",
+            "inferred_kind": "person",
+            "inferred_sender_resolution": "self",
             "suggestion_status": "not_started",
             "suggestion": None,
         }

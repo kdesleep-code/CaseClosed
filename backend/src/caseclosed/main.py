@@ -14,6 +14,7 @@ from caseclosed.db.runtime import bootstrap_database
 from caseclosed.db.runtime import rebuild_runtime_database
 from caseclosed.external_operations import router as external_operations_router
 from caseclosed.jobs import router as jobs_router
+from caseclosed.mails import router as mails_router
 from caseclosed.maintenance import router as maintenance_router
 
 
@@ -30,6 +31,7 @@ app.include_router(contacts_router)
 app.include_router(jobs_router)
 app.include_router(external_operations_router)
 app.include_router(maintenance_router)
+app.include_router(mails_router)
 
 
 @app.exception_handler(HTTPException)

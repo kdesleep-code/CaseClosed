@@ -383,3 +383,93 @@ class ContactMergeHistory(Base):
     merged_at: Mapped[str] = mapped_column(Text, nullable=False)
     merged_by: Mapped[str] = mapped_column(Text, nullable=False)
     snapshot_json: Mapped[str | None] = mapped_column(Text)
+
+
+class GmailThread(Base):
+    __tablename__ = "gmail_threads"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    gmail_thread_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    subject_snapshot: Mapped[str | None] = mapped_column(Text)
+    first_message_at: Mapped[str | None] = mapped_column(Text)
+    last_message_at: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class GmailMessage(Base):
+    __tablename__ = "gmail_messages"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    gmail_message_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    gmail_thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str] = mapped_column(ForeignKey("gmail_threads.id"), nullable=False)
+    internal_date: Mapped[str | None] = mapped_column(Text)
+    received_at: Mapped[str] = mapped_column(Text, nullable=False)
+    subject: Mapped[str | None] = mapped_column(Text)
+    from_address: Mapped[str] = mapped_column(Text, nullable=False)
+    from_name: Mapped[str | None] = mapped_column(Text)
+    sender_address: Mapped[str | None] = mapped_column(Text)
+    reply_to_address: Mapped[str | None] = mapped_column(Text)
+    to_addresses_json: Mapped[str | None] = mapped_column(Text)
+    cc_addresses_json: Mapped[str | None] = mapped_column(Text)
+    bcc_addresses_json: Mapped[str | None] = mapped_column(Text)
+    message_id_header: Mapped[str | None] = mapped_column(Text)
+    in_reply_to_header: Mapped[str | None] = mapped_column(Text)
+    references_header: Mapped[str | None] = mapped_column(Text)
+    list_id: Mapped[str | None] = mapped_column(Text)
+    snippet: Mapped[str | None] = mapped_column(Text)
+    body_text: Mapped[str | None] = mapped_column(Text)
+    body_html: Mapped[str | None] = mapped_column(Text)
+    gmail_link: Mapped[str | None] = mapped_column(Text)
+    gmail_labels_json: Mapped[str | None] = mapped_column(Text)
+    external_starred: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class MailUserState(Base):
+    __tablename__ = "mail_user_state"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    message_id: Mapped[str] = mapped_column(
+        ForeignKey("gmail_messages.id"),
+        nullable=False,
+        unique=True,
+    )
+    user_importance: Mapped[str | None] = mapped_column(Text)
+    processed_status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="unprocessed",
+    )
+    processed_at: Mapped[str | None] = mapped_column(Text)
+    read_status: Mapped[str] = mapped_column(Text, nullable=False, default="unread")
+    read_at: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class MailAutoState(Base):
+    __tablename__ = "mail_auto_state"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    message_id: Mapped[str] = mapped_column(
+        ForeignKey("gmail_messages.id"),
+        nullable=False,
+        unique=True,
+    )
+    external_importance: Mapped[str | None] = mapped_column(Text)
+    suggested_importance: Mapped[str | None] = mapped_column(Text)
+    llm_run_id: Mapped[str | None] = mapped_column(ForeignKey("llm_runs.id"))
+    effective_importance: Mapped[str] = mapped_column(Text, nullable=False)
+    pending_reason: Mapped[str | None] = mapped_column(Text)
+    pending_from_address_id: Mapped[str | None] = mapped_column(
+        ForeignKey("contact_email_addresses.id")
+    )
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)

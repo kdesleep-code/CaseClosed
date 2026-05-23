@@ -876,13 +876,13 @@ Contact未登録FromによりPendingになっているメールをまとめて�
 - 最新メール件名
 - 最新メール日時
 - 該当メール件数
-- LLM推定表示名
-- LLM推定所属
-- LLM推定役職
-- LLM推定タグ
-- LLM推定メモ
-- Skip候補理由
-- 信頼度
+- 最新メールFrom名
+- 最新メールReply-To
+- 最新メール本文プレビュー
+- ルールベース推定Contact種別: `person` / `mailing_list`
+- ルールベース推定Sender handling: `self` / `reply_to`
+- LLM Prefill状態
+- LLM Prefill候補（存在する場合）
 
 API:
 
@@ -892,24 +892,24 @@ GET /contacts/unresolved-from-addresses
 
 ## 5.3 必須操作
 
-- LLM自動Fill実行
+- Active / Skip の二択トグル
+- Person / Mailing List の二択トグル
+- This Contact / Reply-To の二択トグル
 - 新規Contact作成
-- 既存Contactへ追加
 - Contact skippedとして作成
 - 該当メール一覧を開く
 - 最新メール詳細を開く
-- 候補破棄
-- 再生成
 
 API:
 
 ```http
-POST /contacts/unresolved-from-addresses/{encoded_email}/generate-prefill
 POST /contacts
-POST /contacts/{contact_id}/email-addresses
-POST /contacts/{contact_id}/skip
 GET /mails?from=...
 ```
+
+Pending Contact解決では、LLM Prefillと既存Contact追加導線は表示しない。表示名はFrom表示名またはメールアドレスから自動補完し、FromとReply-Toの差分からMailing List候補を推定する。ユーザーが最低限確認するのは、最新メールの発信元情報・本文プレビュー・3つの二択トグルである。
+
+Pending解決後に同一人物のContactが分かれた場合は、通常Contact画面側のContact統合機能で後から解消する。
 
 ## 5.4 処理後の挙動
 
