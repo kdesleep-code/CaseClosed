@@ -18,6 +18,9 @@ export type Contact = {
   avatar_url: string | null
   memo: string | null
   status: string
+  kind?: 'person' | 'mailing_list'
+  sender_resolution_mode?: 'self' | 'reply_to'
+  mailing_list_recipient_expression?: string | null
   tags: string[]
   email_addresses: ContactEmailAddress[]
   created_at: string
@@ -46,6 +49,9 @@ export type ContactCreatePayload = {
   avatar_url?: string | null
   memo: string
   status: 'active' | 'skipped'
+  kind: 'person' | 'mailing_list'
+  sender_resolution_mode: 'self' | 'reply_to'
+  mailing_list_recipient_expression?: string | null
   tags: string[]
   email_addresses: Array<{
     email_address: string
@@ -58,6 +64,9 @@ export type ContactUpdatePayload = {
   avatar_url: string | null
   memo: string
   status: 'active' | 'skipped' | 'archived'
+  kind: 'person' | 'mailing_list'
+  sender_resolution_mode: 'self' | 'reply_to'
+  mailing_list_recipient_expression?: string | null
   tags: string[]
 }
 
@@ -169,6 +178,13 @@ export function updateContact(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
+}
+
+export function deleteContact(contactId: string): Promise<{ deleted_contact_id: string }> {
+  return request<{ deleted_contact_id: string }>(
+    `/api/v1/contacts/${encodeURIComponent(contactId)}`,
+    { method: 'DELETE' },
+  )
 }
 
 export function addContactEmailAddress(

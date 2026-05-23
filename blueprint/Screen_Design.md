@@ -1323,6 +1323,8 @@ Google Calendar予定作成・変更は `external_operations` 経由。
 
 人物・組織・タグを管理し、メール処理・Case判定・宛先補完に使う。
 
+Mailing Listは特殊ContactとしてDB上は `contacts` に保持してよいが、画面上は通常Contactと混ぜない。
+
 ## 11.2 表示項目
 
 - 表示名
@@ -1345,10 +1347,13 @@ GET /contacts
 - active
 - skipped
 - archived
+- Mailing List
 - tag
 - organization
 - 未解決アドレスあり
 - 最近追加
+
+通常Contact用の `All` / `active` / `skipped` / `archived` / カスタムタブには `kind = mailing_list` を表示しない。Mailing List専用タブでは `kind = mailing_list` のみ表示する。
 
 ## 11.4 必須操作
 
@@ -1362,6 +1367,12 @@ GET /contacts
 - タグ編集
 - Merge
 - 関連Case確認
+
+新規Contact作成画面から作成できるのは通常Contactのみとする。Mailing Listとしての登録は、メール画面またはPending Contact処理画面で未解決Fromを解決する導線に限定する。
+
+新規Contact作成画面では、初回入力項目を表示名・メールアドレス・状態に絞る。memoやタグなどの詳細項目は作成直後に開くContact詳細編集画面で入力する。手動作成完了後は `All` タブへ移動し、作成したContactのDetail Edit状態を開く。
+
+既存Contactの `kind` は作成後に画面から変更できない。PersonをMailing Listへ移行する、またはMailing ListをPersonへ戻す導線は持たず、必要な場合は明示的な専用移行機能として別途設計する。
 
 API:
 
@@ -1396,6 +1407,23 @@ POST /contacts/merge
 「この人が現在どの案件に関係しているか」を確認するために、Case名、状態、最終更新日、関係種別が分かる一覧として表示する。
 関連付けの作成・編集は原則としてCase側の画面を主導線にする。
 
+## 12.1.1 Mailing List詳細
+
+Mailing List詳細は通常Contact詳細とは別扱いにする。
+
+- ML名
+- MLアドレス
+- status
+- sender_resolution_mode
+- 宛先置き換え用タグ式
+- memo
+- 関連Case
+- MLアドレスは常にActive/Primaryとして表示し、Remove/Deactivate/Set Primary操作は表示しない。
+
+Mailing ListはContact tagsを持たない。`mailing-list` は予約語として通常Contactタグにも使わない。
+
+通常Contact向けのLLMメモ/Context自動更新、人物向け詳細項目はMailing List詳細では原則表示しない。ユーザーが手動で書くmemoと関連Case表示は持つ。
+
 ## 12.2 必須操作
 
 - 編集
@@ -1423,6 +1451,8 @@ From履歴があるメールアドレスは、削除操作で物理削除され�
 `inactive` のメールアドレスには `Deactivate` ではなく `Activate` を表示し、同じContact内で再有効化できるようにする。
 
 メールアドレスはContact間で移動できる。移動は所属Contactの変更であり、移動後も `active` / `inactive` 状態は維持する。
+
+Contact本体は、紐づく全メールアドレスが物理削除可能な場合のみ削除できる。履歴ありメールアドレスが1件でもある場合は削除できない理由を表示する。
 
 押せないボタンは待機カーソルにしない。カーソルオーバー時に、未選択・処理中・未実装など押せない理由が分かる説明を表示する。
 

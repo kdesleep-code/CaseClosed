@@ -30,7 +30,7 @@ def suggested_tags_for_email(email_address: str) -> list[str]:
     if any(token in low_value for token in ["no-reply", "noreply", "notification"]):
         return ["system-sender"]
     if any(token in low_value for token in ["list", "newsletter", "announce"]):
-        return ["mailing-list"]
+        return ["broadcast"]
     return ["unknown-domain"]
 
 

@@ -365,6 +365,20 @@ LLM:
 - 押せないボタンは待機カーソルではなく、hover時に押せない理由を説明する。
 - フロントエンドの表示文言は文言キー経由にし、`window.CASECLOSED_LANGUAGE_PATCH` / HTML内JSON / localStorageで言語パッチを当てられるようにする。既存画面は主要文言から順次移行する。
 - フロントエンドの見た目はDesign Set / Theme Presetとして切替可能にする。Settings UIは後続でよいが、`window.CASECLOSED_THEME` / localStorage / `data-theme` / CSS custom propertiesで切替可能な土台を維持する。
+- Gmail messageの識別は、アプリ内主キー `gmail_messages.id`、Gmail API由来の一意キー `gmail_message_id`、RFC 5322の `Message-ID` ヘッダを区別する。
+- Phase 4では `From` だけで送信者を確定したことにしない。`Sender` / `Reply-To` / `List-Id` / `To` / `Cc` / `Bcc` / `In-Reply-To` / `References` など、後で送信者推定・Reply All候補抽出に使うヘッダを保存する。
+- Pending判定は当面 `from_address` ベースでよい。ただし、メーリングリストや代理送信の可能性をUI/API上で説明できるよう、保存ヘッダから「推定根拠」を出せる余地を残す。
+- Contactには `kind = person / mailing_list` と `sender_resolution_mode = self / reply_to` を持たせる。Fromが `mailing_list` Contactで `reply_to` 指定の場合、Phase 4では `Reply-To` を実送信者候補として扱い、既知/未知判定へ戻す。
+- `sender_resolution_mode = self` のMLは、Neuromail等「誰が内部送信者かは追わず、この発信元から来たことが分かればよい」ケースに使う。
+- `mailing_list` は通常Contact一覧・通常Contact用カスタムタブ・通常Contact向け詳細/LLMメモ更新とは混ぜず、Mailing List専用タブと専用詳細で扱う。
+- Mailing Listは1 Contact = 1メールアドレスとし、Contact tagsを持たない。`mailing-list` は予約タグとして使用不可。
+- Mailing Listのメールアドレスは常にActive/Primaryとし、Remove/Deactivate/Set Primary操作を持たない。
+- Contact本体削除は、紐づく全メールアドレスが物理削除可能な場合のみ許可する。
+- New Contact導線は常に通常Contactを作成する。作成フォームではmemoを入力させず、作成後に `All` タブへ移動して対象ContactのDetail Editを開く。Mailing List登録はメール画面/Pending Contact解決からのみ行う。
+- 既存Contactの `kind` は変更不可とする。PersonからMailing Listへの移行、Mailing ListからPersonへの戻しは通常編集では行わない。
+- Mailing Listには `mailing_list_recipient_expression` を持たせ、将来メール宛先設定時にタグ式から宛先展開できる土台を用意する。
+- Mailing Listはmemoと関連Caseを持てる。ただしLLMによるmemo/Context自動更新対象にはしない。
+- LLM呼び出しはOpenAI API直結にせず、`LLMProvider` 相当の差し替え境界を用意する。Phase 4/5初期は `mock` / deterministic providerでテストし、その後OpenAI providerを追加する。
 
 ---
 
@@ -419,12 +433,15 @@ API:
 - 添付メタ表示
 - Pending判定
 - Gmailスター読み込み時点のexternal_importance
+- Gmail message ID / RFC Message-ID / thread IDを区別して保存
+- From / Sender / Reply-To / List-Id等の住所系ヘッダ保存
 
 ### 完了条件
 
 - Gmailからメールを取得できる
 - 本文をDBに保存できる
 - Contact未登録FromはPendingになる
+- 送信者推定に必要な主要ヘッダをDBに保存できる
 - 読み込み日別に表示できる
 - 未処理メール一覧がある
 - 3タブ表示がある

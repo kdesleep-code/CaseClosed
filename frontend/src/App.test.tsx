@@ -706,7 +706,10 @@ describe('Phase 3 contacts screen', () => {
                   avatar_url: null,
                   memo: 'Mailing list dummy contact.',
                   status: 'skipped',
-                  tags: ['mailing-list', '遲第ｳ｢螟ｧ蟄ｦ'],
+                  kind: 'mailing_list',
+                  sender_resolution_mode: 'reply_to',
+                  mailing_list_recipient_expression: '{faculty&public-relations}',
+                  tags: [],
                   email_addresses: [
                     {
                       id: 'email_list',
@@ -755,6 +758,7 @@ describe('Phase 3 contacts screen', () => {
       'All',
       'active',
       '+',
+      'Mailing list',
       'archived',
       'Skip',
     ])
@@ -763,6 +767,7 @@ describe('Phase 3 contacts screen', () => {
       'true',
     )
     expect(screen.getByRole('tab', { name: 'All' })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Mailing list' })).toBeInTheDocument()
     expect(screen.getByRole('tab', { name: 'Skip' })).toBeInTheDocument()
     expect(screen.queryByLabelText('Custom tab name')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Tag expression')).not.toBeInTheDocument()
@@ -777,14 +782,19 @@ describe('Phase 3 contacts screen', () => {
     expect(screen.queryByText('Example List')).not.toBeInTheDocument()
     expect(screen.getByText('student@example.com')).toBeInTheDocument()
     expect(screen.getAllByText('student').length).toBeGreaterThan(0)
-    expect(
-      screen.getByRole('button', { name: '遲第ｳ｢螟ｧ蟄ｦ 2' }),
-    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '遲第ｳ｢螟ｧ蟄ｦ 1' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'mailing-list 1' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'student 1' })).toBeInTheDocument()
     await user.type(screen.getByLabelText('Search contacts'), 'Example lab')
     expect(screen.getByText('Example Student')).toBeInTheDocument()
     expect(screen.queryByText('Example List')).not.toBeInTheDocument()
     await user.clear(screen.getByLabelText('Search contacts'))
+    await user.click(screen.getByRole('tab', { name: 'Mailing list' }))
+    expect(screen.getByText('Example List')).toBeInTheDocument()
+    expect(screen.getByText('sender:Reply-To')).toBeInTheDocument()
+    expect(screen.getByText('{faculty&public-relations}')).toBeInTheDocument()
+    expect(screen.queryByText('Example Student')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('tab', { name: 'active' }))
     await user.type(screen.getByLabelText('Search contacts'), 'Example missing')
     expect(screen.queryByText('Example Student')).not.toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Pending Contacts' })).not.toBeInTheDocument()
@@ -834,7 +844,10 @@ describe('Phase 3 contacts screen', () => {
                 avatar_url: null,
                 memo: null,
                   status: 'skipped',
-                  tags: ['mailing-list'],
+                  kind: 'mailing_list',
+                  sender_resolution_mode: 'self',
+                  mailing_list_recipient_expression: '{list-targets}',
+                  tags: [],
                   email_addresses: [],
                   created_at: '2026-05-23T09:00:00+09:00',
                   updated_at: '2026-05-23T09:00:00+09:00',
@@ -858,9 +871,11 @@ describe('Phase 3 contacts screen', () => {
     expect(screen.getByText('KDE Student')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'KDE 1' }))
-  await user.click(screen.getByRole('tab', { name: 'Skip' }))
+    await user.click(screen.getByRole('tab', { name: 'Skip' }))
 
     expect(screen.queryByText('Example Student')).not.toBeInTheDocument()
+    expect(screen.queryByText('Example List')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('tab', { name: 'Mailing list' }))
     expect(screen.getByText('Example List')).toBeInTheDocument()
 
     await user.click(screen.getByRole('tab', { name: '+' }))
@@ -879,6 +894,7 @@ describe('Phase 3 contacts screen', () => {
       'active',
       'TsukubaLab',
       '+',
+      'Mailing list',
       'archived',
       'Skip',
     ])
@@ -1309,6 +1325,7 @@ describe('Phase 3 contacts screen', () => {
     await user.click(screen.getByRole('heading', { name: 'Example Student' }))
     await user.click(screen.getByRole('button', { name: 'Edit contact' }))
     expect(screen.getByRole('button', { name: 'Update avatar' })).toBeDisabled()
+    expect(screen.queryByLabelText('Contact type')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Clear contact display name' }))
     expect(screen.getByLabelText('Contact display name')).toHaveValue('')
     await user.type(screen.getByLabelText('Contact display name'), 'Example Researcher')
@@ -1328,6 +1345,9 @@ describe('Phase 3 contacts screen', () => {
           avatar_url: null,
           memo: 'Updated memo.',
           status: 'active',
+          kind: 'person',
+          sender_resolution_mode: 'self',
+          mailing_list_recipient_expression: null,
           tags: ['lab', 'student', 'updated'],
         }),
       }),
@@ -1612,6 +1632,9 @@ describe('Phase 3 contacts screen', () => {
           display_name: 'Unknown Sender',
           memo: '',
           status: 'active',
+          kind: 'person',
+          sender_resolution_mode: 'self',
+          mailing_list_recipient_expression: null,
           tags: [],
           email_addresses: [
             { email_address: 'unknown.sender@example.com', is_primary: true },
@@ -1637,6 +1660,9 @@ describe('Phase 3 contacts screen', () => {
           display_name: 'List Sender',
           memo: '',
           status: 'skipped',
+          kind: 'person',
+          sender_resolution_mode: 'self',
+          mailing_list_recipient_expression: null,
           tags: [],
           email_addresses: [
             { email_address: 'list.sender@example.com', is_primary: true },
@@ -1722,6 +1748,7 @@ describe('Phase 3 contacts screen', () => {
     await user.click(screen.getByRole('button', { name: 'New Contact' }))
 
     expect(screen.getByRole('heading', { name: 'New Contact' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('Memo')).not.toBeInTheDocument()
     await user.type(screen.getByLabelText('Display name'), 'New Example')
     await user.type(screen.getByLabelText('Email address'), 'new@example.com')
     await user.click(screen.getByRole('button', { name: 'Create contact' }))
@@ -1735,6 +1762,9 @@ describe('Phase 3 contacts screen', () => {
           display_name: 'New Example',
           memo: '',
           status: 'active',
+          kind: 'person',
+          sender_resolution_mode: 'self',
+          mailing_list_recipient_expression: null,
           tags: [],
           email_addresses: [
             { email_address: 'new@example.com', is_primary: true },
@@ -1745,5 +1775,11 @@ describe('Phase 3 contacts screen', () => {
     expect((await screen.findAllByText('New Example')).length).toBeGreaterThan(0)
     expect(screen.getAllByText('new@example.com').length).toBeGreaterThan(0)
     expect(screen.getByAltText('New Example avatar')).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'All' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    )
+    expect(screen.getByLabelText('Contact display name')).toHaveValue('New Example')
+    expect(screen.getByLabelText('Contact memo')).toHaveValue('')
   })
 })

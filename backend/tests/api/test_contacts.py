@@ -17,6 +17,8 @@ def test_contact_can_be_created_and_listed(client, database_path: Path) -> None:
             "avatar_url": "https://example.com/student.png",
             "memo": "Phase 3 dummy contact.",
             "status": "active",
+            "kind": "person",
+            "sender_resolution_mode": "self",
             "tags": ["student", "lab"],
             "email_addresses": [
                 {"email_address": "Student@Example.com", "is_primary": True}
@@ -29,6 +31,8 @@ def test_contact_can_be_created_and_listed(client, database_path: Path) -> None:
     assert data["display_name"] == "Example Student"
     assert data["avatar_url"] == "https://example.com/student.png"
     assert data["status"] == "active"
+    assert data["kind"] == "person"
+    assert data["sender_resolution_mode"] == "self"
     assert data["email_addresses"][0]["normalized_email_address"] == (
         "student@example.com"
     )
@@ -51,6 +55,124 @@ def test_contact_can_be_created_and_listed(client, database_path: Path) -> None:
     assert detail_data["contact"]["id"] == data["id"]
     assert detail_data["contact"]["display_name"] == "Example Student"
     assert detail_data["related_cases"] == []
+
+
+def test_mailing_list_contact_can_choose_sender_resolution_mode(
+    client,
+    database_path: Path,
+) -> None:
+    response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Campus PR ML",
+            "status": "active",
+            "kind": "mailing_list",
+            "sender_resolution_mode": "reply_to",
+            "mailing_list_recipient_expression": "{faculty&public-relations}",
+            "email_addresses": [
+                {"email_address": "pr-list@example.com", "is_primary": True}
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["kind"] == "mailing_list"
+    assert data["sender_resolution_mode"] == "reply_to"
+    assert data["mailing_list_recipient_expression"] == "{faculty&public-relations}"
+
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT kind, sender_resolution_mode, mailing_list_recipient_expression
+            FROM contacts
+            WHERE id = ?
+            """,
+            (data["id"],),
+        ).fetchone()
+
+    assert row == ("mailing_list", "reply_to", "{faculty&public-relations}")
+
+    second_email_response = client.post(
+        f"{CONTACTS_URL}/{data['id']}/email-addresses",
+        json={"email_address": "pr-list-alt@example.com", "is_primary": False},
+    )
+
+    assert second_email_response.status_code == 409
+
+    email_id = data["email_addresses"][0]["id"]
+    delete_email_response = client.delete(
+        f"{CONTACTS_URL}/{data['id']}/email-addresses/{email_id}"
+    )
+    primary_response = client.post(
+        f"{CONTACTS_URL}/{data['id']}/email-addresses/{email_id}/primary"
+    )
+
+    assert delete_email_response.status_code == 409
+    assert primary_response.status_code == 409
+
+
+def test_mailing_list_contact_rejects_contact_tags(client) -> None:
+    response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Tagged ML",
+            "status": "active",
+            "kind": "mailing_list",
+            "sender_resolution_mode": "self",
+            "tags": ["mailing-list"],
+            "email_addresses": [
+                {"email_address": "tagged-ml@example.com", "is_primary": True}
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_person_contact_cannot_use_reply_to_sender_resolution(client) -> None:
+    response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Normal Person",
+            "status": "active",
+            "kind": "person",
+            "sender_resolution_mode": "reply_to",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_contact_kind_cannot_be_changed_after_creation(client) -> None:
+    create_response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Normal Person",
+            "status": "active",
+            "kind": "person",
+            "sender_resolution_mode": "self",
+        },
+    )
+
+    assert create_response.status_code == 200
+    contact_id = create_response.json()["data"]["id"]
+
+    update_response = client.patch(
+        f"{CONTACTS_URL}/{contact_id}",
+        json={
+            "kind": "mailing_list",
+            "sender_resolution_mode": "reply_to",
+            "mailing_list_recipient_expression": "{faculty}",
+        },
+    )
+
+    assert update_response.status_code == 409
+    assert update_response.json()["error"]["code"] == (
+        "CONTACT_KIND_CHANGE_NOT_ALLOWED"
+    )
 
 
 def test_contact_creation_marks_source_suggestion_as_adopted(
@@ -211,6 +333,77 @@ def test_contact_email_address_primary_can_be_changed_and_removed(client) -> Non
     assert [email_address["id"] for email_address in remaining_email_addresses] == [
         secondary_id
     ]
+
+
+def test_contact_can_be_deleted_when_all_addresses_are_removable(
+    client,
+    database_path: Path,
+) -> None:
+    contact_id = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Disposable Contact",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "disposable@example.com", "is_primary": True}
+            ],
+        },
+    ).json()["data"]["id"]
+
+    response = client.delete(f"{CONTACTS_URL}/{contact_id}")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["deleted_contact_id"] == contact_id
+
+    with sqlite3.connect(database_path) as connection:
+        contact_row = connection.execute(
+            "SELECT deleted_at FROM contacts WHERE id = ?",
+            (contact_id,),
+        ).fetchone()
+        email_row = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM contact_email_addresses
+            WHERE contact_id = ?
+            """,
+            (contact_id,),
+        ).fetchone()
+
+    assert contact_row[0] is not None
+    assert email_row == (0,)
+
+
+def test_contact_cannot_be_deleted_when_address_has_inbound_history(
+    client,
+    database_path: Path,
+) -> None:
+    contact_id = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Referenced Contact",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "referenced-delete@example.com", "is_primary": True}
+            ],
+        },
+    ).json()["data"]["id"]
+    contact = client.get(CONTACTS_URL).json()["data"]["items"][0]
+    email_id = contact["email_addresses"][0]["id"]
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE contact_email_addresses
+            SET has_inbound_message_history = 1
+            WHERE id = ?
+            """,
+            (email_id,),
+        )
+        connection.commit()
+
+    response = client.delete(f"{CONTACTS_URL}/{contact_id}")
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "CONFLICT"
 
 
 def test_first_added_email_address_becomes_primary_after_all_addresses_removed(

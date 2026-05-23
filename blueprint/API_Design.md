@@ -983,6 +983,9 @@ Request:
   "role": "...",
   "memo": "...",
   "status": "active|skipped",
+  "kind": "person|mailing_list",
+  "sender_resolution_mode": "self|reply_to",
+  "mailing_list_recipient_expression": "{...}",
   "tags": ["..."],
   "email_addresses": [
     {
@@ -999,12 +1002,43 @@ Request:
 - Contact作成後、該当FromのPendingメールについて重要度判定Jobを再開する。
 - `status = skipped` で作成された場合、該当メールは重要度判定前にSkip扱いにする。
 - `source_suggestion_id` が指定された場合、採用元の `contact_registration_suggestions.status` を `adopted` または `edited_and_adopted` に更新する。
+- `kind` 未指定時は `person` とする。
+- `sender_resolution_mode` 未指定時は `self` とする。
+- `person` は `sender_resolution_mode = self` のみ許可する。
+- `mailing_list` は `sender_resolution_mode = self|reply_to` を許可する。
+- `mailing_list + self` はNeuromail等、FromのML Contact自体を送信者として扱えばよいケースで使う。
+- `mailing_list + reply_to` は学内委員会ML等、`Reply-To` を実送信者候補として再解決したいケースで使う。
+- `mailing_list` は1 Contact = 1メールアドレスとする。
+- `mailing_list` はContact tagsを持たない。`tags` は空配列にする。
+- `mailing-list` は予約タグとして使用不可。
+- `mailing_list_recipient_expression` は将来の宛先置き換え用タグ式であり、Phase 3では保存・表示のみ行う。
 
 ## 8.6 Contact更新
 
 ```http
 PATCH /api/v1/contacts/{contact_id}
 ```
+
+更新可能項目:
+
+```json
+{
+  "display_name": "...",
+  "avatar_url": "...",
+  "memo": "...",
+  "status": "active|skipped|archived",
+  "kind": "person|mailing_list",
+  "sender_resolution_mode": "self|reply_to",
+  "mailing_list_recipient_expression": "{...}",
+  "tags": ["..."]
+}
+```
+
+制約:
+
+- `person` は `sender_resolution_mode = self` のみ許可する。
+- `mailing_list` は `sender_resolution_mode = self|reply_to` を許可する。
+- `mailing_list` の `tags` は空配列にする。
 
 ## 8.7 ContactをSkipにする
 
@@ -1038,6 +1072,24 @@ Request:
   "is_primary": false
 }
 ```
+
+制約:
+
+- `kind = mailing_list` のContactには2件目のメールアドレスを追加できない。
+- メールアドレス移動でも、`mailing_list` Contactに2件目のメールアドレスを持たせることはできない。
+- `kind = mailing_list` のメールアドレスは常にActive/Primaryであり、Remove/Deactivate/Set Primary操作を許可しない。
+
+## 8.10 Contact削除
+
+```http
+DELETE /api/v1/contacts/{contact_id}
+```
+
+仕様:
+
+- 紐づく全メールアドレスの `has_inbound_message_history = 0` の場合のみ削除できる。
+- 削除時はメールアドレスを物理削除し、Contact本体は `deleted_at` を設定する。
+- 1件でも `has_inbound_message_history = 1` のメールアドレスがある場合は `409 CONFLICT` を返す。
 
 ## 8.10 Contactからメールアドレスを外す
 

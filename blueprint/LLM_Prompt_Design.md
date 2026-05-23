@@ -142,6 +142,16 @@ LLM機能ごとに `prompt_versions` を持つ。
 プロンプト改善時には、新しいversionを作成する。  
 既存llm_runsは過去versionを参照する。
 
+### Provider / Model差し替え
+
+LLM機能はOpenAI APIを初期providerとして想定するが、prompt設計・出力schema・保存形式は特定providerに依存させない。
+
+- `prompt_versions` はfunction_typeごとのpromptと出力schemaを管理する。
+- `default_provider_name` / `default_model_name` は初期値であり、実行時設定や機能別設定で差し替え可能とする。
+- `llm_runs.provider_name` / `model_name` には実際に使ったprovider/modelを保存する。
+- テストでは `mock` / deterministic providerを使い、外部LLMの品質や応答揺れに依存しない。
+- OpenAI provider、オンプレミスLLM provider、将来の別クラウドproviderは、同じ入出力schemaを満たす限り差し替え可能とする。
+
 ## 1.6 LLM失敗の分類
 
 ### システム連携失敗

@@ -721,6 +721,20 @@ LLM Workerは、プロンプト本文をハードコードせず、`prompt_versi
 
 適用された追加指示ルールIDは `llm_runs.applied_instruction_rule_ids_json` に保存する。
 
+### LLM Provider差し替え境界
+
+LLM WorkerはOpenAI API等の特定providerに直接依存しない。実装上は `LLMProvider` 相当の抽象を置き、以下をprovider非依存の共通責務とする。
+
+- `provider_name` / `model_name` の解決
+- prompt入力とschema情報の受け渡し
+- provider応答を共通レスポンスへ正規化
+- token/cost/latency等のメタ情報を `llm_runs` へ保存できる形に変換
+- timeout / rate limit / provider API error の分類
+
+初期実装では、外部通信を行わない `mock` または deterministic provider を先に実装し、テストを固定する。その後OpenAI providerを追加する。将来オンプレミスLLMへ変更する場合も、Worker本体・DB保存形式・prompt_versionsの構造は変更しない。
+
+provider固有のAPI key、endpoint、model名、rate limitは設定値として扱い、業務ロジックやprompt組み立て処理に直書きしない。
+
 ### JSON不正時
 
 JSON不正、必須フィールド欠落、enum違反などはシステム連携失敗とみなす。

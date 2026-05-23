@@ -282,6 +282,13 @@ class Contact(Base):
     avatar_url: Mapped[str | None] = mapped_column(Text)
     memo: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
+    kind: Mapped[str] = mapped_column(Text, nullable=False, default="person")
+    sender_resolution_mode: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="self",
+    )
+    mailing_list_recipient_expression: Mapped[str | None] = mapped_column(Text)
     deleted_at: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)

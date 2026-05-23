@@ -37,6 +37,9 @@ def test_phase_3_migrations_add_contact_tables(
                 "PRAGMA table_info(contact_email_addresses)"
             ).fetchall()
         }
+        contact_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(contacts)").fetchall()
+        }
 
     assert {
         "status",
@@ -44,3 +47,8 @@ def test_phase_3_migrations_add_contact_tables(
         "deactivated_at",
         "deleted_at",
     } <= columns
+    assert {
+        "kind",
+        "sender_resolution_mode",
+        "mailing_list_recipient_expression",
+    } <= contact_columns

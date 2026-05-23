@@ -23,6 +23,9 @@ router = APIRouter(prefix="/api/v1/contacts", tags=["contacts"])
 
 CONTACT_STATUSES = {"active", "skipped", "archived"}
 EMAIL_ADDRESS_STATUSES = {"active", "inactive", "deleted"}
+CONTACT_KINDS = {"person", "mailing_list"}
+SENDER_RESOLUTION_MODES = {"self", "reply_to"}
+RESERVED_CONTACT_TAGS = {"mailing-list"}
 
 
 class ContactEmailAddressInput(BaseModel):
@@ -35,6 +38,9 @@ class ContactCreate(BaseModel):
     avatar_url: str | None = None
     memo: str | None = None
     status: str = "active"
+    kind: str = "person"
+    sender_resolution_mode: str = "self"
+    mailing_list_recipient_expression: str | None = None
     tags: list[str] = []
     email_addresses: list[ContactEmailAddressInput] = []
     source_suggestion_id: str | None = None
@@ -45,6 +51,9 @@ class ContactPatch(BaseModel):
     avatar_url: str | None = None
     memo: str | None = None
     status: str | None = None
+    kind: str | None = None
+    sender_resolution_mode: str | None = None
+    mailing_list_recipient_expression: str | None = None
     tags: list[str] | None = None
 
 
@@ -67,6 +76,53 @@ def normalize_email_address(email_address: str) -> str:
 def validate_contact_status(status: str) -> None:
     if status not in CONTACT_STATUSES:
         raise json_error(422, "VALIDATION_ERROR", "Invalid contact status.")
+
+
+def validate_contact_kind(kind: str) -> None:
+    if kind not in CONTACT_KINDS:
+        raise json_error(422, "VALIDATION_ERROR", "Invalid contact kind.")
+
+
+def validate_sender_resolution_mode(
+    *,
+    kind: str,
+    sender_resolution_mode: str,
+) -> None:
+    if sender_resolution_mode not in SENDER_RESOLUTION_MODES:
+        raise json_error(
+            422,
+            "VALIDATION_ERROR",
+            "Invalid contact sender resolution mode.",
+        )
+    if kind == "person" and sender_resolution_mode != "self":
+        raise json_error(
+            422,
+            "VALIDATION_ERROR",
+            "Person contacts must use self sender resolution.",
+        )
+
+
+def validate_contact_tags(*, kind: str, tags: list[str]) -> None:
+    normalized_tags = {tag.strip().lower() for tag in tags if tag.strip()}
+    if RESERVED_CONTACT_TAGS & normalized_tags:
+        raise json_error(
+            422,
+            "VALIDATION_ERROR",
+            "Reserved contact tag cannot be used.",
+        )
+    if kind == "mailing_list" and len(normalized_tags) > 0:
+        raise json_error(
+            422,
+            "VALIDATION_ERROR",
+            "Mailing list contacts do not use contact tags.",
+        )
+
+
+def normalize_optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
 
 
 def validate_email_address(email_address: str) -> str:
@@ -140,7 +196,10 @@ def contact_data(contact: Contact, session: DatabaseSession) -> dict[str, object
         "avatar_url": contact.avatar_url,
         "memo": contact.memo,
         "status": contact.status,
-        "tags": contact_tags(session, contact.id),
+        "kind": contact.kind,
+        "sender_resolution_mode": contact.sender_resolution_mode,
+        "mailing_list_recipient_expression": contact.mailing_list_recipient_expression,
+        "tags": [] if contact.kind == "mailing_list" else contact_tags(session, contact.id),
         "email_addresses": [
             email_address_data(email_address)
             for email_address in contact_email_addresses(session, contact.id)
@@ -157,6 +216,8 @@ def set_contact_tags(
     tags: list[str],
     created_at: str,
 ) -> None:
+    contact = session.get(Contact, contact_id)
+    validate_contact_tags(kind=contact.kind if contact is not None else "person", tags=tags)
     existing = session.scalars(
         select(ContactTag).where(ContactTag.contact_id == contact_id)
     ).all()
@@ -250,6 +311,17 @@ def link_email_address(
     normalized = validate_email_address(payload.email_address)
     existing = find_email_address(session, normalized)
     current_active_email_addresses = active_contact_email_addresses(session, contact.id)
+    current_email_addresses = contact_email_addresses(session, contact.id)
+    if (
+        contact.kind == "mailing_list"
+        and len(current_email_addresses) > 0
+        and (existing is None or existing.contact_id != contact.id)
+    ):
+        raise json_error(
+            409,
+            "CONFLICT",
+            "Mailing list contact can have only one email address.",
+        )
     should_be_primary = payload.is_primary or len(current_active_email_addresses) == 0
 
     if should_be_primary:
@@ -477,6 +549,18 @@ def create_contact(
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
     validate_contact_status(payload.status)
+    validate_contact_kind(payload.kind)
+    validate_sender_resolution_mode(
+        kind=payload.kind,
+        sender_resolution_mode=payload.sender_resolution_mode,
+    )
+    validate_contact_tags(kind=payload.kind, tags=payload.tags)
+    if payload.kind == "mailing_list" and len(payload.email_addresses) > 1:
+        raise json_error(
+            422,
+            "VALIDATION_ERROR",
+            "Mailing list contact can have only one email address.",
+        )
     display_name = payload.display_name.strip()
     if display_name == "":
         raise json_error(422, "VALIDATION_ERROR", "Display name is required.")
@@ -488,6 +572,11 @@ def create_contact(
         avatar_url=payload.avatar_url,
         memo=payload.memo,
         status=payload.status,
+        kind=payload.kind,
+        sender_resolution_mode=payload.sender_resolution_mode,
+        mailing_list_recipient_expression=normalize_optional_text(
+            payload.mailing_list_recipient_expression
+        ),
         created_at=now,
         updated_at=now,
         version=1,
@@ -518,9 +607,37 @@ def update_contact(
 ) -> dict[str, object]:
     contact = get_contact_or_404(session, contact_id)
 
+    next_kind = payload.kind if payload.kind is not None else contact.kind
+    if next_kind != contact.kind:
+        raise json_error(
+            409,
+            "CONTACT_KIND_CHANGE_NOT_ALLOWED",
+            "Contact kind cannot be changed after creation.",
+        )
+    next_sender_resolution_mode = (
+        payload.sender_resolution_mode
+        if payload.sender_resolution_mode is not None
+        else contact.sender_resolution_mode
+    )
+    validate_contact_kind(next_kind)
+    validate_sender_resolution_mode(
+        kind=next_kind,
+        sender_resolution_mode=next_sender_resolution_mode,
+    )
+    next_tags = payload.tags if payload.tags is not None else contact_tags(session, contact.id)
+    validate_contact_tags(kind=next_kind, tags=next_tags)
+
     if payload.status is not None:
         validate_contact_status(payload.status)
         contact.status = payload.status
+    contact.kind = next_kind
+    contact.sender_resolution_mode = next_sender_resolution_mode
+    if payload.mailing_list_recipient_expression is not None:
+        contact.mailing_list_recipient_expression = normalize_optional_text(
+            payload.mailing_list_recipient_expression
+        )
+    if next_kind != "mailing_list":
+        contact.mailing_list_recipient_expression = None
     if payload.display_name is not None:
         display_name = payload.display_name.strip()
         if display_name == "":
@@ -534,6 +651,8 @@ def update_contact(
     now = jst_iso()
     if payload.tags is not None:
         set_contact_tags(session, contact.id, payload.tags, now)
+    elif next_kind == "mailing_list":
+        set_contact_tags(session, contact.id, [], now)
 
     contact.version += 1
     contact.updated_at = now
@@ -592,6 +711,12 @@ def set_contact_primary_email_address(
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
     contact = get_contact_or_404(session, contact_id)
+    if contact.kind == "mailing_list":
+        raise json_error(
+            409,
+            "CONFLICT",
+            "Mailing list email address is always primary.",
+        )
     selected_email_address = get_contact_email_address_or_404(
         session,
         contact.id,
@@ -618,6 +743,12 @@ def activate_contact_email_address(
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
     contact = get_contact_or_404(session, contact_id)
+    if contact.kind == "mailing_list":
+        raise json_error(
+            409,
+            "CONFLICT",
+            "Mailing list email address is always active.",
+        )
     email_address = get_contact_email_address_or_404(
         session,
         contact.id,
@@ -650,6 +781,12 @@ def move_contact_email_address(
     target_contact = get_contact_or_404(session, payload.target_contact_id)
     if source_contact.id == target_contact.id:
         raise json_error(409, "CONFLICT", "Target contact must be different.")
+    if source_contact.kind != target_contact.kind:
+        raise json_error(
+            409,
+            "CONFLICT",
+            "Email addresses cannot move between contact kinds.",
+        )
 
     email_address = get_contact_email_address_by_id_or_404(session, email_address_id)
     if email_address.contact_id != source_contact.id:
@@ -664,6 +801,14 @@ def move_contact_email_address(
     target_had_active_email_addresses = len(
         active_contact_email_addresses(session, target_contact.id)
     ) > 0
+    if target_contact.kind == "mailing_list" and len(
+        contact_email_addresses(session, target_contact.id)
+    ) > 0:
+        raise json_error(
+            409,
+            "CONFLICT",
+            "Mailing list contact can have only one email address.",
+        )
 
     email_address.contact_id = target_contact.id
     email_address.resolution_status = "linked"
@@ -708,6 +853,12 @@ def delete_contact_email_address(
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
     contact = get_contact_or_404(session, contact_id)
+    if contact.kind == "mailing_list":
+        raise json_error(
+            409,
+            "CONFLICT",
+            "Mailing list email address cannot be removed.",
+        )
     email_address = get_contact_email_address_or_404(
         session,
         contact.id,
@@ -734,3 +885,28 @@ def delete_contact_email_address(
     contact.updated_at = now
     session.commit()
     return {"ok": True, "data": contact_data(contact, session)}
+
+
+@router.delete("/{contact_id}")
+def delete_contact(
+    contact_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    contact = get_contact_or_404(session, contact_id)
+    email_addresses = contact_email_addresses(session, contact.id)
+    if any(email_address.has_inbound_message_history for email_address in email_addresses):
+        raise json_error(
+            409,
+            "CONFLICT",
+            "Contact has email address history and cannot be removed.",
+        )
+
+    now = jst_iso()
+    for email_address in email_addresses:
+        session.delete(email_address)
+    set_contact_tags(session, contact.id, [], now)
+    contact.deleted_at = now
+    contact.version += 1
+    contact.updated_at = now
+    session.commit()
+    return {"ok": True, "data": {"deleted_contact_id": contact.id}}

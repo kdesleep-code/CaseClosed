@@ -259,6 +259,18 @@ contact_status:
   archived
 ```
 
+```text
+contact_kind:
+  person
+  mailing_list
+```
+
+```text
+sender_resolution_mode:
+  self
+  reply_to
+```
+
 注意:
 
 - `skipped` はContact単位のSkipである。
@@ -266,6 +278,10 @@ contact_status:
 - 「メールアドレス単独Skip」という概念は持たない。
 - Fromだけを理由にSkipしたい場合は、そのメールアドレスをContactに登録し、Contact自体を `skipped` にする。
 - `mail_importance_rules` は件名・本文・添付・Gmailラベル等を含むメール条件フィルタであり、アドレス単独Skipの代替としては使わない。
+- `mailing_list` は特殊なContactとして扱う。
+- `sender_resolution_mode = self` は、FromのML Contact自体を送信者として扱う。
+- `sender_resolution_mode = reply_to` は、FromがML Contactだった場合に `Reply-To` を実送信者候補として扱う。
+- `person` は `sender_resolution_mode = self` のみ許可する。
 
 ## 3.6 Email address resolution
 
@@ -621,9 +637,17 @@ gmail_thread_id               TEXT NOT NULL
 thread_id                     TEXT NOT NULL REFERENCES gmail_threads(id)
 direction                     TEXT NOT NULL   -- inbound/outbound
 from_address                  TEXT NULL
+from_name                     TEXT NULL
+sender_address                TEXT NULL
+reply_to_json                 TEXT NULL
 to_json                       TEXT NULL
 cc_json                       TEXT NULL
 bcc_json                      TEXT NULL
+list_id                       TEXT NULL
+message_id_header             TEXT NULL
+in_reply_to_header            TEXT NULL
+references_json               TEXT NULL
+address_headers_json          TEXT NULL
 subject                       TEXT NULL
 snippet                       TEXT NULL
 body_text                     TEXT NULL
@@ -648,6 +672,27 @@ updated_at                    TEXT NOT NULL
 - Gmail既読/未読は変更しない。
 - Gmailスター解除は監視しない。
 - `initial_is_starred = 1` なら `external_importance = high` の根拠となる。
+
+### メール識別子・送信者ヘッダ
+
+- アプリ内の主キーは `gmail_messages.id` とする。
+- Gmail由来の `gmail_message_id` は外部サービス上の不変IDとして `UNIQUE` 制約を持つ。
+- RFC 5322上の `Message-ID` ヘッダは `message_id_header` に保存し、Gmail API上の `gmail_message_id` とは別物として扱う。
+- `gmail_thread_id` / `thread_id` はスレッド集約用であり、メール単体の主キーとして使わない。
+
+送信者・返信先の特定は `from_address` だけで確定しない。メーリングリスト、代理送信、`Reply-To` 変更、Reply All時の参加者増加に備え、Gmailから取得できる住所系ヘッダは一次情報として保存する。
+
+- `from_address` / `from_name`
+- `sender_address`
+- `reply_to_json`
+- `to_json` / `cc_json` / `bcc_json`
+- `list_id`
+- `message_id_header` / `in_reply_to_header` / `references_json`
+- `address_headers_json`
+
+Phase 4 v1のPending判定は従来どおり `from_address` を対象とする。ただし、後続Phaseで `effective_sender_address` やReply All候補を推定できるよう、上記ヘッダは破棄しない。
+
+`list_id` が存在する場合、そのメールはメーリングリスト由来である可能性が高い。Phase 4 v1では `list_id` の存在だけでPendingを回避しないが、後続PhaseでContact/Tag/Case推定の補助情報として使う。
 
 ## 6.3 gmail_attachments_meta
 
@@ -904,6 +949,9 @@ id                  TEXT PRIMARY KEY
 display_name         TEXT NOT NULL
 memo                 TEXT NULL
 status              TEXT NOT NULL DEFAULT 'active'
+kind                TEXT NOT NULL DEFAULT 'person'
+sender_resolution_mode TEXT NOT NULL DEFAULT 'self'
+mailing_list_recipient_expression TEXT NULL
 deleted_at           TEXT NULL
 created_at           TEXT NOT NULL
 updated_at           TEXT NOT NULL
@@ -920,6 +968,51 @@ archived
 
 `skipped` Contactから来たメールは重要度判定前にSkip扱いとする。  
 ただし、個別メールの `user_importance` がある場合はユーザー指定を優先する。
+
+### kind
+
+```text
+person
+mailing_list
+```
+
+`mailing_list` はメーリングリスト、ニュース配信、システム通知など、人物ではなく配送経路・発信元枠として扱う特殊Contactである。
+
+UI・運用上は通常Contactと混ぜない。通常Contact一覧、通常Contact用カスタムタブ、通常Contact向けLLMメモ/Context更新の対象からは除外し、Mailing List専用タブ・専用詳細で扱う。
+
+Mailing List Contactは以下の制約を持つ。
+
+- 1 Contact = 1メールアドレス。
+- メールアドレスは常に `active` / `primary` とし、個別のRemove/Deactivate/Set Primary操作は持たない。
+- Contact tagsは持たない。
+- `mailing-list` は予約語として通常Contactタグにも使わない。
+- 必要に応じて `mailing_list_recipient_expression` に、送信先アドレス設定時の置き換え対象となるタグ式を保存する。
+- memoは持てる。ただしLLMによる自動更新対象にはしない。
+- 関連Caseは持てる。
+
+### sender_resolution_mode
+
+```text
+self
+reply_to
+```
+
+- `self`: FromのContact自体を送信者として扱う。Neuromail等、誰が内部送信者かを追わず「この送信元から来た」と分かればよいケースで使う。
+- `reply_to`: FromがML Contactだった場合、`Reply-To` を実送信者候補として扱う。学内委員会ML等、実際の送信者を把握して対応したいケースで使う。
+
+`person` Contactは `self` のみ許可する。`mailing_list` Contactは `self` / `reply_to` のどちらも選択できる。
+
+### mailing_list_recipient_expression
+
+Mailing Listアドレスを宛先として使う場合に、将来そのアドレスを特定タグ条件のContact群へ置き換えるためのタグ式。
+
+例:
+
+```text
+{筑波大学&学生&!KDE}
+```
+
+Phase 3時点では保存・表示のみでよい。実際の宛先展開はメール送信機能実装時に扱う。
 
 ## 7.2 contact_email_addresses
 
@@ -974,6 +1067,14 @@ deleted
 - `has_inbound_message_history = 0` の場合は、typo等の誤登録として物理削除してよい。
 - `inactive` アドレスが別Contactへ追加・移動された場合は、新規rowを作らず、同じ `normalized_email_address` のrowを再利用して `contact_id` を付け替える。`active` / `inactive` 状態と `deactivated_at` は維持する。
 - `inactive` アドレスは送信先候補、返信先候補、Primary指定の対象にしない。
+- `kind = mailing_list` のContactに紐づくメールアドレスは、常に `active` / `is_primary = 1` とし、個別のRemove/Deactivate/Set Primary操作を許可しない。
+
+### Contact削除
+
+Contactは、紐づく全メールアドレスが物理削除可能な場合のみ削除できる。
+
+- 全メールアドレスの `has_inbound_message_history = 0` なら、メールアドレスを削除し、Contact本体は `deleted_at` を設定して通常一覧から除外する。
+- 1件でも `has_inbound_message_history = 1` があれば、Contact本体削除は不可とする。
 
 ## 7.3 contact_registration_suggestions
 
@@ -1050,6 +1151,11 @@ created_at      TEXT NOT NULL
 ```text
 UNIQUE(contact_id, tag)
 ```
+
+制約:
+
+- `mailing-list` は予約語として使用不可。
+- `kind = mailing_list` のContactにはタグを付与しない。Mailing Listの宛先置き換え条件は `contacts.mailing_list_recipient_expression` に保存する。
 
 ## 7.5 contact_case_links
 

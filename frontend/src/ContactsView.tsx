@@ -4,6 +4,7 @@ import {
   addContactEmailAddress,
   activateContactEmailAddress,
   createContact,
+  deleteContact,
   deleteContactEmailAddress,
   generateContactPrefill,
   listContacts,
@@ -16,17 +17,23 @@ import type { Contact, UnresolvedFromAddress } from './phase3Api'
 import { t } from './i18n'
 
 type ContactsMode = 'list' | 'pending'
-type StatusFilter = 'all' | 'active' | 'skipped' | 'archived'
+type StatusFilter = 'all' | 'active' | 'skipped' | 'archived' | 'mailing_list'
+type ContactKind = 'person' | 'mailing_list'
+type SenderResolutionMode = 'self' | 'reply_to'
 type CustomContactTab = {
   id: string
   label: string
   expression: string
 }
 
-const maxCustomTabs = 6
+const maxCustomTabs = 5
 const maxCustomTabNameLength = 12
 const defaultContactAvatarUrl = new URL(
   './assets/default-contact-avatar.svg',
+  import.meta.url,
+).href
+const defaultMailingListAvatarUrl = new URL(
+  './assets/default-mailing-list-avatar.svg',
   import.meta.url,
 ).href
 
@@ -46,6 +53,16 @@ function primaryEmail(contact: Contact) {
     contact.email_addresses[0] ??
     null
   )
+}
+
+function isMailingListContact(contact: Contact) {
+  return (contact.kind ?? 'person') === 'mailing_list'
+}
+
+function defaultAvatarUrlForContact(contact: Contact) {
+  return isMailingListContact(contact)
+    ? defaultMailingListAvatarUrl
+    : defaultContactAvatarUrl
 }
 
 function normalizeTag(value: string) {
@@ -101,7 +118,6 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
   >({})
   const [displayName, setDisplayName] = useState('')
   const [emailAddress, setEmailAddress] = useState('')
-  const [memo, setMemo] = useState('')
   const [status, setStatus] = useState<'active' | 'skipped'>('active')
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -122,6 +138,13 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
   const [detailStatus, setDetailStatus] = useState<
     'active' | 'skipped' | 'archived'
   >('active')
+  const [detailKind, setDetailKind] = useState<ContactKind>('person')
+  const [detailSenderResolutionMode, setDetailSenderResolutionMode] =
+    useState<SenderResolutionMode>('self')
+  const [
+    detailMailingListRecipientExpression,
+    setDetailMailingListRecipientExpression,
+  ] = useState('')
   const [detailTags, setDetailTags] = useState('')
   const [newEmailAddress, setNewEmailAddress] = useState('')
   const [moveTargetContactIds, setMoveTargetContactIds] = useState<Record<string, string>>(
@@ -173,8 +196,11 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
     try {
       const createdContact = await createContact({
         display_name: displayName,
-        memo,
+        memo: '',
         status,
+        kind: 'person',
+        sender_resolution_mode: 'self',
+        mailing_list_recipient_expression: null,
         tags: [],
         email_addresses:
           emailAddress.trim() === ''
@@ -182,10 +208,15 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
             : [{ email_address: emailAddress, is_primary: true }],
       })
       setContacts((currentContacts) => [...currentContacts, createdContact])
+      setSearchQuery('')
+      setSelectedTagFilter(null)
+      setStatusFilter('all')
+      setActiveCustomTabId(null)
+      setIsCustomTabEditorOpen(false)
       openContactDetail(createdContact)
+      setIsContactDetailEditing(true)
       setDisplayName('')
       setEmailAddress('')
-      setMemo('')
       setStatus('active')
       setIsCreateOpen(false)
     } catch (requestError) {
@@ -247,6 +278,8 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
   async function handleCreatePendingContact(
     item: UnresolvedFromAddress,
     status: 'active' | 'skipped',
+    kind: ContactKind = 'person',
+    senderResolution: SenderResolutionMode = 'self',
   ) {
     const nextDisplayName = pendingDisplayName(item).trim()
     if (nextDisplayName === '') {
@@ -262,6 +295,9 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
         display_name: nextDisplayName,
         memo: '',
         status,
+        kind,
+        sender_resolution_mode: kind === 'person' ? 'self' : senderResolution,
+        mailing_list_recipient_expression: null,
         tags: [],
         email_addresses: [
           { email_address: item.email_address, is_primary: true },
@@ -321,6 +357,11 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
     setDetailDisplayName(contact.display_name)
     setDetailMemo(contact.memo ?? '')
     setDetailStatus(contact.status as 'active' | 'skipped' | 'archived')
+    setDetailKind(contact.kind ?? 'person')
+    setDetailSenderResolutionMode(contact.sender_resolution_mode ?? 'self')
+    setDetailMailingListRecipientExpression(
+      contact.mailing_list_recipient_expression ?? '',
+    )
     setDetailTags(contact.tags.join(', '))
     setNewEmailAddress('')
     setMoveTargetContactIds({})
@@ -338,6 +379,11 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
     setDetailDisplayName(contact.display_name)
     setDetailMemo(contact.memo ?? '')
     setDetailStatus(contact.status as 'active' | 'skipped' | 'archived')
+    setDetailKind(contact.kind ?? 'person')
+    setDetailSenderResolutionMode(contact.sender_resolution_mode ?? 'self')
+    setDetailMailingListRecipientExpression(
+      contact.mailing_list_recipient_expression ?? '',
+    )
     setDetailTags(contact.tags.join(', '))
     setIsContactDetailEditing(true)
   }
@@ -367,12 +413,43 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
         avatar_url: selectedContact.avatar_url,
         memo: detailMemo,
         status: detailStatus,
-        tags: parseTags(detailTags),
+        kind: detailKind,
+        sender_resolution_mode:
+          detailKind === 'person' ? 'self' : detailSenderResolutionMode,
+        mailing_list_recipient_expression:
+          detailKind === 'mailing_list'
+            ? detailMailingListRecipientExpression
+            : null,
+        tags: detailKind === 'mailing_list' ? [] : parseTags(detailTags),
       })
       updateContactInState(updatedContact)
       openContactDetail(updatedContact)
       setIsContactDetailEditing(false)
       setNotice(t('contacts.detail.updated'))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  async function handleDeleteContact() {
+    const selectedContact = contacts.find((contact) => contact.id === selectedContactId)
+    if (selectedContact === undefined) {
+      return
+    }
+
+    setError(null)
+    setNotice(null)
+    setIsSubmitting(true)
+
+    try {
+      await deleteContact(selectedContact.id)
+      setContacts((currentContacts) =>
+        currentContacts.filter((contact) => contact.id !== selectedContact.id),
+      )
+      closeContactDetail()
+      setNotice(t('contacts.detail.deleted'))
     } catch (requestError) {
       setError(describeError(requestError))
     } finally {
@@ -568,10 +645,26 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
 
   const activeCustomTab = customTabs.find((tab) => tab.id === activeCustomTabId)
   const selectedContact = contacts.find((contact) => contact.id === selectedContactId)
-  const moveTargetContacts = contacts.filter((contact) => contact.id !== selectedContactId)
+  const selectedIsMailingList =
+    selectedContact !== undefined && isMailingListContact(selectedContact)
+  const moveTargetContacts = contacts.filter(
+    (contact) =>
+      contact.id !== selectedContactId &&
+      isMailingListContact(contact) === selectedIsMailingList,
+  )
   const shouldShowContactDetailFeedback =
     mode === 'list' && selectedContact !== undefined && (error !== null || notice !== null)
-  const tagCounts = [...contacts.reduce((counts, contact) => {
+  const canDeleteSelectedContact =
+    selectedContact !== undefined &&
+    selectedContact.email_addresses.every(
+      (emailAddress) => emailAddress.has_inbound_message_history !== true,
+    )
+  const baseVisibleKindContacts = contacts.filter((contact) =>
+    statusFilter === 'mailing_list'
+      ? isMailingListContact(contact)
+      : !isMailingListContact(contact),
+  )
+  const tagCounts = [...baseVisibleKindContacts.reduce((counts, contact) => {
     for (const tag of contact.tags) {
       counts.set(tag, (counts.get(tag) ?? 0) + 1)
     }
@@ -589,7 +682,16 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
   const visibleContacts = contacts
     .filter((contact) => {
       if (activeCustomTab !== undefined) {
+        if (isMailingListContact(contact)) {
+          return false
+        }
         return customTabMatches(contact, activeCustomTab.expression)
+      }
+      if (statusFilter === 'mailing_list') {
+        return isMailingListContact(contact)
+      }
+      if (isMailingListContact(contact)) {
+        return false
       }
       if (statusFilter !== 'all' && contact.status !== statusFilter) {
         return false
@@ -616,7 +718,10 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
         contact.display_name,
         contact.memo ?? '',
         contact.status,
-        contact.tags.join(' '),
+        contact.kind ?? 'person',
+        contact.sender_resolution_mode ?? 'self',
+        isMailingListContact(contact) ? '' : contact.tags.join(' '),
+        contact.mailing_list_recipient_expression ?? '',
         ...contact.email_addresses.map((address) => address.email_address),
       ]
         .join(' ')
@@ -714,6 +819,37 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                         type="button"
                       >
                         {t('contacts.createSkipped')}
+                      </button>
+                      <button
+                        aria-label={t('contacts.kind.mailingList')}
+                        disabled={busyEmailAddress === item.email_address}
+                        onClick={() =>
+                          handleCreatePendingContact(
+                            item,
+                            'active',
+                            'mailing_list',
+                            'self',
+                          )
+                        }
+                        type="button"
+                        title={t('contacts.senderResolution.self')}
+                      >
+                        {t('contacts.kind.mailingList')}
+                      </button>
+                      <button
+                        disabled={busyEmailAddress === item.email_address}
+                        onClick={() =>
+                          handleCreatePendingContact(
+                            item,
+                            'active',
+                            'mailing_list',
+                            'reply_to',
+                          )
+                        }
+                        type="button"
+                        title={t('contacts.senderResolution.replyTo')}
+                      >
+                        ML Reply-To
                       </button>
                     </div>
                     <label>
@@ -858,13 +994,6 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                       <option value="skipped">{t('common.skipped')}</option>
                     </select>
                   </label>
-                  <label>
-                    <span>{t('contacts.memo')}</span>
-                    <textarea
-                      onChange={(event) => setMemo(event.target.value)}
-                      value={memo}
-                    />
-                  </label>
                   <button disabled={isSubmitting} type="submit">
                     {t('contacts.create')}
                   </button>
@@ -927,6 +1056,20 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                   )}
                 </div>
                 <div className="contact-list-tabs-right">
+                  <button
+                    aria-controls="contact-list-panel"
+                    aria-selected={
+                      !isCustomTabEditorOpen &&
+                      activeCustomTabId === null &&
+                      statusFilter === 'mailing_list'
+                    }
+                    id="contact-list-tab-mailing_list"
+                    onClick={() => handleStatusTabClick('mailing_list')}
+                    role="tab"
+                    type="button"
+                  >
+                    {t('contacts.kind.mailingList')}
+                  </button>
                   {(['archived', 'skipped'] as const).map((filter) => (
                     <button
                       aria-controls="contact-list-panel"
@@ -979,7 +1122,7 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                           aria-label={t('contacts.customTab.name')}
                           maxLength={maxCustomTabNameLength}
                           onChange={(event) => setCustomTabName(event.target.value)}
-                          placeholder="mailing-list"
+                          placeholder="TsukubaLab"
                           value={customTabName}
                         />
                       </label>
@@ -1024,7 +1167,7 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                                     alt={t('contacts.avatarAlt', {
                                       name: contact.display_name,
                                     })}
-                                    src={contact.avatar_url ?? defaultContactAvatarUrl}
+                                    src={contact.avatar_url ?? defaultAvatarUrlForContact(contact)}
                                   />
                                 </div>
                                 <div>
@@ -1035,10 +1178,30 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                             </div>
                             <div className="contact-row-side">
                               <div className="contact-tags">
-                                <span>{contact.status}</span>
-                                {contact.tags.map((tag) => (
-                                  <span key={tag}>{tag}</span>
-                                ))}
+                                {isMailingListContact(contact) ? (
+                                  <>
+                                    <span>{contact.status}</span>
+                                    <span>
+                                      {contact.mailing_list_recipient_expression ??
+                                        t('common.none')}
+                                    </span>
+                                    <span>
+                                      {t(
+                                        (contact.sender_resolution_mode ?? 'self') ===
+                                          'reply_to'
+                                          ? 'contacts.senderResolution.short.replyTo'
+                                          : 'contacts.senderResolution.short.self',
+                                      )}
+                                    </span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <span>{contact.status}</span>
+                                    {contact.tags.map((tag) => (
+                                      <span key={tag}>{tag}</span>
+                                    ))}
+                                  </>
+                                )}
                               </div>
                               <button
                                 aria-expanded={isExpanded}
@@ -1061,9 +1224,17 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                             </div>
                           </div>
                           {isExpanded && selectedContact !== undefined && (
-                            <div className="contact-detail-card">
+                            <div
+                              className={`contact-detail-card${
+                                selectedIsMailingList ? ' mailing-list-detail-card' : ''
+                              }`}
+                            >
                               <div className="section-heading contact-detail-heading">
-                                <h2 id="contact-detail-heading">{t('contacts.detail.heading')}</h2>
+                                <h2 id="contact-detail-heading">
+                                  {selectedIsMailingList
+                                    ? t('contacts.mailingList.detail.heading')
+                                    : t('contacts.detail.heading')}
+                                </h2>
                                 <div className="contact-detail-actions">
                                   {!isContactDetailEditing && (
                                     <button
@@ -1076,7 +1247,14 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                                 </div>
                               </div>
                               {isContactDetailEditing ? (
-                                <form className="contact-detail-form" onSubmit={handleUpdateContact}>
+                                <form
+                                  className={`contact-detail-form${
+                                    selectedIsMailingList
+                                      ? ' mailing-list-detail-form'
+                                      : ''
+                                  }`}
+                                  onSubmit={handleUpdateContact}
+                                >
                                   <label className="contact-detail-primary">
                                     <span>{t('contacts.displayName')}</span>
                                     <div className="input-with-clear">
@@ -1117,6 +1295,29 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                                       <option value="archived">{t('common.archived')}</option>
                                     </select>
                                   </label>
+                                  {detailKind === 'mailing_list' && (
+                                    <label className="contact-detail-secondary">
+                                      <span>{t('contacts.senderResolution.label')}</span>
+                                      <select
+                                        aria-label={t(
+                                          'contacts.senderResolution.label',
+                                        )}
+                                        onChange={(event) =>
+                                          setDetailSenderResolutionMode(
+                                            event.target.value as SenderResolutionMode,
+                                          )
+                                        }
+                                        value={detailSenderResolutionMode}
+                                      >
+                                        <option value="self">
+                                          {t('contacts.senderResolution.self')}
+                                        </option>
+                                        <option value="reply_to">
+                                          {t('contacts.senderResolution.replyTo')}
+                                        </option>
+                                      </select>
+                                    </label>
+                                  )}
                                   <div className="contact-detail-primary contact-detail-memo-field">
                                     <label>
                                       <span>{t('contacts.memo')}</span>
@@ -1128,14 +1329,31 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                                     </label>
                                   </div>
                                   <div className="contact-detail-secondary contact-detail-tags-field">
-                                    <label>
-                                      <span>{t('contacts.tags')}</span>
-                                      <input
-                                        aria-label={t('contacts.detail.tags')}
-                                        onChange={(event) => setDetailTags(event.target.value)}
-                                        value={detailTags}
-                                      />
-                                    </label>
+                                    {selectedIsMailingList ? (
+                                      <label>
+                                        <span>{t('contacts.mailingList.recipientExpression')}</span>
+                                        <input
+                                          aria-label={t(
+                                            'contacts.mailingList.recipientExpression',
+                                          )}
+                                          onChange={(event) =>
+                                            setDetailMailingListRecipientExpression(
+                                              event.target.value,
+                                            )
+                                          }
+                                          value={detailMailingListRecipientExpression}
+                                        />
+                                      </label>
+                                    ) : (
+                                      <label>
+                                        <span>{t('contacts.tags')}</span>
+                                        <input
+                                          aria-label={t('contacts.detail.tags')}
+                                          onChange={(event) => setDetailTags(event.target.value)}
+                                          value={detailTags}
+                                        />
+                                      </label>
+                                    )}
                                     <button
                                       disabled
                                       title={t('contacts.avatar.unimplemented')}
@@ -1146,17 +1364,66 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                                     <button disabled={isSubmitting} type="submit">
                                       {t('contacts.detail.save')}
                                     </button>
+                                    <button
+                                      disabled={isSubmitting || !canDeleteSelectedContact}
+                                      onClick={handleDeleteContact}
+                                      title={
+                                        !canDeleteSelectedContact
+                                          ? t('contacts.detail.deleteUnavailable')
+                                          : undefined
+                                      }
+                                      type="button"
+                                    >
+                                      {t('contacts.detail.delete')}
+                                    </button>
                                   </div>
                                 </form>
                               ) : (
                                 <div className="contact-detail-summary contact-detail-primary">
+                                  {selectedIsMailingList && (
+                                    <div className="mailing-list-memo-summary">
+                                      <span>{t('contacts.memo')}</span>
+                                      <p>{selectedContact.memo ?? t('contacts.detail.noMemo')}</p>
+                                    </div>
+                                  )}
+                                  {selectedIsMailingList && (
+                                    <div>
+                                      <span>{t('contacts.senderResolution.label')}</span>
+                                      <p>
+                                        {t(
+                                          (selectedContact.sender_resolution_mode ??
+                                            'self') === 'reply_to'
+                                            ? 'contacts.senderResolution.replyTo'
+                                            : 'contacts.senderResolution.self',
+                                        )}
+                                      </p>
+                                    </div>
+                                  )}
+                                  {!selectedIsMailingList && (
                                   <div>
                                     <span>{t('contacts.memo')}</span>
                                     <p>{selectedContact.memo ?? t('contacts.detail.noMemo')}</p>
                                   </div>
+                                  )}
+                                  {selectedIsMailingList && (
+                                    <div>
+                                      <span>{t('contacts.mailingList.recipientExpression')}</span>
+                                      <p>
+                                        {selectedContact.mailing_list_recipient_expression ??
+                                          t('common.none')}
+                                      </p>
+                                    </div>
+                                  )}
+                                  {selectedIsMailingList && (
+                                    <div className="mailing-list-related-summary">
+                                      <span>{t('contacts.relatedCases.heading')}</span>
+                                      <p>{t('contacts.relatedCases.empty')}</p>
+                                    </div>
+                                  )}
                                 </div>
                               )}
-                              <div className="contact-detail-emails contact-detail-primary">
+                              {!selectedIsMailingList && (
+                                <div className="contact-detail-emails contact-detail-primary">
                                 <h3>{t('contacts.emailAddresses.heading')}</h3>
                                 <ul>
                                   {selectedContact.email_addresses.map((emailAddress) => (
@@ -1168,7 +1435,13 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                                       {emailAddress.status === 'inactive' && (
                                         <strong>{t('common.inactive')}</strong>
                                       )}
+                                      {selectedIsMailingList && (
+                                        <span title={t('contacts.email.mailingListFixed')}>
+                                          {t('contacts.email.mailingListFixed')}
+                                        </span>
+                                      )}
                                       {isContactDetailEditing &&
+                                        !selectedIsMailingList &&
                                         !emailAddress.is_primary &&
                                         (emailAddress.status ?? 'active') === 'active' && (
                                           <button
@@ -1185,6 +1458,7 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                                           </button>
                                         )}
                                       {isContactDetailEditing &&
+                                        !selectedIsMailingList &&
                                         emailAddress.status === 'inactive' && (
                                           <button
                                             aria-label={t('contacts.email.activateFor', {
@@ -1205,6 +1479,7 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                                           </button>
                                         )}
                                       {isContactDetailEditing &&
+                                        !selectedIsMailingList &&
                                         emailAddress.status !== 'inactive' && (
                                         <button
                                           aria-label={t(
@@ -1232,6 +1507,7 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                                         </button>
                                         )}
                                       {isContactDetailEditing &&
+                                        !selectedIsMailingList &&
                                         moveTargetContacts.length > 0 && (
                                           <div className="contact-email-move">
                                             <select
@@ -1279,7 +1555,9 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                                     </li>
                                   ))}
                                 </ul>
-                                {isContactDetailEditing && (
+                                {isContactDetailEditing &&
+                                  (!selectedIsMailingList ||
+                                    selectedContact.email_addresses.length === 0) && (
                                   <form
                                     className="contact-email-form"
                                     onSubmit={handleAddEmailAddress}
@@ -1310,11 +1588,14 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                                     </button>
                                   </form>
                                 )}
-                              </div>
-                              <div className="contact-related-cases contact-detail-secondary">
+                                </div>
+                              )}
+                              {!selectedIsMailingList && (
+                                <div className="contact-related-cases contact-detail-secondary">
                                 <h3>{t('contacts.relatedCases.heading')}</h3>
                                 <p>{t('contacts.relatedCases.empty')}</p>
-                              </div>
+                                </div>
+                              )}
                               {shouldShowContactDetailFeedback && (
                                 <div className="contact-detail-feedback">
                                   {error !== null && (

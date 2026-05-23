@@ -798,7 +798,7 @@ LLM/Systemは、ユーザーが設定したprimaryを上書きしてはならな
 
 # 8. Contact状態
 
-## 8.1 状態
+## 8.1 status
 
 ```text
 active
@@ -806,7 +806,34 @@ skipped
 archived
 ```
 
-## 8.2 active
+## 8.2 kind
+
+```text
+person
+mailing_list
+```
+
+`mailing_list` は人物ではなく、メーリングリスト・ニュース配信・システム通知などの特殊Contactである。
+
+通常Contact一覧、通常Contact用カスタムタブ、通常Contact向け詳細、LLMメモ/Context更新の対象には混ぜない。Mailing List専用タブと専用詳細で扱う。
+
+Mailing List Contactは1 Contact = 1メールアドレスとし、Contact tagsは持たない。宛先置き換え条件は `mailing_list_recipient_expression` として保存する。memoと関連Caseは持てるが、LLMによるmemo/Context自動更新の対象にはしない。
+
+Mailing List Contactのメールアドレスは常にActive/Primaryであり、Remove/Deactivate/Set Primary操作を持たない。
+
+## 8.3 sender_resolution_mode
+
+```text
+self
+reply_to
+```
+
+- `self`: FromのContact自体を送信者として扱う。
+- `reply_to`: Fromが `mailing_list` Contactの場合に `Reply-To` を実送信者候補として扱う。
+
+`person` は `self` のみ許可する。`mailing_list` は `self` / `reply_to` を選択できる。
+
+## 8.4 active
 
 通常のContact。
 
@@ -817,7 +844,7 @@ archived
 - LLM文脈
 - 関連人物表示
 
-## 8.3 skipped
+## 8.5 skipped
 
 そのContactからのメールを通常処理対象外にする。
 
@@ -831,13 +858,13 @@ archived
 
 ただし、個別メールに対するユーザー明示重要度変更は優先する。
 
-## 8.4 archived
+## 8.6 archived
 
 通常表示から外すContact。
 
 過去メール・過去Caseとの関係は保持する。
 
-## 8.5 Contact状態遷移
+## 8.7 Contact状態遷移
 
 ```text
 active -> skipped
@@ -847,7 +874,9 @@ skipped -> archived
 archived -> active
 ```
 
-## 8.6 Email Address状態
+Contact本体削除は、紐づく全メールアドレスが物理削除可能な場合のみ許可する。履歴ありメールアドレスが1件でもある場合は削除不可。
+
+## 8.8 Email Address状態
 
 Email Address単位のSkip状態は存在しない。
 
@@ -866,7 +895,7 @@ Contact未登録のメールアドレス。
 
 Contactに紐づいたメールアドレス。
 
-## 8.7 禁止事項
+## 8.9 禁止事項
 
 ```text
 skipped_address状態を作らない

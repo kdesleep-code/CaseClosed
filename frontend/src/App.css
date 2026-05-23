@@ -974,6 +974,26 @@
   gap: 10px;
 }
 
+.mailing-list-detail-card .contact-detail-summary {
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 0.38fr);
+  grid-template-rows: repeat(3, minmax(0, 1fr));
+  align-items: stretch;
+}
+
+.mailing-list-detail-card .mailing-list-memo-summary {
+  grid-row: 1 / span 2;
+  grid-column: 1;
+  grid-row: 1 / span 3;
+  min-height: 216px;
+  align-content: start;
+}
+
+.mailing-list-detail-card .contact-detail-summary div:not(.mailing-list-memo-summary) {
+  min-height: 0;
+  align-content: start;
+}
+
 .contact-detail-primary {
   grid-column: 1;
 }
@@ -1019,6 +1039,20 @@
 .contact-detail-memo-field,
 .contact-detail-tags-field {
   grid-row: 2;
+}
+
+.mailing-list-detail-form .contact-detail-memo-field {
+  grid-column: 1;
+  grid-row: 2 / span 2;
+}
+
+.mailing-list-detail-form .contact-detail-tags-field {
+  grid-column: 2;
+  grid-row: 3;
+}
+
+.mailing-list-detail-form .contact-detail-memo-field textarea {
+  min-height: 184px;
 }
 
 .contact-detail-memo-field label,
