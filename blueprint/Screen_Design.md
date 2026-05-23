@@ -354,7 +354,7 @@ GET /tasks?focus=user
 API:
 
 ```http
-GET /maintenance/summary
+GET /maintenance/status
 ```
 
 ## 2.3 必須操作
@@ -1842,12 +1842,22 @@ Prompt Versionの既存版は上書きせず、変更時は新versionを作成�
 API:
 
 ```http
-GET /maintenance/summary
+GET /maintenance/status
 GET /jobs
 GET /external-operations
 GET /client-certificates
 GET /backups
 ```
+
+### Phase 2タブ構成
+
+- `Usage` タブはDB容量、ストレージ容量、LLM Cost状況などの利用状況表示を受け持つ。
+- `Usage` の3x3現在値カードは、下段にRunning jobs、Pending write requests、External unknownの処理状況カードを置く。
+- `Needs Action` タブはPhase 2の復旧支援向けJob一覧、External Operation一覧を受け持つ。
+- `Usage` の計測値は初期状態ではプレースホルダーでもよく、後続Phaseで取得可能になった項目から追加する。
+- `Usage` は現在値カードを上段に置き、選択したカードの経時変化グラフ領域を下段に置く。
+- グラフ領域は横軸ラベルを持ち、履歴データが未実装の段階でも表示期間切り替えUIを用意する。
+- Phase 2ではグラフ領域は空状態でよい。DB容量、ストレージ容量、下段の処理状況カードなどの履歴保存テーブル、サンプリングJob、保持期間、履歴APIは後続Phaseで設計する。
 
 ## 19.3 必須操作
 
@@ -1896,11 +1906,14 @@ mTLS後のアプリ内パスワード認証を行う。
 ## 20.2 表示項目
 
 - アプリ名
-- 端末名
-- 証明書状態
 - パスワード入力欄
-- ログイン失敗回数
-- ロック状態
+- ログインボタン
+- ログイン失敗時のエラー
+- ロック時のロック状態
+
+初期表示はシンプルに保つ。  
+端末名・証明書状態・失敗回数は、Login画面の常時表示項目にはせず、必要な警告や保守画面で扱う。
+Login画面には、利用者が毎日入りやすい暖かい印象のマスコットイラストを配置してよい。
 
 ## 20.3 認証仕様
 
@@ -2022,7 +2035,7 @@ GET /mails/summary
 GET /mails
 GET /tasks
 GET /contacts/unresolved-from-addresses
-GET /maintenance/summary
+GET /maintenance/status
 ```
 
 ## 23.2 Mail
@@ -2081,7 +2094,7 @@ POST /contacts/unresolved-from-addresses/{encoded_email}/generate-prefill
 ## 23.6 Maintenance
 
 ```text
-GET /maintenance/summary
+GET /maintenance/status
 GET /jobs
 GET /external-operations
 POST /jobs/{job_id}/retry

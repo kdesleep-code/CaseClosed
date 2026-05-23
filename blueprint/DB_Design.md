@@ -129,7 +129,7 @@ SQLite上では以下を基本とする。
 
 ```text
 ID          TEXT    UUID/ULID推奨
-Datetime    TEXT    ISO-8601 UTC
+Datetime    TEXT    ISO-8601 JST (`+09:00`)
 Enum        TEXT
 Boolean     INTEGER 0/1
 JSON        TEXT    JSON文字列
@@ -2010,7 +2010,7 @@ Single DB Writer経由の更新では、ユーザー操作から実DB反映ま�
     "entity_id": "mail_...",
     "patch": {
       "process_status": "processed",
-      "processed_at": "2026-05-22T01:00:00Z"
+      "processed_at": "2026-05-22T10:00:00+09:00"
     }
   }
 }

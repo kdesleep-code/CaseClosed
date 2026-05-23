@@ -1,6 +1,9 @@
 :root {
+  --surface-warm: rgba(255, 248, 239, 0.92);
+  --surface-warm-soft: rgba(246, 222, 187, 0.62);
+  --surface-warm-border: rgba(145, 78, 43, 0.22);
   color: #172033;
-  background: #eef2f8;
+  background: #eed1a0;
   font-family:
     Inter,
     'Segoe UI',
@@ -12,6 +15,10 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+html {
+  scrollbar-gutter: stable;
 }
 
 * {

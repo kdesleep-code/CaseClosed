@@ -205,7 +205,7 @@ API:
 - `POST /auth/login`
 - `POST /auth/logout`
 - `GET /auth/session`
-- `GET /maintenance/summary`
+- `GET /maintenance/status`
 
 画面:
 

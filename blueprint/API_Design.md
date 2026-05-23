@@ -142,6 +142,8 @@ Content-Type: application/json
 Accept: application/json
 ```
 
+Timestamp fields use ISO-8601 JST with the `+09:00` offset.
+
 ファイルアップロードのみ `multipart/form-data` を許可する。
 
 ## 2.4 共通レスポンス形式
@@ -348,7 +350,7 @@ Response:
 {
   "ok": true,
   "data": {
-    "session_expires_at": "2026-05-23T01:00:00Z"
+    "session_expires_at": "2026-05-23T10:00:00+09:00"
   }
 }
 ```

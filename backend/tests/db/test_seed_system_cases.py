@@ -19,3 +19,23 @@ def test_phase_1_seed_data_creates_system_cases(migrated_database) -> None:
         ("システムメンテナンス", "system_maintenance", 1),
     ]
 
+
+def test_phase_1_seed_data_creates_default_settings(migrated_database) -> None:
+    with sqlite3.connect(migrated_database) as connection:
+        rows = connection.execute(
+            """
+            SELECT key, value_json
+            FROM app_settings
+            ORDER BY key
+            """
+        ).fetchall()
+
+    assert rows == [
+        ("default_follow_up_days", "7"),
+        ("llm_cost_limit_daily", "null"),
+        ("llm_cost_limit_monthly", "null"),
+        ("login_failure_limit", "5"),
+        ("session_lifetime_hours", "24"),
+        ("worker_max_count", "4"),
+        ("worker_min_count", "1"),
+    ]

@@ -31,7 +31,7 @@ pytest
 開発用 API サーバー起動例:
 
 ```powershell
-uvicorn caseclosed.main:app --app-dir backend/src --reload
+uvicorn caseclosed.main:app --app-dir backend/src --env-file .env --reload
 ```
 
 Frontend のローカル環境例:
@@ -39,6 +39,7 @@ Frontend のローカル環境例:
 ```powershell
 cd frontend
 npm install
+npm run test
 npm run dev
 ```
 

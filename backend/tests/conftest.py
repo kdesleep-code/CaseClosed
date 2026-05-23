@@ -28,6 +28,16 @@ PHASE_1_TABLES = {
     "system_logs",
 }
 
+PHASE_2_TABLES = {
+    "external_operations",
+    "jobs",
+    "llm_instruction_rules",
+    "llm_runs",
+    "prompt_versions",
+    "schema_versions",
+    "write_requests",
+}
+
 
 @pytest.fixture
 def database_path(tmp_path: Path) -> Path:
@@ -101,3 +111,59 @@ def sqlite_table_names(database_path: Path) -> set[str]:
         ).fetchall()
     return {row[0] for row in rows}
 
+
+def insert_phase_2_job(
+    database_path: Path,
+    *,
+    job_id: str,
+    status: str,
+    job_type: str = "gmail_sync",
+) -> None:
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO jobs (
+                id, job_type, priority, status, payload_json, retry_count,
+                max_retries, created_at, updated_at
+            ) VALUES (?, ?, 100, ?, '{}', 0, 3, ?, ?)
+            """,
+            (
+                job_id,
+                job_type,
+                status,
+                "2026-05-22T10:00:00+09:00",
+                "2026-05-22T10:00:00+09:00",
+            ),
+        )
+        connection.commit()
+
+
+def insert_phase_2_external_operation(
+    database_path: Path,
+    *,
+    operation_id: str,
+    status: str,
+) -> None:
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO external_operations (
+                id, operation_type, status, idempotency_key,
+                request_payload_hash, request_payload_json, external_service,
+                unknown_at, unknown_reason, manual_resolution_required,
+                created_at, updated_at
+            ) VALUES (?, 'gmail_send', ?, ?, 'payload-hash', '{}', 'gmail',
+                ?, ?, ?, ?, ?)
+            """,
+            (
+                operation_id,
+                status,
+                f"gmail_send:{operation_id}",
+                "2026-05-22T10:00:00+09:00" if status == "unknown" else None,
+                "network result unknown" if status == "unknown" else None,
+                1 if status == "unknown" else 0,
+                "2026-05-22T10:00:00+09:00",
+                "2026-05-22T10:00:00+09:00",
+            ),
+        )
+        connection.commit()
