@@ -7,6 +7,7 @@ from typing import Protocol
 
 from sqlalchemy import or_
 from sqlalchemy import select
+from sqlalchemy import update
 
 from caseclosed.db import runtime
 from caseclosed.db.models import Job
@@ -33,26 +34,39 @@ class SQLiteQueue:
     def claim_next(self, worker_id: str) -> Job | None:
         claimed_at = runtime.jst_iso()
         with runtime.SessionLocal() as session:
-            job = session.scalar(
-                select(Job)
-                .where(
-                    Job.status == "pending",
-                    or_(Job.available_at.is_(None), Job.available_at <= claimed_at),
+            for _ in range(3):
+                job_id = session.scalar(
+                    select(Job.id)
+                    .where(
+                        Job.status == "pending",
+                        or_(Job.available_at.is_(None), Job.available_at <= claimed_at),
+                    )
+                    .order_by(Job.priority, Job.created_at, Job.id)
                 )
-                .order_by(Job.priority, Job.created_at, Job.id)
-            )
-            if job is None:
-                return None
+                if job_id is None:
+                    return None
 
-            job.status = "running"
-            job.locked_by = worker_id
-            job.locked_at = claimed_at
-            job.heartbeat_at = claimed_at
-            job.started_at = claimed_at
-            job.finished_at = None
-            job.updated_at = claimed_at
-            session.commit()
-            return job
+                result = session.execute(
+                    update(Job)
+                    .where(Job.id == job_id, Job.status == "pending")
+                    .values(
+                        status="running",
+                        locked_by=worker_id,
+                        locked_at=claimed_at,
+                        heartbeat_at=claimed_at,
+                        started_at=claimed_at,
+                        finished_at=None,
+                        updated_at=claimed_at,
+                    )
+                )
+                if result.rowcount != 1:
+                    session.rollback()
+                    continue
+
+                session.commit()
+                return session.get(Job, job_id)
+
+            return None
 
     def heartbeat(self, job_id: str, worker_id: str) -> Job:
         heartbeat_at = runtime.jst_iso()
@@ -110,9 +124,24 @@ class SQLiteQueue:
                 if now - runtime.parse_iso_datetime(last_heartbeat) <= heartbeat_timeout:
                     continue
 
-                job.status = "stale"
-                job.updated_at = stale_at
                 stale_ids.append(job.id)
+                next_retry_count = job.retry_count + 1
+                if next_retry_count > job.max_retries:
+                    job.status = "failed"
+                    job.error_type = "StaleJobTimeout"
+                    job.error_message = "Running job exceeded heartbeat timeout."
+                    job.finished_at = stale_at
+                else:
+                    job.status = "pending"
+                    job.error_type = "StaleJobTimeout"
+                    job.error_message = "Running job exceeded heartbeat timeout and was requeued."
+                    job.locked_by = None
+                    job.locked_at = None
+                    job.heartbeat_at = None
+                    job.started_at = None
+                    job.finished_at = None
+                    job.retry_count = next_retry_count
+                job.updated_at = stale_at
 
             session.commit()
         return stale_ids

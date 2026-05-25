@@ -15,23 +15,35 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session as DatabaseSession
 
 from caseclosed.auth import json_error
+from caseclosed.db.models import AppSetting
 from caseclosed.db.models import Contact
 from caseclosed.db.models import ContactEmailAddress
 from caseclosed.db.models import ContactTag
 from caseclosed.db.models import GmailMessage
 from caseclosed.db.models import Job
 from caseclosed.db.models import MailAutoState
+from caseclosed.db.models import MailLlmBlockFilter
 from caseclosed.db.models import MailSendRequest
 from caseclosed.db.models import MailSummary
+from caseclosed.db.models import MailThreadSummary
 from caseclosed.db.models import MailUserState
 from caseclosed.db.runtime import get_session
 from caseclosed.db.runtime import jst_now
 from caseclosed.db.runtime import jst_iso
+from caseclosed.email_addressing import normalize_address_list
+from caseclosed.email_addressing import normalize_email_address
 from caseclosed.services.mail_ingestion import MailIngestionResult
 from caseclosed.services.mail_ingestion import MockMailInput
 from caseclosed.services.mail_ingestion import apply_contact_mail_importance_rule
+from caseclosed.services.mail_ingestion import block_filter_tokens
 from caseclosed.services.mail_ingestion import ingest_mock_mail
 from caseclosed.services.mail_ingestion import message_is_sent
+from caseclosed.services.mail_ingestion import row_matches_llm_block_query
+from caseclosed.services.background_worker import kick_job_drain
+from caseclosed.services.llm_provider import LLM_FUNCTION_TYPES
+from caseclosed.services.llm_provider import list_llm_model_profiles
+from caseclosed.services.llm_provider import llm_function_config_data
+from caseclosed.services.llm_provider import llm_model_profile_data
 from caseclosed.services.mail_summary import SUMMARY_TARGET_IMPORTANCE
 from caseclosed.services.mail_summary import enqueue_mail_summary_job
 
@@ -91,6 +103,15 @@ class MailLlmBlockFilterPayload(BaseModel):
     reason: str | None = None
 
 
+class MailLlmBlockFilterUpdatePayload(BaseModel):
+    is_enabled: bool
+
+
+class LlmModelAssignmentPayload(BaseModel):
+    function_type: str
+    profile_id: str
+
+
 IMPORTANCE_RANKS = {
     "pinned": 0,
     "high": 1,
@@ -127,27 +148,6 @@ def json_list(value: str | None) -> list[str]:
 
     loaded = json.loads(value)
     return loaded if isinstance(loaded, list) else []
-
-
-def normalize_email_address(email_address: str) -> str:
-    return email_address.strip().lower()
-
-
-def normalize_address_list(addresses: list[str] | None) -> list[str]:
-    if addresses is None:
-        return []
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for address in addresses:
-        cleaned = address.strip()
-        if cleaned == "":
-            continue
-        key = cleaned.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        normalized.append(cleaned)
-    return normalized
 
 
 def mail_send_request_data(send_request: MailSendRequest) -> dict[str, object]:
@@ -534,6 +534,33 @@ def mail_summary_data(summary: MailSummary) -> dict[str, object]:
     }
 
 
+def mail_thread_summary_data(
+    summary: MailThreadSummary,
+    *,
+    item_summaries: list[MailSummary] | None = None,
+) -> dict[str, object]:
+    return {
+        "id": summary.id,
+        "thread_id": summary.thread_id,
+        "summary_text": summary.summary_text,
+        "action_required": bool(summary.action_required)
+        if summary.action_required is not None
+        else None,
+        "next_action": summary.next_action,
+        "key_points": json_list(summary.key_points_json),
+        "translation_text": summary.translation_text,
+        "language": summary.language,
+        "llm_run_id": summary.llm_run_id,
+        "updated_at": summary.updated_at,
+        "version": summary.version,
+        "items": (
+            [mail_summary_data(item_summary) for item_summary in item_summaries]
+            if item_summaries is not None
+            else []
+        ),
+    }
+
+
 def combined_thread_summary_data(summaries: list[MailSummary]) -> dict[str, object] | None:
     if len(summaries) == 0:
         return None
@@ -553,6 +580,15 @@ def latest_thread_summary(
         .where(GmailMessage.thread_id == thread_id)
         .order_by(GmailMessage.received_at.desc(), GmailMessage.id.desc())
         .limit(1)
+    )
+
+
+def stored_thread_summary(
+    session: DatabaseSession,
+    thread_id: str,
+) -> MailThreadSummary | None:
+    return session.scalar(
+        select(MailThreadSummary).where(MailThreadSummary.thread_id == thread_id)
     )
 
 
@@ -594,6 +630,16 @@ def normalize_importance_filter(value: str) -> str:
     if normalized in {"pending", "unclassified"}:
         return normalized
     return normalize_importance(normalized)
+
+
+def normalize_importance_filter_set(value: str | None) -> set[str]:
+    if value is None or value.strip() == "":
+        return set()
+    return {
+        normalize_importance_filter(part)
+        for part in value.split(",")
+        if part.strip() != ""
+    }
 
 
 def normalize_processed_filter(value: str) -> str:
@@ -661,26 +707,6 @@ def decode_cursor(cursor: str) -> tuple[str, str]:
     return payload["received_at"], payload["id"]
 
 
-def row_matches_query(message: GmailMessage, tokens: list[str]) -> bool:
-    searchable_values = [
-        message.subject,
-        message.from_address,
-        message.from_name,
-        message.sender_address,
-        message.reply_to_address,
-        message.to_addresses_json,
-        message.cc_addresses_json,
-        message.bcc_addresses_json,
-        message.message_id_header,
-        message.list_id,
-        message.body_text,
-        message.snippet,
-    ]
-    searchable_text = "\n".join(value for value in searchable_values if value)
-    searchable_text = searchable_text.lower()
-    return all(token in searchable_text for token in tokens)
-
-
 def llm_blocked_mail_data(
     message: GmailMessage,
     auto_state: MailAutoState,
@@ -693,6 +719,65 @@ def llm_blocked_mail_data(
         "llm_block_reason": auto_state.llm_block_reason,
         "llm_blocked_at": auto_state.llm_blocked_at,
     }
+
+
+def llm_block_filter_data(block_filter: MailLlmBlockFilter) -> dict[str, object]:
+    return {
+        "id": block_filter.id,
+        "query_text": block_filter.query_text,
+        "reason": block_filter.reason,
+        "is_enabled": bool(block_filter.is_enabled),
+        "created_at": block_filter.created_at,
+        "updated_at": block_filter.updated_at,
+        "version": block_filter.version,
+    }
+
+
+LLM_PROFILE_ASSIGNMENTS_KEY = "llm_profile_assignments"
+
+
+def read_llm_profile_assignments(session: DatabaseSession) -> dict[str, str]:
+    setting = session.scalar(
+        select(AppSetting).where(AppSetting.key == LLM_PROFILE_ASSIGNMENTS_KEY)
+    )
+    if setting is None:
+        return {}
+
+    data = json.loads(setting.value_json)
+    if not isinstance(data, dict):
+        return {}
+
+    return {
+        str(function_type): str(profile_id)
+        for function_type, profile_id in data.items()
+        if isinstance(function_type, str)
+        and isinstance(profile_id, str)
+        and profile_id.strip() != ""
+    }
+
+
+def write_llm_profile_assignments(
+    session: DatabaseSession,
+    assignments: dict[str, str],
+    now: str,
+) -> None:
+    setting = session.scalar(
+        select(AppSetting).where(AppSetting.key == LLM_PROFILE_ASSIGNMENTS_KEY)
+    )
+    value_json = json.dumps(assignments, ensure_ascii=True, sort_keys=True)
+    if setting is None:
+        session.add(
+            AppSetting(
+                id=f"setting_{LLM_PROFILE_ASSIGNMENTS_KEY}",
+                key=LLM_PROFILE_ASSIGNMENTS_KEY,
+                value_json=value_json,
+                updated_at=now,
+            )
+        )
+        return
+
+    setting.value_json = value_json
+    setting.updated_at = now
 
 
 def aggregate_thread_rows(
@@ -866,6 +951,7 @@ def detail_data(
         )
         .order_by(MailSendRequest.scheduled_at, MailSendRequest.created_at, MailSendRequest.id)
     ).all()
+    thread_summary = stored_thread_summary(session, message.thread_id)
     return {
         "message": message_data(
             message,
@@ -890,7 +976,11 @@ def detail_data(
         ],
         "user_state": user_state_data(user_state),
         "auto_state": auto_state_data(auto_state, user_state),
-        "summary": combined_thread_summary_data(list(summaries)),
+        "summary": (
+            mail_thread_summary_data(thread_summary, item_summaries=list(summaries))
+            if thread_summary is not None
+            else combined_thread_summary_data(list(summaries))
+        ),
         "case_links": [],
         "attachments": [],
         "drafts": [],
@@ -916,6 +1006,7 @@ def list_item_data(
     contact_row = contact_for_address(session, message.from_address)
     is_sent = message_is_sent(message)
     summary = latest_thread_summary(session, message.thread_id)
+    thread_summary = stored_thread_summary(session, message.thread_id)
     return {
         "id": message.id,
         "gmail_message_id": message.gmail_message_id,
@@ -949,7 +1040,11 @@ def list_item_data(
         "case_links": [],
         "summary": None
         if is_sent or effective_importance not in SUMMARY_TARGET_IMPORTANCE
-        else (summary.summary_text if summary is not None else None),
+        else (
+            thread_summary.summary_text
+            if thread_summary is not None
+            else summary.summary_text if summary is not None else None
+        ),
     }
 
 
@@ -992,6 +1087,7 @@ def mock_ingest_mail(
             external_starred=payload.external_starred,
         ),
     )
+    kick_job_drain(reason="mock_mail_ingested")
     return {"ok": True, "data": mock_mail_result_data(result)}
 
 
@@ -1152,6 +1248,7 @@ def list_mails(
     tab: str = "all",
     processed: str = "all",
     importance: str = "all",
+    importance_any: str | None = None,
     contact_status: str = "all",
     read: str = "all",
     q: str | None = None,
@@ -1165,6 +1262,7 @@ def list_mails(
     normalized_processed = normalize_processed_filter(processed)
     normalized_contact_status = normalize_contact_status_filter(contact_status)
     normalized_read = normalize_read_filter(read)
+    normalized_importance_any = normalize_importance_filter_set(importance_any)
     normalized_limit = normalize_limit(limit)
     statement = (
         select(GmailMessage, MailUserState, MailAutoState)
@@ -1178,7 +1276,8 @@ def list_mails(
         matching_thread_ids = {
             message.thread_id
             for message, _, _ in all_rows
-            if not message_is_sent(message) and row_matches_query(message, query_tokens)
+            if not message_is_sent(message)
+            and row_matches_llm_block_query(message, query_tokens)
         }
         all_rows = [
             row
@@ -1226,6 +1325,10 @@ def list_mails(
         aggregated_rows = [
             row for row in aggregated_rows if row[3] == normalized_importance
         ]
+    if normalized_importance_any:
+        aggregated_rows = [
+            row for row in aggregated_rows if row[3] in normalized_importance_any
+        ]
 
     if normalized_contact_status == "pending":
         aggregated_rows = [row for row in aggregated_rows if row[2].pending_reason is not None]
@@ -1242,6 +1345,7 @@ def list_mails(
         normalized_tab in {"all", "processed"}
         and normalized_processed in {"all", "1", "processed"}
         and importance == "all"
+        and not normalized_importance_any
         and normalized_contact_status != "pending"
         and normalized_read in {"all", "read"}
     ):
@@ -1365,19 +1469,100 @@ def list_llm_blocked_mails(
     }
 
 
+@router.get("/llm-model-config")
+def get_llm_model_config(
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    # Read the DB setting once so later function data resolves runtime overrides.
+    read_llm_profile_assignments(session)
+    return {
+        "ok": True,
+        "data": {
+            "profiles": [
+                llm_model_profile_data(profile) for profile in list_llm_model_profiles()
+            ],
+            "functions": [
+                llm_function_config_data(function_type)
+                for function_type in LLM_FUNCTION_TYPES
+            ],
+        },
+    }
+
+
+@router.patch("/llm-model-config")
+def update_llm_model_assignment(
+    payload: LlmModelAssignmentPayload,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    if payload.function_type not in LLM_FUNCTION_TYPES:
+        raise json_error(422, "VALIDATION_ERROR", "Invalid LLM function type.")
+
+    profile_id = payload.profile_id.strip()
+    profile_ids = {profile.id for profile in list_llm_model_profiles()}
+    if profile_id != "mock" and profile_id not in profile_ids:
+        raise json_error(422, "VALIDATION_ERROR", "Invalid LLM model profile.")
+
+    now = jst_iso()
+    assignments = read_llm_profile_assignments(session)
+    assignments[payload.function_type] = profile_id
+    write_llm_profile_assignments(session, assignments, now)
+    session.commit()
+    kick_job_drain(reason="pending_mail_refreshed")
+    return {
+        "ok": True,
+        "data": {
+            "profiles": [
+                llm_model_profile_data(profile) for profile in list_llm_model_profiles()
+            ],
+            "functions": [
+                llm_function_config_data(function_type)
+                for function_type in LLM_FUNCTION_TYPES
+            ],
+        },
+    }
+
+
+@router.get("/llm-block-filters")
+def list_llm_block_filters(
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    filters = session.scalars(
+        select(MailLlmBlockFilter).order_by(
+            MailLlmBlockFilter.created_at.desc(),
+            MailLlmBlockFilter.id.desc(),
+        )
+    ).all()
+    return {
+        "ok": True,
+        "data": {"items": [llm_block_filter_data(block_filter) for block_filter in filters]},
+    }
+
+
 @router.post("/llm-block-filter")
 def apply_llm_block_filter(
     payload: MailLlmBlockFilterPayload,
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
-    tokens = [token.lower() for token in payload.q.strip().split()]
+    query_text = payload.q.strip()
+    tokens = block_filter_tokens(query_text)
     if len(tokens) == 0:
         raise json_error(422, "VALIDATION_ERROR", "Filter query is required.")
 
     now = jst_iso()
     reason = payload.reason.strip() if payload.reason is not None else ""
     if reason == "":
-        reason = f"Matched maintenance LLM block filter: {payload.q.strip()}"
+        reason = f"Matched maintenance LLM block filter: {query_text}"
+
+    block_filter = MailLlmBlockFilter(
+        id=new_id("mail_llm_block_filter"),
+        query_text=query_text,
+        reason=reason,
+        is_enabled=1,
+        created_at=now,
+        updated_at=now,
+        version=1,
+    )
+    session.add(block_filter)
 
     rows = session.execute(
         select(GmailMessage, MailAutoState)
@@ -1387,7 +1572,7 @@ def apply_llm_block_filter(
     matched_rows = [
         (message, auto_state)
         for message, auto_state in rows
-        if row_matches_query(message, tokens)
+        if not message_is_sent(message) and row_matches_llm_block_query(message, tokens)
     ]
     changed = 0
     for message, auto_state in matched_rows:
@@ -1403,6 +1588,7 @@ def apply_llm_block_filter(
     return {
         "ok": True,
         "data": {
+            "filter": llm_block_filter_data(block_filter),
             "matched": len(matched_rows),
             "changed": changed,
             "items": [
@@ -1411,6 +1597,23 @@ def apply_llm_block_filter(
             ],
         },
     }
+
+
+@router.patch("/llm-block-filters/{filter_id}")
+def update_llm_block_filter(
+    filter_id: str,
+    payload: MailLlmBlockFilterUpdatePayload,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    block_filter = session.get(MailLlmBlockFilter, filter_id)
+    if block_filter is None:
+        raise json_error(404, "NOT_FOUND", "LLM block filter was not found.")
+
+    block_filter.is_enabled = 1 if payload.is_enabled else 0
+    block_filter.updated_at = jst_iso()
+    block_filter.version += 1
+    session.commit()
+    return {"ok": True, "data": llm_block_filter_data(block_filter)}
 
 
 @router.get("/dates")
@@ -1540,7 +1743,34 @@ def update_mail_importance(
     if importance in SUMMARY_TARGET_IMPORTANCE and not message_is_sent(message):
         enqueue_mail_summary_job(session, message, now)
     session.commit()
+    kick_job_drain(reason="mail_importance_updated")
     return {"ok": True, "data": detail_data(session, message, user_state, auto_state)}
+
+
+@router.post("/{message_id}/summary")
+def request_mail_summary(
+    message_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    message, _user_state, auto_state = get_mail_bundle(session, message_id)
+    if message_is_sent(message):
+        raise json_error(409, "CONFLICT", "Sent mail cannot be summarized.")
+    if auto_state.pending_reason is not None:
+        raise json_error(409, "CONFLICT", "Pending mail cannot be summarized.")
+    if bool(auto_state.llm_blocked):
+        raise json_error(409, "CONFLICT", "LLM blocked mail cannot be summarized.")
+
+    now = jst_iso()
+    job_id = enqueue_mail_summary_job(
+        session,
+        message,
+        now,
+        force=True,
+        reason="manual_request",
+    )
+    session.commit()
+    kick_job_drain(reason="mail_summary_requested")
+    return {"ok": True, "data": {"job_id": job_id}}
 
 
 @router.post("/{message_id}/process")

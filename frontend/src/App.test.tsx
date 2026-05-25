@@ -686,6 +686,7 @@ describe('Phase 4 mail screen', () => {
     const ingested = true
     let processed = false
     let scheduledCanceled = false
+    let summaryRequested = false
     const fetchMock = vi.fn((input: string | URL | Request, init?: RequestInit) => {
       const path = input.toString()
       if (path === '/api/v1/auth/session') {
@@ -737,6 +738,27 @@ describe('Phase 4 mail screen', () => {
               effective_importance: 'pending',
               pending_reason: 'unresolved_from_contact',
             },
+            summary: summaryRequested
+              ? {
+                  summary_text: 'Thread summary after manual request.',
+                  items: [
+                    {
+                      id: 'summary_mail_new',
+                      message_id: 'mail_new',
+                      summary_text: 'Mail summary after manual request.',
+                      action_required: true,
+                      deadline_text: null,
+                      next_action: 'Review it.',
+                      key_points: ['Review requested'],
+                      translation_text: 'メール要約後の和訳。',
+                      language: 'ja',
+                      llm_run_id: 'llm_run_summary',
+                      updated_at: '2026-05-23T13:03:00+09:00',
+                      version: 1,
+                    },
+                  ],
+                }
+              : null,
             available_actions: ['resolve_contact'],
           },
         })
@@ -776,8 +798,16 @@ describe('Phase 4 mail screen', () => {
               effective_importance: 'pending',
               pending_reason: 'unresolved_from_contact',
             },
+            summary: null,
             available_actions: ['resolve_contact'],
           },
+        })
+      }
+      if (path === '/api/v1/mails/mail_new/summary' && init?.method === 'POST') {
+        summaryRequested = true
+        return apiResponse(200, {
+          ok: true,
+          data: { job_id: 'job_mail_summary_manual' },
         })
       }
       if (path === '/api/v1/mails/mail_new/process' && init?.method === 'POST') {
@@ -816,6 +846,27 @@ describe('Phase 4 mail screen', () => {
               effective_importance: 'pending',
               pending_reason: 'unresolved_from_contact',
             },
+            summary: summaryRequested
+              ? {
+                  summary_text: 'Thread summary after manual request.',
+                  items: [
+                    {
+                      id: 'summary_mail_new',
+                      message_id: 'mail_new',
+                      summary_text: 'Mail summary after manual request.',
+                      action_required: true,
+                      deadline_text: null,
+                      next_action: 'Review it.',
+                      key_points: ['Review requested'],
+                      translation_text: 'メール要約後の和訳。',
+                      language: 'ja',
+                      llm_run_id: 'llm_run_summary',
+                      updated_at: '2026-05-23T13:03:00+09:00',
+                      version: 1,
+                    },
+                  ],
+                }
+              : null,
             available_actions: ['resolve_contact'],
           },
         })
@@ -902,7 +953,15 @@ describe('Phase 4 mail screen', () => {
     expect(screen.getByText('Scheduled reply body.')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Summary' }))
-    expect(screen.queryByText('Summary mock requested.')).not.toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/mails/mail_new/summary',
+      expect.objectContaining({
+        credentials: 'include',
+        method: 'POST',
+      }),
+    )
+    expect(await screen.findByText('Mail summary after manual request.')).toBeInTheDocument()
+    expect(screen.getByText('メール要約後の和訳。')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Cancel send' }))
     expect(fetchMock).toHaveBeenCalledWith(
@@ -1147,7 +1206,7 @@ describe('Phase 2 maintenance screen', () => {
       screen.getByRole('button', { name: /Pending write requests 2/ }),
     ).toBeInTheDocument()
     await user.click(screen.getByRole('tab', { name: /Needs Action/ }))
-    expect(await screen.findByLabelText('3 actions required')).toHaveTextContent('3')
+    expect(await screen.findByLabelText('2 actions required')).toHaveTextContent('2')
     expect(await screen.findByRole('row', { name: /job_failed/ })).toHaveTextContent(
       'gmail_sync',
     )
@@ -1191,7 +1250,7 @@ describe('Phase 2 maintenance screen', () => {
     ).toHaveTextContent('Pending review: normal person')
     expect(
       screen.getByText(
-        'This mail is pending even though it may not appear in Pending Contacts. Check sender resolution consistency.',
+        'This mail still has an unresolved sender. Resolve or create the contact from Pending Contacts.',
       ),
     ).toBeInTheDocument()
   })
@@ -1475,6 +1534,49 @@ describe('Phase 2 maintenance screen', () => {
                   from_address: 'secret@example.com',
                   llm_block_reason: 'May contain password.',
                   llm_blocked_at: '2026-05-25T02:21:00+09:00',
+                },
+              ],
+            },
+          })
+        }
+        if (path === '/api/v1/mails/llm-model-config') {
+          return apiResponse(200, {
+            ok: true,
+            data: {
+              profiles: [
+                {
+                  id: 'openai_gpt_5_2',
+                  provider: 'openai',
+                  model: 'gpt-5.2',
+                  api_key_env: 'CASECLOSED_OPENAI_API_KEY',
+                  endpoint_env: null,
+                  timeout_seconds: 30,
+                },
+              ],
+              functions: [
+                {
+                  function_type: 'mail_importance_classification',
+                  label: 'mail importance classification',
+                  profile_id: 'openai_gpt_5_2',
+                  env_key: 'CASECLOSED_LLM_PROFILE_MAIL_IMPORTANCE_CLASSIFICATION',
+                },
+              ],
+            },
+          })
+        }
+        if (path === '/api/v1/mails/llm-block-filters') {
+          return apiResponse(200, {
+            ok: true,
+            data: {
+              items: [
+                {
+                  id: 'mail_llm_block_filter_review',
+                  query_text: 'password',
+                  reason: 'May contain password.',
+                  is_enabled: true,
+                  created_at: '2026-05-25T02:19:00+09:00',
+                  updated_at: '2026-05-25T02:19:00+09:00',
+                  version: 1,
                 },
               ],
             },

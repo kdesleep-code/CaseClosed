@@ -8,7 +8,6 @@ import {
   listJobs,
   listPendingMails,
   readMaintenanceStatus,
-  refreshPendingMail,
   resolveExternalOperation,
   retryJob,
 } from './phase2Api'
@@ -20,12 +19,21 @@ import type {
 } from './phase2Api'
 import {
   applyMailLlmBlockFilter,
+  getLlmModelConfig,
   ingestMockMail,
+  listLlmBlockFilters,
   listLlmBlockedMails,
   listMailSendRequests,
   runNextJob,
+  updateLlmBlockFilter,
+  updateLlmModelAssignment,
 } from './phase4Api'
-import type { LlmBlockedMail, MailSendRequest } from './phase4Api'
+import type {
+  LlmBlockFilter,
+  LlmBlockedMail,
+  LlmModelConfig,
+  MailSendRequest,
+} from './phase4Api'
 
 const usageMetrics = [
   { key: 'database', labelKey: 'maintenance.metric.database' },
@@ -140,12 +148,10 @@ function uniqueSuffix() {
 function countRequiredActions(
   jobs: Job[],
   operations: ExternalOperation[],
-  pendingMails: PendingMail[],
 ) {
   return (
     jobs.filter(jobNeedsAction).length +
-    operations.filter((operation) => operation.status === 'unknown').length +
-    pendingMails.length
+    operations.filter((operation) => operation.status === 'unknown').length
   )
 }
 
@@ -221,6 +227,8 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
     initialData?.pendingMails ?? [],
   )
   const [sendRequests, setSendRequests] = useState<MailSendRequest[] | null>(null)
+  const [llmModelConfig, setLlmModelConfig] = useState<LlmModelConfig | null>(null)
+  const [llmBlockFilters, setLlmBlockFilters] = useState<LlmBlockFilter[] | null>(null)
   const [llmBlockedMails, setLlmBlockedMails] = useState<LlmBlockedMail[] | null>(null)
   const [debugSubject, setDebugSubject] = useState('Review mock mail')
   const [debugFromAddress, setDebugFromAddress] = useState(
@@ -241,7 +249,7 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
   const [activeUsageHistoryRange, setActiveUsageHistoryRange] =
     useState<UsageHistoryRange>(usageHistoryRanges[0])
   const actionJobs = jobs.filter(jobNeedsAction)
-  const requiredActionCount = countRequiredActions(jobs, operations, pendingMails)
+  const requiredActionCount = countRequiredActions(jobs, operations)
   const requiredActionLabel = requiredActionCount > 9 ? '9+' : requiredActionCount
 
   useEffect(() => {
@@ -301,20 +309,27 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
   }, [activeTab, sendRequests])
 
   useEffect(() => {
-    if (activeTab !== 'debug' || llmBlockedMails !== null) {
+    if (
+      activeTab !== 'debug' ||
+      (llmBlockedMails !== null && llmBlockFilters !== null && llmModelConfig !== null)
+    ) {
       return
     }
 
     let isMounted = true
-    listLlmBlockedMails()
-      .then((nextMails) => {
+    Promise.all([getLlmModelConfig(), listLlmBlockFilters(), listLlmBlockedMails()])
+      .then(([nextModelConfig, nextFilters, nextMails]) => {
         if (isMounted) {
+          setLlmModelConfig(nextModelConfig)
+          setLlmBlockFilters(nextFilters)
           setLlmBlockedMails(nextMails)
         }
       })
       .catch((requestError) => {
         if (isMounted) {
           setError(describeError(requestError))
+          setLlmModelConfig({ profiles: [], functions: [] })
+          setLlmBlockFilters([])
           setLlmBlockedMails([])
         }
       })
@@ -322,7 +337,7 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
     return () => {
       isMounted = false
     }
-  }, [activeTab, llmBlockedMails])
+  }, [activeTab, llmBlockedMails, llmBlockFilters, llmModelConfig])
 
   async function handleRetry(job: Job) {
     setBusyId(job.id)
@@ -356,24 +371,13 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
     }
   }
 
-  async function handleRefreshPendingMail(mail: PendingMail) {
-    setBusyId(mail.id)
-    setError(null)
-    try {
-      await refreshPendingMail(mail.id)
-      setPendingMails(await listPendingMails())
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setBusyId(null)
-    }
-  }
-
   async function refreshSendRequests() {
     setSendRequests(await listMailSendRequests())
   }
 
   async function refreshLlmBlockedMails() {
+    setLlmModelConfig(await getLlmModelConfig())
+    setLlmBlockFilters(await listLlmBlockFilters())
     setLlmBlockedMails(await listLlmBlockedMails())
   }
 
@@ -438,6 +442,9 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
         llmBlockQuery,
         llmBlockReason.trim() === '' ? null : llmBlockReason,
       )
+      setLlmBlockFilters((currentFilters) =>
+        currentFilters === null ? [result.filter] : [result.filter, ...currentFilters],
+      )
       setDebugNotice(
         t('maintenance.debug.llmBlockApplied', {
           matched: result.matched,
@@ -445,6 +452,40 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
         }),
       )
       await refreshLlmBlockedMails()
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsDebugBusy(false)
+    }
+  }
+
+  async function handleToggleLlmBlockFilter(blockFilter: LlmBlockFilter) {
+    setError(null)
+    setIsDebugBusy(true)
+    try {
+      const updatedFilter = await updateLlmBlockFilter(
+        blockFilter.id,
+        !blockFilter.is_enabled,
+      )
+      setLlmBlockFilters((currentFilters) =>
+        currentFilters === null
+          ? [updatedFilter]
+          : currentFilters.map((currentFilter) =>
+              currentFilter.id === updatedFilter.id ? updatedFilter : currentFilter,
+            ),
+      )
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsDebugBusy(false)
+    }
+  }
+
+  async function handleLlmModelAssignment(functionType: string, profileId: string) {
+    setError(null)
+    setIsDebugBusy(true)
+    try {
+      setLlmModelConfig(await updateLlmModelAssignment(functionType, profileId))
     } catch (requestError) {
       setError(describeError(requestError))
     } finally {
@@ -801,7 +842,6 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                           <th scope="col">{t('mail.subject')}</th>
                           <th scope="col">{t('mail.from')}</th>
                           <th scope="col">{t('mail.pendingReason')}</th>
-                          <th scope="col">{t('common.action')}</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -817,23 +857,9 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                                   {mail.pending_reason ?? t('common.none')}
                                 </span>
                               </td>
-                              <td>
-                                <button
-                                  aria-label={t(
-                                    'maintenance.pendingMails.refreshFor',
-                                    { id: mail.id },
-                                  )}
-                                  disabled={busyId === mail.id}
-                                  onClick={() => handleRefreshPendingMail(mail)}
-                                  title={t('maintenance.pendingMails.refreshTitle')}
-                                  type="button"
-                                >
-                                  {t('maintenance.pendingMails.refresh')}
-                                </button>
-                              </td>
                             </tr>
                             <tr className="maintenance-detail-row">
-                              <td colSpan={6}>
+                              <td colSpan={5}>
                                 {t('maintenance.pendingMails.detail')}
                               </td>
                             </tr>
@@ -841,7 +867,7 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                         ))}
                         {pendingMails.length === 0 && (
                           <tr>
-                            <td colSpan={6}>
+                            <td colSpan={5}>
                               {t('maintenance.pendingMails.empty')}
                             </td>
                           </tr>
@@ -921,6 +947,94 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                 </section>
 
                 <section
+                  aria-labelledby="maintenance-llm-model-heading"
+                  className="maintenance-section"
+                >
+                  <div className="section-heading">
+                    <h3 id="maintenance-llm-model-heading">
+                      {t('maintenance.debug.llmModels')}
+                    </h3>
+                    <button
+                      disabled={isDebugBusy}
+                      onClick={() => {
+                        void getLlmModelConfig().then(setLlmModelConfig)
+                      }}
+                      type="button"
+                    >
+                      {t('mail.refresh')}
+                    </button>
+                  </div>
+
+                  <div className="maintenance-table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th scope="col">{t('maintenance.debug.llmFunction')}</th>
+                          <th scope="col">{t('maintenance.debug.llmProfile')}</th>
+                          <th scope="col">{t('maintenance.debug.llmModel')}</th>
+                          <th scope="col">{t('maintenance.debug.llmApiKeyEnv')}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {llmModelConfig === null && (
+                          <tr>
+                            <td colSpan={4}>{t('maintenance.debug.loading')}</td>
+                          </tr>
+                        )}
+                        {llmModelConfig?.functions.map((functionConfig) => {
+                          const selectedProfile =
+                            llmModelConfig.profiles.find(
+                              (profile) => profile.id === functionConfig.profile_id,
+                            ) ?? null
+                          return (
+                            <tr key={functionConfig.function_type}>
+                              <td>{functionConfig.function_type}</td>
+                              <td>
+                                <select
+                                  aria-label={t('maintenance.debug.llmProfileFor', {
+                                    functionType: functionConfig.function_type,
+                                  })}
+                                  disabled={isDebugBusy}
+                                  onChange={(event) =>
+                                    handleLlmModelAssignment(
+                                      functionConfig.function_type,
+                                      event.target.value,
+                                    )
+                                  }
+                                  value={functionConfig.profile_id}
+                                >
+                                  <option value="mock">mock</option>
+                                  {llmModelConfig.profiles.map((profile) => (
+                                    <option key={profile.id} value={profile.id}>
+                                      {profile.id}
+                                    </option>
+                                  ))}
+                                </select>
+                              </td>
+                              <td>
+                                {selectedProfile === null
+                                  ? t('common.none')
+                                  : `${selectedProfile.provider} / ${selectedProfile.model}`}
+                              </td>
+                              <td>
+                                {selectedProfile?.api_key_env ??
+                                  selectedProfile?.endpoint_env ??
+                                  t('common.none')}
+                              </td>
+                            </tr>
+                          )
+                        })}
+                        {llmModelConfig?.functions.length === 0 && (
+                          <tr>
+                            <td colSpan={4}>{t('maintenance.debug.empty')}</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+
+                <section
                   aria-labelledby="maintenance-llm-block-heading"
                   className="maintenance-section"
                 >
@@ -959,6 +1073,57 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                       {t('maintenance.debug.applyLlmBlock')}
                     </button>
                   </form>
+
+                  <div className="maintenance-table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th scope="col">{t('common.id')}</th>
+                          <th scope="col">{t('maintenance.debug.llmBlockQuery')}</th>
+                          <th scope="col">{t('maintenance.debug.reason')}</th>
+                          <th scope="col">{t('common.status')}</th>
+                          <th scope="col">{t('common.action')}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {llmBlockFilters === null && (
+                          <tr>
+                            <td colSpan={5}>{t('maintenance.debug.loading')}</td>
+                          </tr>
+                        )}
+                        {llmBlockFilters?.map((blockFilter) => (
+                          <tr key={blockFilter.id}>
+                            <td>{blockFilter.id}</td>
+                            <td>{blockFilter.query_text}</td>
+                            <td>{blockFilter.reason}</td>
+                            <td>
+                              <span data-status={blockFilter.is_enabled ? 'enabled' : 'disabled'}>
+                                {blockFilter.is_enabled
+                                  ? t('common.enabled')
+                                  : t('common.disabled')}
+                              </span>
+                            </td>
+                            <td>
+                              <button
+                                disabled={isDebugBusy}
+                                onClick={() => handleToggleLlmBlockFilter(blockFilter)}
+                                type="button"
+                              >
+                                {blockFilter.is_enabled
+                                  ? t('common.disable')
+                                  : t('common.enable')}
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                        {llmBlockFilters?.length === 0 && (
+                          <tr>
+                            <td colSpan={5}>{t('maintenance.debug.noLlmBlockFilters')}</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
 
                   <div className="maintenance-table-wrap">
                     <table>

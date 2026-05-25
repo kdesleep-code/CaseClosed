@@ -132,6 +132,8 @@ def test_llm_block_filter_marks_matching_mail_and_worker_skips_llm(
 
     assert response.status_code == 200
     data = response.json()["data"]
+    assert data["filter"]["query_text"] == "temporary password"
+    assert data["filter"]["is_enabled"] is True
     assert data["matched"] == 1
     assert data["changed"] == 1
     assert data["items"][0]["id"] == message_id
@@ -159,6 +161,104 @@ def test_llm_block_filter_marks_matching_mail_and_worker_skips_llm(
     assert llm_run_count == (0,)
     assert job_row[0] == "succeeded"
     assert json.loads(job_row[1])["reason"] == "llm_blocked"
+
+
+def test_llm_block_filter_applies_to_newly_ingested_mail_before_llm_job(
+    client,
+    database_path,
+) -> None:
+    client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Blocked Sender",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "blocked.sender@example.com", "is_primary": True}
+            ],
+        },
+    )
+    register_response = client.post(
+        f"{MAILS_URL}/llm-block-filter",
+        json={"q": "secret token", "reason": "Contains credential material."},
+    )
+
+    message_id = ingest_mail(
+        client,
+        gmail_message_id="gmail_future_llm_block",
+        gmail_thread_id="thread_future_llm_block",
+        from_address="blocked.sender@example.com",
+        subject="Routine note",
+        received_at="2026-05-23T13:30:00+09:00",
+        body_text="Please use this secret token only once.",
+    )
+
+    assert register_response.status_code == 200
+    detail_response = client.get(f"{MAILS_URL}/{message_id}")
+    detail = detail_response.json()["data"]
+    assert detail["auto_state"]["llm_blocked"] is True
+    assert detail["auto_state"]["llm_block_reason"] == "Contains credential material."
+
+    with sqlite3.connect(database_path) as connection:
+        jobs = connection.execute(
+            """
+            SELECT job_type
+            FROM jobs
+            WHERE payload_json LIKE ?
+            """,
+            (f"%{message_id}%",),
+        ).fetchall()
+
+    assert jobs == []
+
+
+def test_llm_block_filters_can_be_listed_and_disabled(client) -> None:
+    create_response = client.post(
+        f"{MAILS_URL}/llm-block-filter",
+        json={"q": "private material", "reason": "Private material."},
+    )
+    block_filter = create_response.json()["data"]["filter"]
+
+    list_response = client.get(f"{MAILS_URL}/llm-block-filters")
+    disable_response = client.patch(
+        f"{MAILS_URL}/llm-block-filters/{block_filter['id']}",
+        json={"is_enabled": False},
+    )
+
+    assert list_response.status_code == 200
+    assert list_response.json()["data"]["items"][0]["id"] == block_filter["id"]
+    assert disable_response.status_code == 200
+    assert disable_response.json()["data"]["is_enabled"] is False
+
+
+def test_llm_model_config_lists_profiles_and_updates_assignment(client) -> None:
+    config_response = client.get(f"{MAILS_URL}/llm-model-config")
+
+    assert config_response.status_code == 200
+    config = config_response.json()["data"]
+    profile_ids = {profile["id"] for profile in config["profiles"]}
+    assert {"openai_gpt_5_2", "openai_gpt_5_4"} <= profile_ids
+    importance_config = next(
+        item
+        for item in config["functions"]
+        if item["function_type"] == "mail_importance_classification"
+    )
+    assert importance_config["profile_id"] == "mock"
+
+    update_response = client.patch(
+        f"{MAILS_URL}/llm-model-config",
+        json={
+            "function_type": "mail_importance_classification",
+            "profile_id": "openai_gpt_5_2",
+        },
+    )
+
+    assert update_response.status_code == 200
+    updated_importance_config = next(
+        item
+        for item in update_response.json()["data"]["functions"]
+        if item["function_type"] == "mail_importance_classification"
+    )
+    assert updated_importance_config["profile_id"] == "openai_gpt_5_2"
 
 
 def test_send_mail_records_mock_send_request(client, database_path) -> None:
@@ -802,15 +902,15 @@ def test_refresh_pending_mail_state_releases_linked_sender(client) -> None:
     )
     assert create_response.status_code == 200
 
-    response = client.post(f"{MAILS_URL}/{pending_id}/refresh-pending")
     pending_response = client.get(f"{MAILS_URL}?tab=pending")
     unprocessed_response = client.get(f"{MAILS_URL}?tab=unprocessed")
+    response = client.post(f"{MAILS_URL}/{pending_id}/refresh-pending")
 
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["changed"] is True
-    assert data["reason"] == "released"
-    assert data["queued_job_id"].startswith("job_")
+    assert data["changed"] is False
+    assert data["reason"] == "not_pending"
+    assert data["queued_job_id"] is None
     assert data["mail"]["pending_reason"] is None
     assert data["mail"]["effective_importance"] == "unclassified"
     assert pending_response.json()["data"]["items"] == []
@@ -847,14 +947,20 @@ def test_refresh_pending_mail_state_applies_fixed_contact_importance(
     assert create_response.status_code == 200
 
     response = client.post(f"{MAILS_URL}/{pending_id}/refresh-pending")
+    pending_response = client.get(f"{MAILS_URL}?tab=pending")
+    unprocessed_response = client.get(f"{MAILS_URL}?tab=unprocessed")
 
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["changed"] is True
-    assert data["reason"] == "released_to_fixed_importance"
-    assert data["queued_job_id"].startswith("job_")
+    assert data["changed"] is False
+    assert data["reason"] == "not_pending"
+    assert data["queued_job_id"] is None
     assert data["mail"]["pending_reason"] is None
     assert data["mail"]["effective_importance"] == "high"
+    assert pending_response.json()["data"]["items"] == []
+    assert [item["id"] for item in unprocessed_response.json()["data"]["items"]] == [
+        pending_id
+    ]
 
     with sqlite3.connect(database_path) as connection:
         job_types = connection.execute(
@@ -976,6 +1082,37 @@ def test_mail_process_unprocess_and_importance_update(client) -> None:
     assert unprocess_response.json()["data"]["user_state"]["processed_status"] == (
         "unprocessed"
     )
+
+
+def test_request_mail_summary_queues_for_unclassified_mail(
+    client,
+    database_path,
+) -> None:
+    message_id = create_known_sender_mail(
+        client,
+        subject="Manual summary request",
+        body_text="Please summarize this even before automatic importance is available.",
+    )
+
+    response = client.post(f"{MAILS_URL}/{message_id}/summary")
+
+    assert response.status_code == 200
+    job_id = response.json()["data"]["job_id"]
+    with sqlite3.connect(database_path) as connection:
+        job_row = connection.execute(
+            """
+            SELECT job_type, status, payload_json
+            FROM jobs
+            WHERE id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+
+    assert job_row[0:2] == ("mail_summary", "pending")
+    payload = json.loads(job_row[2])
+    assert payload["message_id"] == message_id
+    assert payload["force"] is True
+    assert payload["reason"] == "manual_request"
 
 
 def test_mail_read_unread_update(client) -> None:

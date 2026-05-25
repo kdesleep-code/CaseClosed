@@ -13,18 +13,16 @@ from caseclosed.db.models import GmailMessage
 from caseclosed.db.models import GmailThread
 from caseclosed.db.models import Job
 from caseclosed.db.models import MailAutoState
+from caseclosed.db.models import MailLlmBlockFilter
 from caseclosed.db.models import MailUserState
 from caseclosed.db.runtime import jst_iso
+from caseclosed.email_addressing import normalize_email_address
 
 SUMMARY_TARGET_IMPORTANCE = {"high", "middle"}
 
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex}"
-
-
-def normalize_email_address(email_address: str) -> str:
-    return email_address.strip().lower()
 
 
 @dataclass(frozen=True)
@@ -61,6 +59,12 @@ class MailIngestionResult:
     pending_address: str | None
     pending_reason: str | None
     queued_job_id: str | None
+
+
+@dataclass(frozen=True)
+class MailLlmBlockMatch:
+    blocked: bool
+    reason: str | None
 
 
 def ingest_mock_mail(
@@ -167,15 +171,24 @@ def ingest_mock_mail(
         sent=is_sent,
         fixed_importance=sender_resolution.fixed_importance,
     )
+    llm_block_match = match_mail_input_llm_block_filter(session, mail_input)
     queued_job_id = None
-    if sender_resolution.pending_address is None and sender_resolution.should_classify:
+    if (
+        not llm_block_match.blocked
+        and sender_resolution.pending_address is None
+        and sender_resolution.should_classify
+    ):
         queued_job_id = enqueue_importance_job(
             session,
             message,
             now,
             llm_instruction=sender_resolution.llm_instruction,
         )
-    elif effective_importance in SUMMARY_TARGET_IMPORTANCE and not is_sent:
+    elif (
+        not llm_block_match.blocked
+        and effective_importance in SUMMARY_TARGET_IMPORTANCE
+        and not is_sent
+    ):
         queued_job_id = enqueue_summary_job(session, message, now)
     session.add(
         MailAutoState(
@@ -193,9 +206,9 @@ def ingest_mock_mail(
                 if sender_resolution.pending_address is not None
                 else None
             ),
-            llm_blocked=0,
-            llm_block_reason=None,
-            llm_blocked_at=None,
+            llm_blocked=1 if llm_block_match.blocked else 0,
+            llm_block_reason=llm_block_match.reason,
+            llm_blocked_at=now if llm_block_match.blocked else None,
             created_at=now,
             updated_at=now,
             version=1,
@@ -632,6 +645,75 @@ def message_is_sent(message: GmailMessage) -> bool:
     if not isinstance(labels, list):
         return False
     return any(str(label).lower() == "sent" for label in labels)
+
+
+def block_filter_tokens(query_text: str) -> list[str]:
+    return [token.lower() for token in query_text.strip().split()]
+
+
+def row_matches_llm_block_query(message: GmailMessage, tokens: list[str]) -> bool:
+    searchable_values = [
+        message.subject,
+        message.from_address,
+        message.from_name,
+        message.sender_address,
+        message.reply_to_address,
+        message.to_addresses_json,
+        message.cc_addresses_json,
+        message.bcc_addresses_json,
+        message.message_id_header,
+        message.list_id,
+        message.body_text,
+        message.snippet,
+    ]
+    return text_values_match_tokens(searchable_values, tokens)
+
+
+def mail_input_matches_llm_block_query(
+    mail_input: MockMailInput,
+    tokens: list[str],
+) -> bool:
+    searchable_values = [
+        mail_input.subject,
+        normalize_email_address(mail_input.from_address),
+        mail_input.from_name,
+        normalize_optional_email(mail_input.sender_address),
+        normalize_optional_email(mail_input.reply_to_address),
+        json_or_none(mail_input.to_addresses),
+        json_or_none(mail_input.cc_addresses),
+        json_or_none(mail_input.bcc_addresses),
+        mail_input.message_id_header,
+        mail_input.list_id,
+        mail_input.body_text,
+        mail_input.snippet,
+    ]
+    return text_values_match_tokens(searchable_values, tokens)
+
+
+def text_values_match_tokens(values: list[str | None], tokens: list[str]) -> bool:
+    searchable_text = "\n".join(value for value in values if value)
+    searchable_text = searchable_text.lower()
+    return all(token in searchable_text for token in tokens)
+
+
+def match_mail_input_llm_block_filter(
+    session: DatabaseSession,
+    mail_input: MockMailInput,
+) -> MailLlmBlockMatch:
+    if mail_input_is_sent(mail_input):
+        return MailLlmBlockMatch(blocked=False, reason=None)
+
+    filters = session.scalars(
+        select(MailLlmBlockFilter)
+        .where(MailLlmBlockFilter.is_enabled == 1)
+        .order_by(MailLlmBlockFilter.created_at.asc(), MailLlmBlockFilter.id.asc())
+    ).all()
+    for block_filter in filters:
+        tokens = block_filter_tokens(block_filter.query_text)
+        if tokens and mail_input_matches_llm_block_query(mail_input, tokens):
+            return MailLlmBlockMatch(blocked=True, reason=block_filter.reason)
+
+    return MailLlmBlockMatch(blocked=False, reason=None)
 
 
 def effective_importance_for_message(

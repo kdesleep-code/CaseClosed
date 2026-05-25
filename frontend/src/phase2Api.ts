@@ -1,6 +1,7 @@
 export type MaintenanceStatus = {
   job_accepting: boolean
   running_jobs: number
+  action_required_jobs?: number
   pending_write_requests: number
   external_unknown_count: number
   backup_status: string

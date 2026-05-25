@@ -10,6 +10,7 @@ import {
   getMailDetail,
   markMailRead,
   processMail,
+  requestMailSummary,
   rescheduleMailRequest,
   sendMailRequestNow,
   unprocessMail,
@@ -132,7 +133,7 @@ function localDateTimeToJstIso(value: string) {
 }
 
 function isBugImportance(importance: string) {
-  return importance === 'pending' || importance === 'unclassified'
+  return importance === 'pending'
 }
 
 const importanceLabelKeys = {
@@ -140,7 +141,8 @@ const importanceLabelKeys = {
   middle: 'mail.importance.middle',
   low: 'mail.importance.low',
   skip: 'mail.importance.skip',
-} satisfies Record<'high' | 'middle' | 'low' | 'skip', MessageKey>
+  unclassified: 'mail.importance.unclassified',
+} satisfies Record<'high' | 'middle' | 'low' | 'skip' | 'unclassified', MessageKey>
 
 const incomingActionKeys = [
   'mail.thread.action.done',
@@ -182,6 +184,12 @@ function displayImportance(importance: string) {
   return importance
 }
 
+function llmBlockedTitle(message: { llm_block_reason?: string | null }) {
+  return message.llm_block_reason == null || message.llm_block_reason.trim() === ''
+    ? t('mail.llmBlockedTitle')
+    : t('mail.llmBlockedWithReason', { reason: message.llm_block_reason })
+}
+
 function mailListTabFor(message: MailThreadMessage) {
   if (message.effective_importance === 'skip') {
     return 'skip'
@@ -195,6 +203,10 @@ function mailListHrefFor(message: MailThreadMessage) {
     date: message.received_at.slice(0, 10),
   })
   return `/mail?${params.toString()}`
+}
+
+function delay(milliseconds: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds))
 }
 
 function contactAvatarUrl(contact: MailRecipient['contact']) {
@@ -364,8 +376,42 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
     }
   }
 
+  async function refreshUntilMailSummary(messageIdToSummarize: string) {
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const nextDetail = await getMailDetail(messageId)
+      const hasSummary = nextDetail.summary?.items?.some(
+        (summary) => summary.message_id === messageIdToSummarize,
+      )
+      if (hasSummary === true) {
+        return nextDetail
+      }
+      await delay(2000)
+    }
+    return getMailDetail(messageId)
+  }
+
+  async function requestSummaryAndRefresh(messageIdToSummarize: string) {
+    await requestMailSummary(messageIdToSummarize)
+    return refreshUntilMailSummary(messageIdToSummarize)
+  }
+
+  async function updateImportanceAndRefreshSummary(
+    messageIdToUpdate: string,
+    importance: 'high' | 'middle' | 'low' | 'skip',
+    hasSummary: boolean,
+  ) {
+    const nextDetail = await updateMailImportance(messageIdToUpdate, importance)
+    if (!['high', 'middle'].includes(importance) || hasSummary) {
+      return nextDetail
+    }
+    return refreshUntilMailSummary(messageIdToUpdate)
+  }
+
   function incomingActionsFor(message: MailThreadMessage): IncomingAction[] {
     const isProcessed = message.processed_status === 'processed'
+    const hasSummary = detail?.summary?.items?.some(
+      (summary) => summary.message_id === message.id,
+    ) === true
     return [
       {
         id: 'done',
@@ -398,11 +444,14 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
         label: t(key),
         disabled:
           !['mail.thread.action.reply', 'mail.thread.action.summary'].includes(key) ||
-          busyAction !== null,
+          busyAction !== null ||
+          (key === 'mail.thread.action.summary' && hasSummary),
         className: 'mail-thread-action-quiet',
         title:
           key === 'mail.thread.action.summary'
-            ? t('mail.thread.summaryMockTitle')
+            ? hasSummary
+              ? t('mail.thread.summaryExistsTitle')
+              : t('mail.thread.summaryMockTitle')
             : key === 'mail.thread.action.reply'
               ? t('mail.thread.action.reply')
               : t('common.notImplemented'),
@@ -414,8 +463,11 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
           if (key !== 'mail.thread.action.summary') {
             return
           }
-          setError(null)
-          setNotice(null)
+          void runAction(
+            `${message.id}-summary`,
+            () => requestSummaryAndRefresh(message.id),
+            t('mail.thread.summaryRequested'),
+          )
         },
       })),
     ]
@@ -605,6 +657,13 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
           </section>
         )}
 
+        {detail.auto_state.llm_blocked === true && (
+          <section className="mail-thread-llm-blocked">
+            <strong>{t('mail.llmBlocked')}</strong>
+            <p>{llmBlockedTitle(detail.auto_state)}</p>
+          </section>
+        )}
+
         <section className="mail-panel mail-thread-summary">
           <h2>{t('mail.thread.summary')}</h2>
           {detail.summary == null ? (
@@ -737,7 +796,12 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                           ))
                         : incomingActionsFor(message).map((action) => (
                             <button
-                              className={action.className}
+                              className={`${action.className ?? ''} ${
+                                action.id === 'mail.thread.action.summary' &&
+                                busyAction === `${message.id}-summary`
+                                  ? 'mail-thread-action-loading'
+                                  : ''
+                              }`.trim()}
                               disabled={action.disabled}
                               key={action.id}
                               onClick={action.onClick}
@@ -753,6 +817,14 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                   </div>
                   {!isSent && (
                     <div className="mail-thread-importance">
+                      {message.llm_blocked === true && (
+                        <span
+                          className="mail-llm-blocked-badge"
+                          title={llmBlockedTitle(message)}
+                        >
+                          {t('mail.llmBlocked')}
+                        </span>
+                      )}
                       <button
                         aria-expanded={importanceMenuId === message.id}
                         className={`mail-thread-status ${
@@ -778,9 +850,19 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                               key={importance}
                               onClick={() => {
                                 setImportanceMenuId(null)
+                                const shouldWaitForSummary =
+                                  ['high', 'middle'].includes(importance) &&
+                                  messageSummary === undefined
                                 void runAction(
-                                  `${message.id}-${importance}`,
-                                  () => updateMailImportance(message.id, importance),
+                                  shouldWaitForSummary
+                                    ? `${message.id}-summary`
+                                    : `${message.id}-${importance}`,
+                                  () =>
+                                    updateImportanceAndRefreshSummary(
+                                      message.id,
+                                      importance,
+                                      messageSummary !== undefined,
+                                    ),
                                   t('mail.thread.importanceUpdated'),
                                 )
                               }}
@@ -843,6 +925,16 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                     <section className="mail-thread-section mail-thread-mail-summary">
                       <h3>{t('mail.thread.mailSummary')}</h3>
                       <p>{messageSummary.summary_text}</p>
+                    </section>
+                  )}
+
+                  {busyAction === `${message.id}-summary` && (
+                    <section
+                      aria-live="polite"
+                      className="mail-thread-section mail-thread-mail-summary mail-thread-summary-progress"
+                    >
+                      <h3>{t('mail.thread.action.summarizing')}</h3>
+                      <p>{t('mail.thread.summaryInProgress')}</p>
                     </section>
                   )}
 

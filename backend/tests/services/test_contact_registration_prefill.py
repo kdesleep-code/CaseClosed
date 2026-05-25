@@ -125,15 +125,21 @@ def test_contact_registration_prefill_does_not_store_mail_body_in_llm_run(
     assert "Sensitive body text" not in input_source
 
 
-def test_linking_unresolved_contact_email_enqueues_followup_job(
+def test_linking_unresolved_contact_email_releases_pending_mail(
     client,
     database_path: Path,
 ) -> None:
-    insert_unresolved_contact_email(
-        database_path,
-        email_address="pending.sender@example.com",
-        email_address_id="email_pending_sender",
+    ingest_response = client.post(
+        "/api/v1/mails/mock-ingest",
+        json={
+            "gmail_message_id": "gmail_link_release_1",
+            "gmail_thread_id": "thread_link_release",
+            "subject": "Link release test",
+            "from_address": "pending.sender@example.com",
+            "received_at": "2026-05-23T10:50:00+09:00",
+        },
     )
+    message_id = ingest_response.json()["data"]["message_id"]
     contact_id = client.post(
         CONTACTS_URL,
         json={"display_name": "Pending Sender", "status": "active"},
@@ -147,27 +153,37 @@ def test_linking_unresolved_contact_email_enqueues_followup_job(
     assert response.status_code == 200
 
     with sqlite3.connect(database_path) as connection:
-        row = connection.execute(
+        followup_count = connection.execute(
             """
-            SELECT job_type, status, payload_json
+            SELECT COUNT(*)
             FROM jobs
             WHERE job_type = 'contact_resolution_followup'
             """
         ).fetchone()
+        auto_row = connection.execute(
+            """
+            SELECT pending_reason, pending_from_address_id, effective_importance
+            FROM mail_auto_state
+            WHERE message_id = ?
+            """,
+            (message_id,),
+        ).fetchone()
+        importance_job = connection.execute(
+            """
+            SELECT status, payload_json
+            FROM jobs
+            WHERE job_type = 'mail_importance_classification'
+            """
+        ).fetchone()
 
-    assert row[0] == "contact_resolution_followup"
-    assert row[1] == "pending"
-    payload = json.loads(row[2])
-    assert payload == {
-        "contact_id": contact_id,
-        "email_address_id": "email_pending_sender",
-        "email_address": "Pending.Sender@Example.com",
-        "normalized_email_address": "pending.sender@example.com",
-        "reason": "unresolved_contact_linked",
-    }
+    assert contact_id is not None
+    assert followup_count == (0,)
+    assert auto_row == (None, None, "unclassified")
+    assert importance_job[0] == "pending"
+    assert message_id in importance_job[1]
 
 
-def test_contact_resolution_followup_releases_pending_mail(
+def test_contact_creation_releases_pending_mail(
     client,
     database_path: Path,
 ) -> None:
@@ -193,22 +209,138 @@ def test_contact_resolution_followup_releases_pending_mail(
         },
     ).json()["data"]["id"]
 
-    orchestrator_module = importlib.import_module("caseclosed.services.orchestrator")
-    orchestrator = orchestrator_module.Orchestrator(
-        worker_id="worker-contact-resolution",
+    with sqlite3.connect(database_path) as connection:
+        auto_row = connection.execute(
+            """
+            SELECT pending_reason, pending_from_address_id, effective_importance
+            FROM mail_auto_state
+            WHERE message_id = ?
+            """,
+            (message_id,),
+        ).fetchone()
+        importance_job = connection.execute(
+            """
+            SELECT status, payload_json
+            FROM jobs
+            WHERE job_type = 'mail_importance_classification'
+            """
+        ).fetchone()
+        followup_count = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM jobs
+            WHERE job_type = 'contact_resolution_followup'
+            """
+        ).fetchone()
+
+    assert contact_id is not None
+    assert followup_count == (0,)
+    assert auto_row == (None, None, "unclassified")
+    assert importance_job[0] == "pending"
+    assert message_id in importance_job[1]
+
+
+def test_contact_creation_releases_pending_mail_from_display_address(
+    client,
+    database_path: Path,
+) -> None:
+    ingest_response = client.post(
+        "/api/v1/mails/mock-ingest",
+        json={
+            "gmail_message_id": "gmail_followup_display_1",
+            "gmail_thread_id": "thread_followup_display",
+            "subject": "Display address followup test",
+            "from_address": "Display Sender <display.sender@example.com>",
+            "received_at": "2026-05-23T11:05:00+09:00",
+        },
+    )
+    message_id = ingest_response.json()["data"]["message_id"]
+
+    create_response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Display Sender",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "display.sender@example.com", "is_primary": True}
+            ],
+        },
     )
 
-    followup_job_id = orchestrator.run_once()
+    assert create_response.status_code == 200
 
     with sqlite3.connect(database_path) as connection:
-        followup_row = connection.execute(
+        auto_row = connection.execute(
             """
-            SELECT status, result_json
-            FROM jobs
-            WHERE id = ?
+            SELECT pending_reason, pending_from_address_id, effective_importance
+            FROM mail_auto_state
+            WHERE message_id = ?
             """,
-            (followup_job_id,),
+            (message_id,),
         ).fetchone()
+        email_rows = connection.execute(
+            """
+            SELECT normalized_email_address, resolution_status, contact_id
+            FROM contact_email_addresses
+            WHERE normalized_email_address = 'display.sender@example.com'
+            """
+        ).fetchall()
+        importance_job = connection.execute(
+            """
+            SELECT status, payload_json
+            FROM jobs
+            WHERE job_type = 'mail_importance_classification'
+            """
+        ).fetchone()
+
+    assert auto_row == (None, None, "unclassified")
+    assert len(email_rows) == 1
+    assert email_rows[0][1] == "linked"
+    assert email_rows[0][2] == create_response.json()["data"]["id"]
+    assert importance_job[0] == "pending"
+    assert message_id in importance_job[1]
+
+
+def test_contact_creation_releases_pending_mail_even_if_address_was_prelinked(
+    client,
+    database_path: Path,
+) -> None:
+    ingest_response = client.post(
+        "/api/v1/mails/mock-ingest",
+        json={
+            "gmail_message_id": "gmail_followup_prelinked_1",
+            "gmail_thread_id": "thread_followup_prelinked",
+            "subject": "Prelinked stale pending test",
+            "from_address": "prelinked.pending@example.com",
+            "received_at": "2026-05-23T11:07:00+09:00",
+        },
+    )
+    message_id = ingest_response.json()["data"]["message_id"]
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE contact_email_addresses
+            SET resolution_status = 'linked'
+            WHERE normalized_email_address = 'prelinked.pending@example.com'
+            """
+        )
+        connection.commit()
+
+    create_response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Prelinked Pending",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "prelinked.pending@example.com", "is_primary": True}
+            ],
+        },
+    )
+
+    assert create_response.status_code == 200
+
+    with sqlite3.connect(database_path) as connection:
         auto_row = connection.execute(
             """
             SELECT pending_reason, pending_from_address_id, effective_importance
@@ -225,18 +357,12 @@ def test_contact_resolution_followup_releases_pending_mail(
             """
         ).fetchone()
 
-    assert followup_row[0] == "succeeded"
-    assert json.loads(followup_row[1]) == {
-        "released_message_count": 1,
-        "queued_job_count": 1,
-        "contact_id": contact_id,
-    }
     assert auto_row == (None, None, "unclassified")
     assert importance_job[0] == "pending"
     assert message_id in importance_job[1]
 
 
-def test_contact_resolution_followup_uses_current_email_contact_after_merge(
+def test_released_pending_mail_keeps_email_contact_after_merge(
     client,
     database_path: Path,
 ) -> None:
@@ -272,22 +398,7 @@ def test_contact_resolution_followup_uses_current_email_contact_after_merge(
     )
     assert merge_response.status_code == 200
 
-    orchestrator_module = importlib.import_module("caseclosed.services.orchestrator")
-    orchestrator = orchestrator_module.Orchestrator(
-        worker_id="worker-contact-resolution-merged",
-    )
-
-    followup_job_id = orchestrator.run_once()
-
     with sqlite3.connect(database_path) as connection:
-        followup_row = connection.execute(
-            """
-            SELECT status, result_json, error_type, error_message
-            FROM jobs
-            WHERE id = ?
-            """,
-            (followup_job_id,),
-        ).fetchone()
         auto_row = connection.execute(
             """
             SELECT pending_reason, pending_from_address_id, effective_importance
@@ -303,10 +414,15 @@ def test_contact_resolution_followup_uses_current_email_contact_after_merge(
             WHERE normalized_email_address = 'followup.merged@example.com'
             """
         ).fetchone()
+        followup_count = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM jobs
+            WHERE job_type = 'contact_resolution_followup'
+            """
+        ).fetchone()
 
-    assert followup_row[0] == "succeeded"
-    assert followup_row[2:4] == (None, None)
-    assert json.loads(followup_row[1])["contact_id"] == target_contact_id
+    assert followup_count == (0,)
     assert auto_row == (None, None, "unclassified")
     assert email_contact_row == (target_contact_id,)
 
@@ -370,9 +486,7 @@ def test_mock_mail_to_prefilled_contact_to_classified_mail_pipeline(
     )
     assert create_response.status_code == 200
 
-    followup_job_id = orchestrator.run_once()
     classification_job_id = orchestrator.run_once()
-    assert followup_job_id is not None
     assert classification_job_id is not None
 
     mail_response = client.get(f"/api/v1/mails/{message_id}")
@@ -396,14 +510,13 @@ def test_mock_mail_to_prefilled_contact_to_classified_mail_pipeline(
             """
             SELECT job_type, status
             FROM jobs
-            WHERE id IN (?, ?)
+            WHERE id = ?
             ORDER BY job_type
             """,
-            (followup_job_id, classification_job_id),
+            (classification_job_id,),
         ).fetchall()
 
     assert suggestion_row == ("adopted",)
     assert job_rows == [
-        ("contact_resolution_followup", "succeeded"),
         ("mail_importance_classification", "succeeded"),
     ]

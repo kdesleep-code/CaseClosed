@@ -82,6 +82,18 @@ def test_phase_4_migrations_add_mail_tables(
             row[1]
             for row in connection.execute("PRAGMA table_info(mail_summaries)").fetchall()
         }
+        block_filter_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(mail_llm_block_filters)"
+            ).fetchall()
+        }
+        thread_summary_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(mail_thread_summaries)"
+            ).fetchall()
+        }
 
     assert {
         "gmail_message_id",
@@ -111,3 +123,21 @@ def test_phase_4_migrations_add_mail_tables(
         "language",
         "llm_run_id",
     } <= summary_columns
+    assert {
+        "query_text",
+        "reason",
+        "is_enabled",
+        "created_at",
+        "updated_at",
+        "version",
+    } <= block_filter_columns
+    assert {
+        "thread_id",
+        "summary_text",
+        "action_required",
+        "next_action",
+        "key_points_json",
+        "translation_text",
+        "language",
+        "llm_run_id",
+    } <= thread_summary_columns

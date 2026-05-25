@@ -11,6 +11,7 @@ import { AppLink, navigateTo } from './navigation'
 import defaultContactAvatarUrl from './assets/default-contact-avatar.svg'
 import defaultMailingListAvatarUrl from './assets/default-mailing-list-avatar.svg'
 import unknownContactAvatarUrl from './assets/default-unknown-contact-avatar.svg'
+import llmBlockedIconUrl from './assets/llm-blocked.svg'
 
 export type MailTab = 'unprocessed' | 'processed' | 'skip'
 type SearchSort = 'newest' | 'importance'
@@ -22,6 +23,7 @@ export type MailInitialData = {
   activeTab: MailTab
   selectedDate: string
   calendarMonth: string
+  viewMode?: 'normal' | 'action-needed'
 }
 
 const MAIL_TABS: Array<{ key: MailTab; labelKey: string }> = [
@@ -35,7 +37,7 @@ const IMPORTANCE_LEGEND = [
   { key: 'middle', labelKey: 'mail.importance.middle' },
   { key: 'low', labelKey: 'mail.importance.low' },
   { key: 'skip', labelKey: 'mail.importance.skip' },
-  { key: 'bug', labelKey: 'mail.importance.bug' },
+  { key: 'unclassified', labelKey: 'mail.importance.unclassified' },
 ] satisfies Array<{ key: string; labelKey: MessageKey }>
 
 function mailTabLabel(tab: MailTab) {
@@ -146,10 +148,16 @@ function mailSummary(mail: MailListItem) {
 }
 
 function mailPriorityClass(importance: string) {
-  if (importance === 'pending' || importance === 'unclassified') {
+  if (importance === 'pending') {
     return 'mail-priority-bug'
   }
   return `mail-priority-${importance}`
+}
+
+function llmBlockedTitle(mail: MailListItem) {
+  return mail.llm_block_reason == null || mail.llm_block_reason.trim() === ''
+    ? t('mail.llmBlockedTitle')
+    : t('mail.llmBlockedWithReason', { reason: mail.llm_block_reason })
 }
 
 function groupLabelForMail(mail: MailListItem, sort: SearchSort) {
@@ -221,16 +229,21 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
   )
   const [searchText, setSearchText] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
-  const [searchSort, setSearchSort] = useState<SearchSort>('newest')
+  const [listSort, setListSort] = useState<SearchSort>('importance')
   const [pageSize, setPageSize] = useState(25)
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isBusy, setIsBusy] = useState(false)
 
   const isSearchMode = searchQuery.trim() !== ''
+  const isActionNeededMode = initialData?.viewMode === 'action-needed'
+  const isSearchLikeMode = isSearchMode || isActionNeededMode
   const visibleMails = useMemo(
-    () => [...mails].sort(compareVisibleMails(isSearchMode ? searchSort : 'importance')),
-    [isSearchMode, mails, searchSort],
+    () => [...mails].sort(compareVisibleMails(listSort)),
+    [mails, listSort],
+  )
+  const hasClassifyingMail = mails.some(
+    (mail) => mail.effective_importance === 'unclassified',
   )
   const mailDateCounts = useMemo(
     () => new Map(mailDates.map((item) => [item.date, item.count])),
@@ -251,7 +264,10 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
       cursor,
       tab: activeTab,
     }
-    if (isSearchMode) {
+    if (isActionNeededMode) {
+      filters.tab = 'unprocessed'
+      filters.importance_any = 'high,middle'
+    } else if (isSearchMode) {
       filters.q = searchQuery.trim()
       filters.tab = 'all'
     } else {
@@ -336,6 +352,35 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
     }
   }, [activeTab, selectedDate, searchQuery, pageSize])
 
+  useEffect(() => {
+    if (!hasClassifyingMail) {
+      return
+    }
+
+    let isMounted = true
+    const timerId = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') {
+        return
+      }
+      listMailPage(listFilters())
+        .then((page) => {
+          if (!isMounted) {
+            return
+          }
+          setMails(page.items)
+          setNextCursor(page.next_cursor)
+        })
+        .catch(() => {
+          // Keep the currently visible list if a background refresh fails.
+        })
+    }, 5000)
+
+    return () => {
+      isMounted = false
+      window.clearInterval(timerId)
+    }
+  }, [activeTab, hasClassifyingMail, isActionNeededMode, pageSize, searchQuery, selectedDate])
+
   async function handleLoadMore() {
     if (nextCursor === null) {
       return
@@ -365,7 +410,7 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
   }
 
   function handleTabClick(nextTab: MailTab) {
-    if (nextTab === activeTab) {
+    if (isBusy || nextTab === activeTab) {
       return
     }
     void transitionMailList(nextTab, selectedDate)
@@ -386,7 +431,7 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
   return (
     <main className="app-shell">
       <div className="mail-shell">
-        {!isSearchMode && (
+        {!isSearchLikeMode && (
           <div className="mail-floating-day-nav" aria-label={t('mail.dayNavigation')}>
             <button
               aria-label={t('mail.previousDay')}
@@ -413,7 +458,6 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
             <h1>{t('mail.heading')}</h1>
           </div>
           <nav aria-label={t('mail.navigation')} className="maintenance-nav">
-            <AppLink href="/mail/compose">{t('work.composeMail')}</AppLink>
             <AppLink href="/">{t('top.heading')}</AppLink>
           </nav>
         </header>
@@ -428,13 +472,13 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
         <div className="mail-main-layout">
           <div className="mail-main-column">
             <section aria-labelledby="mail-list-heading" className="mail-list-workspace">
-              {!isSearchMode && (
+              {!isSearchLikeMode && (
                 <nav aria-label={t('mail.tabs.label')} className="mail-tabs">
                   <div>
                     {MAIL_TABS.map((tab) => (
                       <button
                         aria-selected={activeTab === tab.key}
-                        disabled={isBusy}
+                        aria-disabled={isBusy}
                         key={tab.key}
                         onClick={() => handleTabClick(tab.key)}
                         role="tab"
@@ -444,32 +488,45 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
                       </button>
                     ))}
                   </div>
-                  <div
-                    aria-label={t('mail.importanceLegend.label')}
-                    className="mail-importance-legend"
-                  >
-                    {IMPORTANCE_LEGEND.map((item) => (
-                      <span
-                        className={`mail-legend-item mail-priority-${item.key}`}
-                        key={item.key}
-                        title={
-                          item.key === 'bug'
-                            ? t('mail.importance.bugTitle')
-                            : undefined
-                        }
-                      >
-                        {t(item.labelKey)}
-                      </span>
-                    ))}
+                  <div className="mail-tab-gadgets">
+                    <div
+                      aria-label={t('mail.importanceLegend.label')}
+                      className="mail-importance-legend"
+                    >
+                      {IMPORTANCE_LEGEND.map((item) => (
+                        <span
+                          className={`mail-legend-item mail-priority-${item.key}`}
+                          key={item.key}
+                        >
+                          {t(item.labelKey)}
+                        </span>
+                      ))}
+                    </div>
+                    <div className="mail-tab-actions">
+                      <AppLink className="mail-compose-gadget" href="/mail/compose">
+                        {t('work.composeMail')}
+                      </AppLink>
+                      <AppLink className="mail-compose-gadget" href="/mail/action-needed">
+                        {t('mail.actionNeeded')}
+                      </AppLink>
+                    </div>
                   </div>
                 </nav>
               )}
               <div className="mail-panel mail-list-panel">
                 <div className="section-heading">
-                  {isSearchMode ? (
+                  {isSearchLikeMode ? (
                     <div>
-                      <h2 id="mail-list-heading">{t('mail.search.results')}</h2>
-                      <p>{t('mail.search.resultNote')}</p>
+                      <h2 id="mail-list-heading">
+                        {isActionNeededMode
+                          ? t('mail.actionNeeded.heading')
+                          : t('mail.search.results')}
+                      </h2>
+                      <p>
+                        {isActionNeededMode
+                          ? t('mail.actionNeeded.resultNote')
+                          : t('mail.search.resultNote')}
+                      </p>
                     </div>
                   ) : (
                     <h2 id="mail-list-heading">{selectedDate}</h2>
@@ -486,19 +543,23 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
                     <div className="mail-list" role="list">
                       {visibleMails.map((mail, index) => (
                         <div className="mail-list-entry" key={mail.id}>
-                          {isSearchMode &&
+                          {isSearchLikeMode &&
                             shouldShowMailGroupLabel(
                               mail,
                               index,
                               visibleMails,
-                              searchSort,
+                              listSort,
                             ) && (
                               <div className="mail-list-group-label">
-                                <span>{groupLabelForMail(mail, searchSort)}</span>
+                                <span>{groupLabelForMail(mail, listSort)}</span>
                               </div>
                             )}
                           <article
-                            className={`mail-list-item ${mailPriorityClass(mail.effective_importance)} mail-read-${mail.read_status ?? 'unread'}`}
+                            className={`mail-list-item ${mailPriorityClass(mail.effective_importance)} mail-read-${mail.read_status ?? 'unread'} ${
+                              mail.effective_importance === 'unclassified'
+                                ? 'mail-list-item-confirming'
+                                : ''
+                            }`}
                             onClick={() => navigateTo(`/mail/${encodeURIComponent(mail.id)}`)}
                             onKeyDown={(event) => {
                               if (event.key === 'Enter' || event.key === ' ') {
@@ -519,13 +580,25 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
                               />
                             </div>
                             <div className="mail-list-main">
-                              <strong>{mail.subject ?? t('mail.noSubject')}</strong>
+                              <strong>
+                                <span>{mail.subject ?? t('mail.noSubject')}</span>
+                              </strong>
                               <span>{senderDisplayName(mail)}</span>
                             </div>
                             <p className="mail-list-summary">
                               {mailSummary(mail) ?? ''}
                             </p>
                             <div className="mail-list-cases">
+                              {mail.llm_blocked === true && (
+                                <span
+                                  aria-label={llmBlockedTitle(mail)}
+                                  className="mail-llm-blocked-badge"
+                                  title={llmBlockedTitle(mail)}
+                                >
+                                  <img alt="" src={llmBlockedIconUrl} />
+                                  <span className="visually-hidden">{t('mail.llmBlocked')}</span>
+                                </span>
+                              )}
                               {(mail.case_links ?? []).length > 0 ? (
                                 mail.case_links?.map((caseLink) => (
                                   <span key={caseLink.id}>{caseLink.title}</span>
@@ -555,7 +628,7 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
           </div>
 
           <aside className="mail-side-column">
-            {!isSearchMode && (
+            {!isSearchLikeMode && (
               <section aria-label={t('mail.calendar.label')} className="mail-panel mail-calendar-panel">
               <button className="mail-calendar-today" onClick={jumpToToday} type="button">
                 {t('mail.today')}
@@ -615,6 +688,28 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
               </section>
             )}
 
+            <section aria-labelledby="mail-sort-heading" className="mail-panel mail-sort-panel">
+              <div className="section-heading">
+                <h2 id="mail-sort-heading">{t('mail.sort.heading')}</h2>
+              </div>
+              <div aria-label={t('mail.sort.label')} className="mail-sort-control">
+                <button
+                  aria-pressed={listSort === 'importance'}
+                  onClick={() => setListSort('importance')}
+                  type="button"
+                >
+                  {t('mail.sort.importance')}
+                </button>
+                <button
+                  aria-pressed={listSort === 'newest'}
+                  onClick={() => setListSort('newest')}
+                  type="button"
+                >
+                  {t('mail.sort.newest')}
+                </button>
+              </div>
+            </section>
+
             <section aria-labelledby="mail-search-heading" className="mail-panel mail-search-panel">
               <div className="section-heading">
                 <h2 id="mail-search-heading">{t('mail.search.heading')}</h2>
@@ -626,14 +721,6 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
                   placeholder={t('mail.search.placeholder')}
                   value={searchText}
                 />
-                <select
-                  aria-label={t('mail.search.sort')}
-                  onChange={(event) => setSearchSort(event.target.value as SearchSort)}
-                  value={searchSort}
-                >
-                  <option value="newest">{t('mail.sort.newest')}</option>
-                  <option value="importance">{t('mail.sort.importance')}</option>
-                </select>
                 <select
                   aria-label={t('mail.pageSize')}
                   onChange={(event) => setPageSize(Number(event.target.value))}

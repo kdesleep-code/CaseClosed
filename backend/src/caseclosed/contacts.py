@@ -21,9 +21,12 @@ from caseclosed.db.models import Job
 from caseclosed.db.models import MailAutoState
 from caseclosed.db.runtime import get_session
 from caseclosed.db.runtime import jst_iso
+from caseclosed.email_addressing import normalize_email_address
 from caseclosed.services.mail_ingestion import (
+    apply_contact_mail_importance_rule,
     apply_fixed_importance_rule_to_existing_contact_mail,
 )
+from caseclosed.services.background_worker import kick_job_drain
 
 router = APIRouter(prefix="/api/v1/contacts", tags=["contacts"])
 
@@ -89,10 +92,6 @@ class ContactMerge(BaseModel):
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex}"
-
-
-def normalize_email_address(email_address: str) -> str:
-    return email_address.strip().lower()
 
 
 def validate_contact_status(status: str) -> None:
@@ -423,35 +422,36 @@ def find_email_address(
     )
 
 
-def enqueue_contact_resolution_followup(
+def release_pending_mail_for_email_address(
     session: DatabaseSession,
     *,
     contact: Contact,
     email_address: ContactEmailAddress,
     now: str,
-) -> None:
-    session.add(
-        Job(
-            id=new_id("job_contact_resolution_followup"),
-            job_type="contact_resolution_followup",
-            priority=60,
-            status="pending",
-            payload_json=json.dumps(
-                {
-                    "contact_id": contact.id,
-                    "email_address_id": email_address.id,
-                    "email_address": email_address.email_address,
-                    "normalized_email_address": email_address.normalized_email_address,
-                    "reason": "unresolved_contact_linked",
-                },
-                ensure_ascii=True,
-            ),
-            retry_count=0,
-            max_retries=3,
-            created_at=now,
-            updated_at=now,
+) -> dict[str, int]:
+    pending_states = session.scalars(
+        select(MailAutoState).where(
+            MailAutoState.pending_from_address_id == email_address.id
         )
-    )
+    ).all()
+    queued = 0
+    released = 0
+    for auto_state in pending_states:
+        message = session.get(GmailMessage, auto_state.message_id)
+        if message is None:
+            continue
+        result = apply_contact_mail_importance_rule(
+            session,
+            message=message,
+            auto_state=auto_state,
+            contact=contact,
+            now=now,
+        )
+        if result.changed:
+            released += 1
+        if result.queued_job_id is not None:
+            queued += 1
+    return {"released": released, "queued": queued}
 
 
 def link_email_address(
@@ -512,7 +512,6 @@ def link_email_address(
     ):
         raise json_error(409, "CONFLICT", "Email address belongs to another contact.")
 
-    was_unresolved = existing.resolution_status == "unresolved"
     existing.contact_id = contact.id
     existing.email_address = payload.email_address.strip()
     existing.resolution_status = "linked"
@@ -522,13 +521,12 @@ def link_email_address(
     existing.source = existing.source or source
     existing.updated_at = now
     existing.version += 1
-    if was_unresolved:
-        enqueue_contact_resolution_followup(
-            session,
-            contact=contact,
-            email_address=existing,
-            now=now,
-        )
+    release_pending_mail_for_email_address(
+        session,
+        contact=contact,
+        email_address=existing,
+        now=now,
+    )
     return existing
 
 
@@ -791,6 +789,7 @@ def create_contact(
         )
 
     session.commit()
+    kick_job_drain(reason="contact_created")
     return {"ok": True, "data": contact_data(contact, session)}
 
 
@@ -911,6 +910,7 @@ def update_contact(
             now=now,
         )
     session.commit()
+    kick_job_drain(reason="contact_updated")
     return {"ok": True, "data": contact_data(contact, session)}
 
 
@@ -1085,6 +1085,12 @@ def move_contact_email_address(
 
     if was_primary:
         ensure_active_primary_email_address(session, source_contact, now=now)
+    release_pending_mail_for_email_address(
+        session,
+        contact=target_contact,
+        email_address=email_address,
+        now=now,
+    )
 
     source_contact.version += 1
     source_contact.updated_at = now
@@ -1163,6 +1169,12 @@ def merge_contact(
             email_address.is_primary = 0
         email_address.updated_at = now
         email_address.version += 1
+        release_pending_mail_for_email_address(
+            session,
+            contact=target_contact,
+            email_address=email_address,
+            now=now,
+        )
 
     merged_tags = sorted(
         set(contact_tags(session, source_contact.id))

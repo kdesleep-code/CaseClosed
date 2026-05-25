@@ -16,13 +16,23 @@ from caseclosed.external_operations import router as external_operations_router
 from caseclosed.jobs import router as jobs_router
 from caseclosed.mails import router as mails_router
 from caseclosed.maintenance import router as maintenance_router
+from caseclosed.services.background_worker import BackgroundWorkerSupervisor
+from caseclosed.settings import is_background_worker_enabled
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     rebuild_runtime_database()
     bootstrap_database()
-    yield
+    background_worker = None
+    if is_background_worker_enabled():
+        background_worker = BackgroundWorkerSupervisor()
+        background_worker.start()
+    try:
+        yield
+    finally:
+        if background_worker is not None:
+            await background_worker.stop()
 
 
 app = FastAPI(title="CaseClosed", lifespan=lifespan)

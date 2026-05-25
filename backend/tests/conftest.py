@@ -50,7 +50,9 @@ PHASE_3_TABLES = {
 PHASE_4_TABLES = {
     "gmail_messages",
     "gmail_threads",
+    "mail_llm_block_filters",
     "mail_summaries",
+    "mail_thread_summaries",
     "mail_send_requests",
     "mail_auto_state",
     "mail_user_state",
@@ -95,6 +97,11 @@ def app(monkeypatch: pytest.MonkeyPatch, database_url: str):
     monkeypatch.syspath_prepend(str(BACKEND_SRC))
     monkeypatch.setenv("CASECLOSED_DATABASE_URL", database_url)
     monkeypatch.setenv("CASECLOSED_BOOTSTRAP_PASSWORD", TEST_PASSWORD)
+    monkeypatch.setenv("CASECLOSED_BACKGROUND_WORKER_ENABLED", "false")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CASECLOSED_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CASECLOSED_LLM_PROFILE_MAIL_IMPORTANCE_CLASSIFICATION", raising=False)
+    monkeypatch.delenv("CASECLOSED_LLM_MODEL_PROFILES_DIR", raising=False)
     monkeypatch.setenv(
         "CASECLOSED_TEST_CERTIFICATE_FINGERPRINT",
         TEST_CERTIFICATE_FINGERPRINT,

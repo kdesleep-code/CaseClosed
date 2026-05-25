@@ -192,16 +192,49 @@ export type LlmBlockedMail = {
   llm_blocked_at: string | null
 }
 
+export type LlmBlockFilter = {
+  id: string
+  query_text: string
+  reason: string
+  is_enabled: boolean
+  created_at: string
+  updated_at: string
+  version: number
+}
+
 export type MailLlmBlockFilterResult = {
+  filter: LlmBlockFilter
   matched: number
   changed: number
   items: LlmBlockedMail[]
+}
+
+export type LlmModelProfile = {
+  id: string
+  provider: string
+  model: string
+  api_key_env: string | null
+  endpoint_env: string | null
+  timeout_seconds: number
+}
+
+export type LlmFunctionConfig = {
+  function_type: string
+  label: string
+  profile_id: string
+  env_key: string
+}
+
+export type LlmModelConfig = {
+  profiles: LlmModelProfile[]
+  functions: LlmFunctionConfig[]
 }
 
 export type MailListFilters = {
   tab?: 'all' | 'pending' | 'unprocessed' | 'processed' | 'skip'
   processed?: 'all' | 'processed' | 'unprocessed' | '0' | '1'
   importance?: 'all' | 'pinned' | 'high' | 'middle' | 'low' | 'skip' | 'pending' | 'unclassified'
+  importance_any?: string
   contact_status?: 'all' | 'pending' | 'resolved'
   read?: 'all' | 'read' | 'unread'
   q?: string
@@ -381,6 +414,13 @@ export async function listLlmBlockedMails(): Promise<LlmBlockedMail[]> {
   return data.items
 }
 
+export async function listLlmBlockFilters(): Promise<LlmBlockFilter[]> {
+  const data = await request<ItemsResponse<LlmBlockFilter>>(
+    '/api/v1/mails/llm-block-filters',
+  )
+  return data.items
+}
+
 export function applyMailLlmBlockFilter(
   q: string,
   reason: string | null,
@@ -389,6 +429,32 @@ export function applyMailLlmBlockFilter(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ q, reason }),
+  })
+}
+
+export function updateLlmBlockFilter(
+  filterId: string,
+  isEnabled: boolean,
+): Promise<LlmBlockFilter> {
+  return request(`/api/v1/mails/llm-block-filters/${encodeURIComponent(filterId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ is_enabled: isEnabled }),
+  })
+}
+
+export function getLlmModelConfig(): Promise<LlmModelConfig> {
+  return request('/api/v1/mails/llm-model-config')
+}
+
+export function updateLlmModelAssignment(
+  functionType: string,
+  profileId: string,
+): Promise<LlmModelConfig> {
+  return request('/api/v1/mails/llm-model-config', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ function_type: functionType, profile_id: profileId }),
   })
 }
 
@@ -404,6 +470,12 @@ export function updateMailImportance(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ importance }),
+  })
+}
+
+export function requestMailSummary(messageId: string): Promise<{ job_id: string }> {
+  return request(`/api/v1/mails/${encodeURIComponent(messageId)}/summary`, {
+    method: 'POST',
   })
 }
 

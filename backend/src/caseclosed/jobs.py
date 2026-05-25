@@ -34,9 +34,17 @@ def list_jobs(
     status: str = "all",
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
-    statement = select(Job).order_by(Job.priority, Job.created_at, Job.id)
+    statement = (
+        select(Job)
+        .where(Job.status != "succeeded")
+        .order_by(Job.priority, Job.created_at, Job.id)
+    )
     if status != "all":
-        statement = statement.where(Job.status == status)
+        statement = select(Job).where(Job.status == status).order_by(
+            Job.priority,
+            Job.created_at,
+            Job.id,
+        )
 
     jobs = session.scalars(statement).all()
     return {"ok": True, "data": {"items": [job_data(job) for job in jobs]}}

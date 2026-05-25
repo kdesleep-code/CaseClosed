@@ -94,7 +94,7 @@ def test_sqlite_queue_refreshes_worker_heartbeat(
     assert row[1] == row[0]
 
 
-def test_sqlite_queue_marks_old_running_jobs_stale(
+def test_sqlite_queue_requeues_old_running_jobs(
     client,
     database_path: Path,
 ) -> None:
@@ -127,4 +127,4 @@ def test_sqlite_queue_marks_old_running_jobs_stale(
         ).fetchall()
 
     assert stale_ids == ["job_stale"]
-    assert rows == [("job_fresh", "running"), ("job_stale", "stale")]
+    assert rows == [("job_fresh", "running"), ("job_stale", "pending")]

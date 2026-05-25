@@ -50,6 +50,7 @@ const workLinks: LinkItem[] = [
 type RoutePreload =
   | { path: '/'; pendingCount: number }
   | { path: '/mail'; pendingCount: number; mail?: MailInitialData }
+  | { path: '/mail/action-needed'; pendingCount: number; mail?: MailInitialData }
   | { path: '/contacts'; contacts: ContactsInitialData }
   | { path: '/contacts/pending'; contacts: ContactsInitialData }
   | { path: '/maintenance'; maintenance: MaintenanceInitialData }
@@ -125,22 +126,32 @@ function requestedDateFromSearchParams(params: URLSearchParams): string | null {
     : null
 }
 
-async function loadMailInitialData(routeUrl: URL): Promise<MailInitialData> {
+async function loadMailInitialData(
+  routeUrl: URL,
+  viewMode: MailInitialData['viewMode'] = 'normal',
+): Promise<MailInitialData> {
   const activeTab = mailTabFromSearchParams(routeUrl.searchParams)
   const requestedDate = requestedDateFromSearchParams(routeUrl.searchParams)
-  const mailDates = await listMailDates(activeTab)
+  const mailDates = viewMode === 'action-needed' ? [] : await listMailDates(activeTab)
   const today = jstDateToday()
   const selectedDate =
     requestedDate ??
     (mailDates.some((item) => item.date === today)
       ? today
       : mailDates.at(-1)?.date ?? today)
-  const page = await listMailPage({
-    tab: activeTab,
-    date_from: startOfDate(selectedDate),
-    date_to: endOfDate(selectedDate),
-    limit: 25,
-  })
+  const page =
+    viewMode === 'action-needed'
+      ? await listMailPage({
+          tab: 'unprocessed',
+          importance_any: 'high,middle',
+          limit: 25,
+        })
+      : await listMailPage({
+          tab: activeTab,
+          date_from: startOfDate(selectedDate),
+          date_to: endOfDate(selectedDate),
+          limit: 25,
+        })
 
   return {
     mails: page.items,
@@ -149,6 +160,7 @@ async function loadMailInitialData(routeUrl: URL): Promise<MailInitialData> {
     activeTab,
     selectedDate,
     calendarMonth: selectedDate,
+    viewMode,
   }
 }
 
@@ -190,15 +202,18 @@ async function preloadRoute(path: string): Promise<RoutePreload> {
     }
   }
 
-  if (routePath === '/mail') {
+  if (routePath === '/mail' || routePath === '/mail/action-needed') {
     const pendingContacts = await listUnresolvedFromAddresses()
     if (pendingContacts.length > 0) {
-      return { path: '/mail', pendingCount: pendingContacts.length }
+      return { path: routePath, pendingCount: pendingContacts.length }
     }
 
-    const mail = await loadMailInitialData(routeUrl)
+    const mail = await loadMailInitialData(
+      routeUrl,
+      routePath === '/mail/action-needed' ? 'action-needed' : 'normal',
+    )
     return {
-      path: '/mail',
+      path: routePath,
       pendingCount: 0,
       mail,
     }
@@ -207,7 +222,7 @@ async function preloadRoute(path: string): Promise<RoutePreload> {
   return { path: 'other', routePath: path }
 }
 
-function MailRouteGate() {
+function MailRouteGate({ viewMode = 'normal' }: { viewMode?: MailInitialData['viewMode'] }) {
   const [pendingCount, setPendingCount] = useState<number | null>(null)
   const [initialMail, setInitialMail] = useState<MailInitialData | null>(null)
   const [gateError, setGateError] = useState<string | null>(null)
@@ -223,6 +238,7 @@ function MailRouteGate() {
           }
           const mail = await loadMailInitialData(
             new URL(currentBrowserPath(), window.location.origin),
+            viewMode,
           )
           if (isMounted) {
             setPendingCount(0)
@@ -308,8 +324,17 @@ function MailRouteGate() {
   return <MailView initialData={initialMail} />
 }
 
-function PreloadedMailRoute({ preload }: { preload?: RoutePreload }) {
-  if (preload?.path === '/mail' && preload.pendingCount > 0) {
+function PreloadedMailRoute({
+  preload,
+  viewMode = 'normal',
+}: {
+  preload?: RoutePreload
+  viewMode?: MailInitialData['viewMode']
+}) {
+  if (
+    (preload?.path === '/mail' || preload?.path === '/mail/action-needed') &&
+    preload.pendingCount > 0
+  ) {
     return (
       <main className="app-shell">
         <div className="mail-shell">
@@ -333,11 +358,14 @@ function PreloadedMailRoute({ preload }: { preload?: RoutePreload }) {
     )
   }
 
-  if (preload?.path === '/mail' && preload.mail !== undefined) {
+  if (
+    (preload?.path === '/mail' || preload?.path === '/mail/action-needed') &&
+    preload.mail !== undefined
+  ) {
     return <MailView initialData={preload.mail} />
   }
 
-  return <MailRouteGate />
+  return <MailRouteGate viewMode={viewMode} />
 }
 
 function TopView({
@@ -381,7 +409,7 @@ function TopView({
   const isLockedByPending = pendingCount !== null && pendingCount > 0
 
   function lockedLink(link: LinkItem, className?: string) {
-    if (!isLockedByPending) {
+    if (!isLockedByPending || link.href === '/maintenance') {
       return (
         <AppLink className={className} href={link.href} key={link.href}>
           {t(link.labelKey)}
@@ -587,11 +615,14 @@ function App() {
         </>
       )
     }
-    if (path === '/mail') {
+    if (path === '/mail' || path === '/mail/action-needed') {
       return (
         <>
           {navigationError !== null && <p className="route-error">{navigationError}</p>}
-          <PreloadedMailRoute preload={routePreload ?? undefined} />
+          <PreloadedMailRoute
+            preload={routePreload ?? undefined}
+            viewMode={path === '/mail/action-needed' ? 'action-needed' : 'normal'}
+          />
         </>
       )
     }

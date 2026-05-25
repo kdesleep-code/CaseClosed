@@ -106,4 +106,4 @@ def test_orchestrator_checks_stale_jobs(client, database_path: Path) -> None:
         ).fetchone()
 
     assert stale_ids == ["job_stale_by_orchestrator"]
-    assert row == ("stale",)
+    assert row == ("pending",)

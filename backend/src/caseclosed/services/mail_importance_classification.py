@@ -11,7 +11,7 @@ from caseclosed.db.models import Job
 from caseclosed.db.models import LlmRun
 from caseclosed.db.models import MailAutoState
 from caseclosed.services.llm_provider import LlmProvider
-from caseclosed.services.llm_provider import MockMailImportanceProvider
+from caseclosed.services.llm_provider import build_mail_importance_provider
 from caseclosed.services.mail_summary import SUMMARY_TARGET_IMPORTANCE
 from caseclosed.services.mail_summary import enqueue_mail_summary_job
 
@@ -30,7 +30,7 @@ def handle_mail_importance_classification(
     message_id = payload["message_id"]
     llm_instruction = payload.get("llm_instruction")
     now = runtime.jst_iso()
-    llm_provider = provider or MockMailImportanceProvider()
+    llm_provider = provider or build_mail_importance_provider()
 
     with runtime.SessionLocal() as session:
         message = session.get(GmailMessage, message_id)
@@ -143,4 +143,6 @@ def effective_importance(
 ) -> str:
     if external_importance == "high":
         return "high"
+    if suggested_importance == "skip":
+        return "pinned"
     return suggested_importance

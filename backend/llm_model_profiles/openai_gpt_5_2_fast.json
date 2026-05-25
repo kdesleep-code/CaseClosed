@@ -1,0 +1,7 @@
+{
+  "id": "openai_gpt_5_2_fast",
+  "provider": "openai",
+  "model": "gpt-5.2",
+  "api_key_env": "CASECLOSED_OPENAI_API_KEY",
+  "timeout_seconds": 15
+}

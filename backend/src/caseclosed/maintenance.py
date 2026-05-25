@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 from fastapi import Depends
 from sqlalchemy import func
+from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DatabaseSession
 
@@ -23,6 +24,11 @@ def maintenance_status(
         "data": {
             "job_accepting": True,
             "running_jobs": count_rows(session, Job, Job.status == "running"),
+            "action_required_jobs": count_rows(
+                session,
+                Job,
+                or_(Job.status == "failed", Job.status == "stale"),
+            ),
             "pending_write_requests": count_rows(
                 session,
                 WriteRequest,

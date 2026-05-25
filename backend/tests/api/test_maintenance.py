@@ -16,6 +16,7 @@ def test_maintenance_status_reports_phase_1_defaults(client) -> None:
         "data": {
             "job_accepting": True,
             "running_jobs": 0,
+            "action_required_jobs": 0,
             "pending_write_requests": 0,
             "external_unknown_count": 0,
             "backup_status": "not_configured",
@@ -54,6 +55,7 @@ def test_maintenance_status_counts_phase_2_work(
     assert response.json()["data"] == {
         "job_accepting": True,
         "running_jobs": 1,
+        "action_required_jobs": 0,
         "pending_write_requests": 1,
         "external_unknown_count": 1,
         "backup_status": "not_configured",

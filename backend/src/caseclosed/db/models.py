@@ -265,6 +265,18 @@ class LlmRun(Base):
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class MailLlmBlockFilter(Base):
+    __tablename__ = "mail_llm_block_filters"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    query_text: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    is_enabled: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
 class SchemaVersion(Base):
     __tablename__ = "schema_versions"
 
@@ -499,6 +511,27 @@ class MailSummary(Base):
     summary_text: Mapped[str] = mapped_column(Text, nullable=False)
     action_required: Mapped[int | None] = mapped_column(Integer)
     deadline_text: Mapped[str | None] = mapped_column(Text)
+    next_action: Mapped[str | None] = mapped_column(Text)
+    key_points_json: Mapped[str | None] = mapped_column(Text)
+    translation_text: Mapped[str | None] = mapped_column(Text)
+    language: Mapped[str] = mapped_column(Text, nullable=False, default="ja")
+    llm_run_id: Mapped[str | None] = mapped_column(ForeignKey("llm_runs.id"))
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class MailThreadSummary(Base):
+    __tablename__ = "mail_thread_summaries"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    thread_id: Mapped[str] = mapped_column(
+        ForeignKey("gmail_threads.id"),
+        nullable=False,
+        unique=True,
+    )
+    summary_text: Mapped[str] = mapped_column(Text, nullable=False)
+    action_required: Mapped[int | None] = mapped_column(Integer)
     next_action: Mapped[str | None] = mapped_column(Text)
     key_points_json: Mapped[str | None] = mapped_column(Text)
     translation_text: Mapped[str | None] = mapped_column(Text)

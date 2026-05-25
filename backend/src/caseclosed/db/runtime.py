@@ -97,6 +97,11 @@ def ensure_runtime_schema() -> None:
         if "mail_send_requests" in table_names
         else set()
     )
+    mail_thread_summary_columns = (
+        {column["name"] for column in inspector.get_columns("mail_thread_summaries")}
+        if "mail_thread_summaries" in table_names
+        else set()
+    )
 
     with engine.begin() as connection:
         if "avatar_url" not in contact_columns:
@@ -207,6 +212,50 @@ def ensure_runtime_schema() -> None:
                     "ALTER TABLE mail_send_requests "
                     "ADD COLUMN sent_message_id TEXT REFERENCES gmail_messages(id)"
                 )
+            )
+        if "gmail_messages" in table_names and "mail_llm_block_filters" not in table_names:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE mail_llm_block_filters (
+                        id TEXT PRIMARY KEY,
+                        query_text TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        is_enabled INTEGER NOT NULL DEFAULT 1,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+            )
+        if "gmail_threads" in table_names and "mail_thread_summaries" not in table_names:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE mail_thread_summaries (
+                        id TEXT PRIMARY KEY,
+                        thread_id TEXT NOT NULL UNIQUE REFERENCES gmail_threads(id),
+                        summary_text TEXT NOT NULL,
+                        action_required INTEGER,
+                        next_action TEXT,
+                        key_points_json TEXT,
+                        translation_text TEXT,
+                        language TEXT NOT NULL DEFAULT 'ja',
+                        llm_run_id TEXT REFERENCES llm_runs(id),
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+            )
+        if (
+            "mail_thread_summaries" in table_names
+            and "translation_text" not in mail_thread_summary_columns
+        ):
+            connection.execute(
+                text("ALTER TABLE mail_thread_summaries ADD COLUMN translation_text TEXT")
             )
 
 
