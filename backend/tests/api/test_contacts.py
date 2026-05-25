@@ -131,6 +131,26 @@ def test_mailing_list_contact_rejects_contact_tags(client) -> None:
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
+def test_contact_fixed_importance_rule_rejects_skip(client) -> None:
+    response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Skip Rule Contact",
+            "status": "active",
+            "kind": "person",
+            "sender_resolution_mode": "self",
+            "mail_importance_rule_action": "fixed",
+            "mail_importance_rule_importance": "skip",
+            "email_addresses": [
+                {"email_address": "skip-rule@example.com", "is_primary": True}
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
 def test_person_contact_cannot_use_reply_to_sender_resolution(client) -> None:
     response = client.post(
         CONTACTS_URL,
@@ -882,3 +902,86 @@ def test_email_address_cannot_be_skipped_without_a_contact(client) -> None:
     email_data = response.json()["data"]["email_addresses"][0]
     assert "skipped" not in email_data["resolution_status"]
     assert response.json()["data"]["status"] == "skipped"
+
+
+def test_fixed_importance_rule_update_rewrites_existing_mail_auto_state(
+    client,
+    database_path: Path,
+) -> None:
+    contact_response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Rule Rewrite Sender",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "rule-rewrite@example.com", "is_primary": True}
+            ],
+        },
+    )
+    contact_id = contact_response.json()["data"]["id"]
+    first_mail_response = client.post(
+        "/api/v1/mails/mock-ingest",
+        json={
+            "gmail_message_id": "gmail_rule_rewrite_manual",
+            "gmail_thread_id": "thread_rule_rewrite_manual",
+            "from_address": "rule-rewrite@example.com",
+            "received_at": "2026-05-24T10:00:00+09:00",
+            "subject": "Manual importance target",
+        },
+    )
+    second_mail_response = client.post(
+        "/api/v1/mails/mock-ingest",
+        json={
+            "gmail_message_id": "gmail_rule_rewrite_auto",
+            "gmail_thread_id": "thread_rule_rewrite_auto",
+            "from_address": "rule-rewrite@example.com",
+            "received_at": "2026-05-24T10:10:00+09:00",
+            "subject": "Auto importance target",
+        },
+    )
+    first_mail_id = first_mail_response.json()["data"]["message_id"]
+    second_mail_id = second_mail_response.json()["data"]["message_id"]
+    manual_response = client.post(
+        f"/api/v1/mails/{first_mail_id}/importance",
+        json={"importance": "high"},
+    )
+    assert manual_response.status_code == 200
+
+    update_response = client.patch(
+        f"{CONTACTS_URL}/{contact_id}",
+        json={
+            "display_name": "Rule Rewrite Sender",
+            "status": "active",
+            "kind": "person",
+            "sender_resolution_mode": "self",
+            "mail_importance_rule_action": "fixed",
+            "mail_importance_rule_importance": "low",
+            "mail_importance_rule_instruction": None,
+            "tags": [],
+        },
+    )
+
+    assert update_response.status_code == 200
+    first_detail = client.get(f"/api/v1/mails/{first_mail_id}").json()["data"]
+    second_detail = client.get(f"/api/v1/mails/{second_mail_id}").json()["data"]
+    assert first_detail["user_state"]["user_importance"] == "high"
+    assert first_detail["auto_state"]["effective_importance"] == "high"
+    assert first_detail["message"]["effective_importance"] == "high"
+    assert second_detail["user_state"]["user_importance"] is None
+    assert second_detail["auto_state"]["effective_importance"] == "low"
+    assert second_detail["message"]["effective_importance"] == "low"
+
+    with sqlite3.connect(database_path) as connection:
+        auto_rows = connection.execute(
+            """
+            SELECT message_id, effective_importance
+            FROM mail_auto_state
+            WHERE message_id IN (?, ?)
+            ORDER BY message_id
+            """,
+            (first_mail_id, second_mail_id),
+        ).fetchall()
+
+    assert auto_rows == sorted(
+        [(first_mail_id, "low"), (second_mail_id, "low")],
+    )

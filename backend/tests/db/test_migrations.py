@@ -52,6 +52,9 @@ def test_phase_3_migrations_add_contact_tables(
         "kind",
         "sender_resolution_mode",
         "mailing_list_recipient_expression",
+        "mail_importance_rule_action",
+        "mail_importance_rule_importance",
+        "mail_importance_rule_instruction",
     } <= contact_columns
 
 
@@ -75,6 +78,10 @@ def test_phase_4_migrations_add_mail_tables(
             row[1]
             for row in connection.execute("PRAGMA table_info(mail_user_state)").fetchall()
         }
+        summary_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(mail_summaries)").fetchall()
+        }
 
     assert {
         "gmail_message_id",
@@ -90,3 +97,14 @@ def test_phase_4_migrations_add_mail_tables(
         "pending_from_address_id",
     } <= auto_state_columns
     assert {"read_status", "read_at"} <= user_state_columns
+    assert {
+        "message_id",
+        "summary_text",
+        "action_required",
+        "deadline_text",
+        "next_action",
+        "key_points_json",
+        "translation_text",
+        "language",
+        "llm_run_id",
+    } <= summary_columns

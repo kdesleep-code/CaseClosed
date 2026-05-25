@@ -12,6 +12,8 @@ from caseclosed.db.models import LlmRun
 from caseclosed.db.models import MailAutoState
 from caseclosed.services.llm_provider import LlmProvider
 from caseclosed.services.llm_provider import MockMailImportanceProvider
+from caseclosed.services.mail_summary import SUMMARY_TARGET_IMPORTANCE
+from caseclosed.services.mail_summary import enqueue_mail_summary_job
 
 FUNCTION_TYPE = "mail_importance_classification"
 
@@ -26,6 +28,7 @@ def handle_mail_importance_classification(
 ) -> dict[str, object]:
     payload = json.loads(job.payload_json)
     message_id = payload["message_id"]
+    llm_instruction = payload.get("llm_instruction")
     now = runtime.jst_iso()
     llm_provider = provider or MockMailImportanceProvider()
 
@@ -49,9 +52,25 @@ def handle_mail_importance_classification(
                 "subject": message.subject,
                 "snippet": message.snippet,
                 "body_text": message.body_text,
+                "additional_instruction": llm_instruction,
             },
         )
         suggested_importance = str(provider_response.output["importance"])
+        input_source = {
+            "message_id": message.id,
+            "gmail_message_id": message.gmail_message_id,
+            "subject": message.subject,
+        }
+        if llm_instruction is not None:
+            input_source["has_contact_instruction"] = True
+
+        input_diagnostic = {
+            "has_body_text": message.body_text is not None,
+            "has_snippet": message.snippet is not None,
+        }
+        if llm_instruction is not None:
+            input_diagnostic["contact_instruction"] = llm_instruction
+
         llm_run = LlmRun(
             id=new_id("llm_run"),
             function_type=FUNCTION_TYPE,
@@ -60,19 +79,12 @@ def handle_mail_importance_classification(
             prompt_version_id=None,
             input_hash=None,
             input_source_json=json.dumps(
-                {
-                    "message_id": message.id,
-                    "gmail_message_id": message.gmail_message_id,
-                    "subject": message.subject,
-                },
+                input_source,
                 ensure_ascii=True,
                 sort_keys=True,
             ),
             input_diagnostic_json=json.dumps(
-                {
-                    "has_body_text": message.body_text is not None,
-                    "has_snippet": message.snippet is not None,
-                },
+                input_diagnostic,
                 ensure_ascii=True,
                 sort_keys=True,
             ),
@@ -105,12 +117,16 @@ def handle_mail_importance_classification(
         )
         auto_state.updated_at = now
         auto_state.version += 1
+        queued_summary_job_id = None
+        if auto_state.effective_importance in SUMMARY_TARGET_IMPORTANCE:
+            queued_summary_job_id = enqueue_mail_summary_job(session, message, now)
         session.commit()
         return {
             "message_id": message.id,
             "suggested_importance": suggested_importance,
             "provider": llm_provider.provider_name,
             "llm_run_id": llm_run.id,
+            "queued_summary_job_id": queued_summary_job_id,
         }
 
 

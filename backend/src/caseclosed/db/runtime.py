@@ -87,10 +87,35 @@ def ensure_runtime_schema() -> None:
         if "mail_user_state" in table_names
         else set()
     )
+    mail_summary_columns = (
+        {column["name"] for column in inspector.get_columns("mail_summaries")}
+        if "mail_summaries" in table_names
+        else set()
+    )
+    mail_send_request_columns = (
+        {column["name"] for column in inspector.get_columns("mail_send_requests")}
+        if "mail_send_requests" in table_names
+        else set()
+    )
 
     with engine.begin() as connection:
         if "avatar_url" not in contact_columns:
             connection.execute(text("ALTER TABLE contacts ADD COLUMN avatar_url TEXT"))
+        if "mail_importance_rule_action" not in contact_columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE contacts ADD COLUMN "
+                    "mail_importance_rule_action TEXT NOT NULL DEFAULT 'llm'"
+                )
+            )
+        if "mail_importance_rule_importance" not in contact_columns:
+            connection.execute(
+                text("ALTER TABLE contacts ADD COLUMN mail_importance_rule_importance TEXT")
+            )
+        if "mail_importance_rule_instruction" not in contact_columns:
+            connection.execute(
+                text("ALTER TABLE contacts ADD COLUMN mail_importance_rule_instruction TEXT")
+            )
         if "mail_auto_state" in table_names and "llm_run_id" not in mail_auto_state_columns:
             connection.execute(text("ALTER TABLE mail_auto_state ADD COLUMN llm_run_id TEXT"))
         if "mail_user_state" in table_names and "read_status" not in mail_user_state_columns:
@@ -102,6 +127,64 @@ def ensure_runtime_schema() -> None:
             )
         if "mail_user_state" in table_names and "read_at" not in mail_user_state_columns:
             connection.execute(text("ALTER TABLE mail_user_state ADD COLUMN read_at TEXT"))
+        if "gmail_messages" in table_names and "mail_summaries" not in table_names:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE mail_summaries (
+                        id TEXT PRIMARY KEY,
+                        message_id TEXT NOT NULL UNIQUE REFERENCES gmail_messages(id),
+                        summary_text TEXT NOT NULL,
+                        action_required INTEGER,
+                        deadline_text TEXT,
+                        next_action TEXT,
+                        key_points_json TEXT,
+                        language TEXT NOT NULL DEFAULT 'ja',
+                        llm_run_id TEXT REFERENCES llm_runs(id),
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+            )
+        if "mail_summaries" in table_names and "translation_text" not in mail_summary_columns:
+            connection.execute(
+                text("ALTER TABLE mail_summaries ADD COLUMN translation_text TEXT")
+            )
+        if "gmail_messages" in table_names and "mail_send_requests" not in table_names:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE mail_send_requests (
+                        id TEXT PRIMARY KEY,
+                        status TEXT NOT NULL,
+                        to_addresses_json TEXT NOT NULL,
+                        cc_addresses_json TEXT,
+                        bcc_addresses_json TEXT,
+                        subject TEXT,
+                        body_text TEXT NOT NULL,
+                        attachment_names_json TEXT,
+                        reply_to_message_id TEXT REFERENCES gmail_messages(id),
+                        sent_message_id TEXT REFERENCES gmail_messages(id),
+                        scheduled_at TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+            )
+        if (
+            "mail_send_requests" in table_names
+            and "sent_message_id" not in mail_send_request_columns
+        ):
+            connection.execute(
+                text(
+                    "ALTER TABLE mail_send_requests "
+                    "ADD COLUMN sent_message_id TEXT REFERENCES gmail_messages(id)"
+                )
+            )
 
 
 def seed_settings(session: Session) -> None:

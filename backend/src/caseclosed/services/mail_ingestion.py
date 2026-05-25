@@ -16,6 +16,8 @@ from caseclosed.db.models import MailAutoState
 from caseclosed.db.models import MailUserState
 from caseclosed.db.runtime import jst_iso
 
+SUMMARY_TARGET_IMPORTANCE = {"high", "middle"}
+
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex}"
@@ -65,6 +67,7 @@ def ingest_mock_mail(
     session: DatabaseSession,
     mail_input: MockMailInput,
 ) -> MailIngestionResult:
+    is_sent = mail_input_is_sent(mail_input)
     existing_message = session.scalar(
         select(GmailMessage).where(
             GmailMessage.gmail_message_id == mail_input.gmail_message_id
@@ -135,31 +138,52 @@ def ingest_mock_mail(
             id=new_id("mail_user_state"),
             message_id=message.id,
             user_importance=None,
-            processed_status="unprocessed",
-            processed_at=None,
-            read_status="unread",
-            read_at=None,
+            processed_status="processed" if is_sent else "unprocessed",
+            processed_at=now if is_sent else None,
+            read_status="read" if is_sent else "unread",
+            read_at=now if is_sent else None,
             created_at=now,
             updated_at=now,
             version=1,
         )
     )
 
-    sender_resolution = resolve_sender(session, mail_input, now)
-    queued_job_id = None
-    if sender_resolution.pending_address is None and sender_resolution.should_classify:
-        queued_job_id = enqueue_importance_job(session, message, now)
-
+    sender_resolution = (
+        SenderResolution(
+            pending_address=None,
+            pending_reason=None,
+            skipped=False,
+            should_classify=False,
+            fixed_importance="sent",
+            llm_instruction=None,
+        )
+        if is_sent
+        else resolve_sender(session, mail_input, now)
+    )
     effective_importance = effective_importance_for_message(
         pending=sender_resolution.pending_address is not None,
         skipped=sender_resolution.skipped,
         external_starred=mail_input.external_starred,
+        sent=is_sent,
+        fixed_importance=sender_resolution.fixed_importance,
     )
+    queued_job_id = None
+    if sender_resolution.pending_address is None and sender_resolution.should_classify:
+        queued_job_id = enqueue_importance_job(
+            session,
+            message,
+            now,
+            llm_instruction=sender_resolution.llm_instruction,
+        )
+    elif effective_importance in SUMMARY_TARGET_IMPORTANCE and not is_sent:
+        queued_job_id = enqueue_summary_job(session, message, now)
     session.add(
         MailAutoState(
             id=new_id("mail_auto_state"),
             message_id=message.id,
-            external_importance="high" if mail_input.external_starred else None,
+            external_importance=(
+                None if is_sent else "high" if mail_input.external_starred else None
+            ),
             suggested_importance=None,
             llm_run_id=None,
             effective_importance=effective_importance,
@@ -229,6 +253,15 @@ class SenderResolution:
     pending_reason: str | None
     skipped: bool
     should_classify: bool
+    fixed_importance: str | None
+    llm_instruction: str | None
+
+
+@dataclass(frozen=True)
+class AppliedContactMailRule:
+    changed: bool
+    reason: str
+    queued_job_id: str | None
 
 
 def resolve_sender(
@@ -253,6 +286,8 @@ def resolve_sender(
             pending_reason="unresolved_from_contact",
             skipped=False,
             should_classify=False,
+            fixed_importance=None,
+            llm_instruction=None,
         )
 
     if from_contact is not None and from_contact.kind == "mailing_list":
@@ -263,6 +298,8 @@ def resolve_sender(
                     pending_reason="mailing_list_reply_to_missing",
                     skipped=False,
                     should_classify=False,
+                    fixed_importance=None,
+                    llm_instruction=None,
                 )
             reply_to_email_address = upsert_observed_email_address(
                 session,
@@ -280,22 +317,163 @@ def resolve_sender(
                     pending_reason="unresolved_reply_to_contact",
                     skipped=False,
                     should_classify=False,
+                    fixed_importance=None,
+                    llm_instruction=None,
                 )
-            return SenderResolution(
-                pending_address=None,
-                pending_reason=None,
-                skipped=reply_to_contact is not None and reply_to_contact.status == "skipped",
-                should_classify=reply_to_contact is None
-                or reply_to_contact.status != "skipped",
-            )
+            return sender_resolution_for_resolved_contact(reply_to_contact)
 
-    skipped = from_contact is not None and from_contact.status == "skipped"
+    return sender_resolution_for_resolved_contact(from_contact)
+
+
+def sender_resolution_for_resolved_contact(contact: Contact | None) -> SenderResolution:
+    if contact is not None and contact.status == "skipped":
+        return SenderResolution(
+            pending_address=None,
+            pending_reason=None,
+            skipped=True,
+            should_classify=False,
+            fixed_importance="skip",
+            llm_instruction=None,
+        )
+    if contact is not None and contact.mail_importance_rule_action == "fixed":
+        fixed_importance = contact.mail_importance_rule_importance or "low"
+        return SenderResolution(
+            pending_address=None,
+            pending_reason=None,
+            skipped=False,
+            should_classify=False,
+            fixed_importance=fixed_importance,
+            llm_instruction=None,
+        )
+    if contact is not None and contact.mail_importance_rule_action == "llm_with_instruction":
+        return SenderResolution(
+            pending_address=None,
+            pending_reason=None,
+            skipped=False,
+            should_classify=True,
+            fixed_importance=None,
+            llm_instruction=contact.mail_importance_rule_instruction,
+        )
     return SenderResolution(
         pending_address=None,
         pending_reason=None,
-        skipped=skipped,
-        should_classify=not skipped,
+        skipped=False,
+        should_classify=True,
+        fixed_importance=None,
+        llm_instruction=None,
     )
+
+
+def apply_contact_mail_importance_rule(
+    session: DatabaseSession,
+    *,
+    message: GmailMessage,
+    auto_state: MailAutoState,
+    contact: Contact,
+    now: str,
+) -> AppliedContactMailRule:
+    auto_state.pending_reason = None
+    auto_state.pending_from_address_id = None
+    auto_state.updated_at = now
+    auto_state.version += 1
+
+    if message_is_sent(message):
+        auto_state.effective_importance = "sent"
+        return AppliedContactMailRule(
+            changed=True,
+            reason="released_sent",
+            queued_job_id=None,
+        )
+
+    sender_resolution = sender_resolution_for_resolved_contact(contact)
+    if sender_resolution.skipped:
+        auto_state.effective_importance = "skip"
+        return AppliedContactMailRule(
+            changed=True,
+            reason="released_to_skip",
+            queued_job_id=None,
+        )
+
+    if sender_resolution.fixed_importance is not None:
+        auto_state.effective_importance = sender_resolution.fixed_importance
+        queued_job_id = None
+        if sender_resolution.fixed_importance in SUMMARY_TARGET_IMPORTANCE:
+            queued_job_id = enqueue_summary_job(session, message, now)
+        return AppliedContactMailRule(
+            changed=True,
+            reason="released_to_fixed_importance",
+            queued_job_id=queued_job_id,
+        )
+
+    auto_state.effective_importance = (
+        "high" if auto_state.external_importance == "high" else "unclassified"
+    )
+    queued_job_id = enqueue_importance_job(
+        session,
+        message,
+        now,
+        llm_instruction=sender_resolution.llm_instruction,
+    )
+    return AppliedContactMailRule(
+        changed=True,
+        reason="released_to_importance_job",
+        queued_job_id=queued_job_id,
+    )
+
+
+def apply_fixed_importance_rule_to_existing_contact_mail(
+    session: DatabaseSession,
+    *,
+    contact: Contact,
+    now: str,
+) -> dict[str, int]:
+    if contact.mail_importance_rule_action != "fixed":
+        return {"matched": 0, "updated": 0, "preserved": 0, "queued": 0}
+
+    normalized_addresses = [
+        row.normalized_email_address
+        for row in session.scalars(
+            select(ContactEmailAddress).where(
+                ContactEmailAddress.contact_id == contact.id,
+                ContactEmailAddress.deleted_at.is_(None),
+            )
+        ).all()
+    ]
+    if not normalized_addresses:
+        return {"matched": 0, "updated": 0, "preserved": 0, "queued": 0}
+
+    rows = session.execute(
+        select(GmailMessage, MailUserState, MailAutoState)
+        .join(MailUserState, MailUserState.message_id == GmailMessage.id)
+        .join(MailAutoState, MailAutoState.message_id == GmailMessage.id)
+        .where(
+            (GmailMessage.from_address.in_(normalized_addresses))
+            | (GmailMessage.reply_to_address.in_(normalized_addresses))
+        )
+    ).all()
+
+    updated = 0
+    preserved = 0
+    queued = 0
+    for message, user_state, auto_state in rows:
+        result = apply_contact_mail_importance_rule(
+            session,
+            message=message,
+            auto_state=auto_state,
+            contact=contact,
+            now=now,
+        )
+        if result.changed:
+            updated += 1
+        if result.queued_job_id is not None:
+            queued += 1
+
+    return {
+        "matched": len(rows),
+        "updated": updated,
+        "preserved": preserved,
+        "queued": queued,
+    }
 
 
 def upsert_observed_email_address(
@@ -356,6 +534,8 @@ def enqueue_importance_job(
     session: DatabaseSession,
     message: GmailMessage,
     now: str,
+    *,
+    llm_instruction: str | None = None,
 ) -> str:
     job_id = new_id("job")
     session.add(
@@ -368,6 +548,7 @@ def enqueue_importance_job(
                 {
                     "message_id": message.id,
                     "gmail_message_id": message.gmail_message_id,
+                    "llm_instruction": llm_instruction,
                 },
                 ensure_ascii=True,
                 sort_keys=True,
@@ -390,14 +571,71 @@ def enqueue_importance_job(
     return job_id
 
 
+def enqueue_summary_job(
+    session: DatabaseSession,
+    message: GmailMessage,
+    now: str,
+) -> str:
+    job_id = new_id("job")
+    session.add(
+        Job(
+            id=job_id,
+            job_type="mail_summary",
+            priority=120,
+            status="pending",
+            payload_json=json.dumps(
+                {
+                    "message_id": message.id,
+                    "gmail_message_id": message.gmail_message_id,
+                    "thread_id": message.thread_id,
+                    "reason": "fixed_importance_summary",
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
+            result_json=None,
+            error_type=None,
+            error_message=None,
+            retry_count=0,
+            max_retries=3,
+            locked_by=None,
+            locked_at=None,
+            heartbeat_at=None,
+            available_at=None,
+            started_at=None,
+            finished_at=None,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    return job_id
+
+
+def mail_input_is_sent(mail_input: MockMailInput) -> bool:
+    return any(label.lower() == "sent" for label in mail_input.gmail_labels or [])
+
+
+def message_is_sent(message: GmailMessage) -> bool:
+    labels = json.loads(message.gmail_labels_json) if message.gmail_labels_json else []
+    if not isinstance(labels, list):
+        return False
+    return any(str(label).lower() == "sent" for label in labels)
+
+
 def effective_importance_for_message(
     *,
     pending: bool,
     skipped: bool,
     external_starred: bool,
+    sent: bool = False,
+    fixed_importance: str | None = None,
 ) -> str:
+    if sent:
+        return "sent"
     if pending:
         return "pending"
+    if fixed_importance is not None:
+        return fixed_importance
     if skipped:
         return "skip"
     if external_starred:

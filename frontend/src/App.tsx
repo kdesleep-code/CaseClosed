@@ -1,14 +1,28 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { AuthApiError, login, readSession } from './authApi'
 import type { SessionData } from './authApi'
 import loginDoorTanuki from './assets/login-door-tanuki.png'
+import ComposeMailView from './ComposeMailView'
 import ContactsView from './ContactsView'
+import type { ContactsInitialData } from './ContactsView'
 import MailView from './MailView'
+import type { MailInitialData } from './MailView'
+import type { MailTab } from './MailView'
+import MailThreadView from './MailThreadView'
 import MaintenanceView from './MaintenanceView'
+import type { MaintenanceInitialData } from './MaintenanceView'
 import { t } from './i18n'
 import type { MessageKey } from './i18n'
-import { listUnresolvedFromAddresses } from './phase3Api'
+import { AppLink } from './navigation'
+import {
+  listExternalOperations,
+  listJobs,
+  listPendingMails,
+  readMaintenanceStatus,
+} from './phase2Api'
+import { listContacts, listUnresolvedFromAddresses } from './phase3Api'
+import { listMailDates, listMailPage } from './phase4Api'
 import './App.css'
 
 type LinkItem = {
@@ -29,10 +43,22 @@ const pageLinks: LinkItem[] = [
 ]
 
 const workLinks: LinkItem[] = [
-  { labelKey: 'work.composeMail', href: '/mail/compose' },
   { labelKey: 'work.newCase', href: '/cases/new' },
   { labelKey: 'work.newTask', href: '/tasks/new' },
 ]
+
+type RoutePreload =
+  | { path: '/'; pendingCount: number }
+  | { path: '/mail'; pendingCount: number; mail?: MailInitialData }
+  | { path: '/contacts'; contacts: ContactsInitialData }
+  | { path: '/contacts/pending'; contacts: ContactsInitialData }
+  | { path: '/maintenance'; maintenance: MaintenanceInitialData }
+  | { path: 'other'; routePath: string }
+
+type NavigationRequestEvent = CustomEvent<{
+  path: string
+  replace: boolean
+}>
 
 function formatJstDateTime(value: string | null) {
   if (value === null) {
@@ -57,16 +83,151 @@ function formatJstDateTime(value: string | null) {
   return `${parts.year}/${parts.month}/${parts.day} ${parts.hour}:${parts.minute} JST`
 }
 
+function jstDateToday() {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  })
+    .formatToParts(new Date())
+    .reduce<Record<string, string>>((dateParts, part) => {
+      dateParts[part.type] = part.value
+      return dateParts
+    }, {})
+
+  return `${parts.year}-${parts.month}-${parts.day}`
+}
+
+function startOfDate(date: string) {
+  return `${date}T00:00:00+09:00`
+}
+
+function endOfDate(date: string) {
+  return `${date}T23:59:59+09:00`
+}
+
+function currentBrowserPath() {
+  return `${window.location.pathname}${window.location.search}${window.location.hash}`
+}
+
+function mailTabFromSearchParams(params: URLSearchParams): MailTab {
+  const requestedTab = params.get('tab')
+  return requestedTab === 'processed' || requestedTab === 'skip'
+    ? requestedTab
+    : 'unprocessed'
+}
+
+function requestedDateFromSearchParams(params: URLSearchParams): string | null {
+  const requestedDate = params.get('date')
+  return requestedDate !== null && /^\d{4}-\d{2}-\d{2}$/.test(requestedDate)
+    ? requestedDate
+    : null
+}
+
+async function loadMailInitialData(routeUrl: URL): Promise<MailInitialData> {
+  const activeTab = mailTabFromSearchParams(routeUrl.searchParams)
+  const requestedDate = requestedDateFromSearchParams(routeUrl.searchParams)
+  const mailDates = await listMailDates(activeTab)
+  const today = jstDateToday()
+  const selectedDate =
+    requestedDate ??
+    (mailDates.some((item) => item.date === today)
+      ? today
+      : mailDates.at(-1)?.date ?? today)
+  const page = await listMailPage({
+    tab: activeTab,
+    date_from: startOfDate(selectedDate),
+    date_to: endOfDate(selectedDate),
+    limit: 25,
+  })
+
+  return {
+    mails: page.items,
+    mailDates,
+    nextCursor: page.next_cursor,
+    activeTab,
+    selectedDate,
+    calendarMonth: selectedDate,
+  }
+}
+
+async function preloadRoute(path: string): Promise<RoutePreload> {
+  const routeUrl = new URL(path, window.location.origin)
+  const routePath = routeUrl.pathname
+
+  if (routePath === '/') {
+    const pendingContacts = await listUnresolvedFromAddresses()
+    return { path: '/', pendingCount: pendingContacts.length }
+  }
+
+  if (routePath === '/maintenance') {
+    const [status, jobs, operations, pendingMails] = await Promise.all([
+      readMaintenanceStatus(),
+      listJobs(),
+      listExternalOperations(),
+      listPendingMails(),
+    ])
+    return {
+      path: '/maintenance',
+      maintenance: { status, jobs, operations, pendingMails },
+    }
+  }
+
+  if (routePath === '/contacts') {
+    const contacts = await listContacts()
+    return { path: '/contacts', contacts: { mode: 'list', contacts } }
+  }
+
+  if (routePath === '/contacts/pending') {
+    const [unresolvedFromAddresses, contacts] = await Promise.all([
+      listUnresolvedFromAddresses(),
+      listContacts(),
+    ])
+    return {
+      path: '/contacts/pending',
+      contacts: { mode: 'pending', contacts, unresolvedFromAddresses },
+    }
+  }
+
+  if (routePath === '/mail') {
+    const pendingContacts = await listUnresolvedFromAddresses()
+    if (pendingContacts.length > 0) {
+      return { path: '/mail', pendingCount: pendingContacts.length }
+    }
+
+    const mail = await loadMailInitialData(routeUrl)
+    return {
+      path: '/mail',
+      pendingCount: 0,
+      mail,
+    }
+  }
+
+  return { path: 'other', routePath: path }
+}
+
 function MailRouteGate() {
   const [pendingCount, setPendingCount] = useState<number | null>(null)
+  const [initialMail, setInitialMail] = useState<MailInitialData | null>(null)
   const [gateError, setGateError] = useState<string | null>(null)
 
   useEffect(() => {
     let isMounted = true
     listUnresolvedFromAddresses()
-      .then((items) => {
+      .then(async (items) => {
         if (isMounted) {
-          setPendingCount(items.length)
+          if (items.length > 0) {
+            setPendingCount(items.length)
+            return
+          }
+          const mail = await loadMailInitialData(
+            new URL(currentBrowserPath(), window.location.origin),
+          )
+          if (isMounted) {
+            setPendingCount(0)
+            setInitialMail(mail)
+          }
         }
       })
       .catch((requestError) => {
@@ -89,7 +250,7 @@ function MailRouteGate() {
               <p>{t('app.name')}</p>
               <h1>{t('mail.heading')}</h1>
             </div>
-            <a href="/">{t('top.heading')}</a>
+            <AppLink href="/">{t('top.heading')}</AppLink>
           </header>
           <div className="mail-feedback">
             <p role="alert">{gateError}</p>
@@ -99,7 +260,7 @@ function MailRouteGate() {
     )
   }
 
-  if (pendingCount === null) {
+  if (pendingCount === null || (pendingCount === 0 && initialMail === null)) {
     return (
       <main className="app-shell">
         <div className="mail-shell">
@@ -108,7 +269,7 @@ function MailRouteGate() {
               <p>{t('app.name')}</p>
               <h1>{t('mail.heading')}</h1>
             </div>
-            <a href="/">{t('top.heading')}</a>
+            <AppLink href="/">{t('top.heading')}</AppLink>
           </header>
           <p className="mail-empty">{t('session.checking.label')}</p>
         </div>
@@ -125,14 +286,14 @@ function MailRouteGate() {
               <p>{t('app.name')}</p>
               <h1>{t('mail.heading')}</h1>
             </div>
-            <a href="/">{t('top.heading')}</a>
+            <AppLink href="/">{t('top.heading')}</AppLink>
           </header>
           <section className="mail-panel mail-blocked-panel">
             <h2>{t('mail.blocked.heading')}</h2>
             <p>{t('mail.blocked.body')}</p>
             <strong>{t('mail.blocked.count', { count: String(pendingCount) })}</strong>
             <div className="mail-actions">
-              <a href="/contacts/pending">{t('mail.blocked.openPending')}</a>
+              <AppLink href="/contacts/pending">{t('mail.blocked.openPending')}</AppLink>
             </div>
           </section>
         </div>
@@ -140,20 +301,63 @@ function MailRouteGate() {
     )
   }
 
-  return <MailView />
+  if (initialMail === null) {
+    return null
+  }
+
+  return <MailView initialData={initialMail} />
+}
+
+function PreloadedMailRoute({ preload }: { preload?: RoutePreload }) {
+  if (preload?.path === '/mail' && preload.pendingCount > 0) {
+    return (
+      <main className="app-shell">
+        <div className="mail-shell">
+          <header className="maintenance-header">
+            <div>
+              <p>{t('app.name')}</p>
+              <h1>{t('mail.heading')}</h1>
+            </div>
+            <AppLink href="/">{t('top.heading')}</AppLink>
+          </header>
+          <section className="mail-panel mail-blocked-panel">
+            <h2>{t('mail.blocked.heading')}</h2>
+            <p>{t('mail.blocked.body')}</p>
+            <strong>{t('mail.blocked.count', { count: String(preload.pendingCount) })}</strong>
+            <div className="mail-actions">
+              <AppLink href="/contacts/pending">{t('mail.blocked.openPending')}</AppLink>
+            </div>
+          </section>
+        </div>
+      </main>
+    )
+  }
+
+  if (preload?.path === '/mail' && preload.mail !== undefined) {
+    return <MailView initialData={preload.mail} />
+  }
+
+  return <MailRouteGate />
 }
 
 function TopView({
   session,
   sessionExpiresAt,
+  initialPendingCount,
 }: {
   session: SessionData
   sessionExpiresAt: string | null
+  initialPendingCount?: number
 }) {
-  const [pendingCount, setPendingCount] = useState<number | null>(null)
+  const [pendingCount, setPendingCount] = useState<number | null>(
+    initialPendingCount ?? null,
+  )
   const [pendingError, setPendingError] = useState<string | null>(null)
 
   useEffect(() => {
+    if (initialPendingCount !== undefined) {
+      return
+    }
     let isMounted = true
     listUnresolvedFromAddresses()
       .then((items) => {
@@ -172,16 +376,16 @@ function TopView({
     return () => {
       isMounted = false
     }
-  }, [])
+  }, [initialPendingCount])
 
   const isLockedByPending = pendingCount !== null && pendingCount > 0
 
   function lockedLink(link: LinkItem, className?: string) {
     if (!isLockedByPending) {
       return (
-        <a className={className} href={link.href} key={link.href}>
+        <AppLink className={className} href={link.href} key={link.href}>
           {t(link.labelKey)}
-        </a>
+        </AppLink>
       )
     }
     return (
@@ -223,7 +427,7 @@ function TopView({
               <p>{t('top.pendingLock.body')}</p>
             </div>
             <strong>{t('mail.blocked.count', { count: String(pendingCount) })}</strong>
-            <a href="/contacts/pending">{t('mail.blocked.openPending')}</a>
+            <AppLink href="/contacts/pending">{t('mail.blocked.openPending')}</AppLink>
           </section>
         )}
 
@@ -255,6 +459,40 @@ function App() {
   const [isLocked, setIsLocked] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isSessionChecked, setIsSessionChecked] = useState(false)
+  const [path, setPath] = useState(window.location.pathname)
+  const [routePreload, setRoutePreload] = useState<RoutePreload | null>(null)
+  const [navigationError, setNavigationError] = useState<string | null>(null)
+  const routeTransitionId = useRef(0)
+
+  function transitionToPreparedRoute(
+    nextPath: string,
+    historyMode: 'none' | 'push' | 'replace',
+  ) {
+    routeTransitionId.current += 1
+    const currentTransitionId = routeTransitionId.current
+    setNavigationError(null)
+
+    preloadRoute(nextPath)
+      .then((preload) => {
+        if (currentTransitionId !== routeTransitionId.current) {
+          return
+        }
+        if (historyMode === 'replace') {
+          window.history.replaceState({}, '', nextPath)
+        } else if (historyMode === 'push') {
+          window.history.pushState({}, '', nextPath)
+        }
+        setRoutePreload(preload)
+        setPath(new URL(nextPath, window.location.origin).pathname)
+      })
+      .catch((requestError) => {
+        if (currentTransitionId === routeTransitionId.current) {
+          setNavigationError(
+            requestError instanceof Error ? requestError.message : t('app.requestFailed'),
+          )
+        }
+      })
+  }
 
   useEffect(() => {
     let isMounted = true
@@ -278,6 +516,31 @@ function App() {
 
     return () => {
       isMounted = false
+    }
+  }, [])
+
+  useEffect(() => {
+    function handleNavigation() {
+      transitionToPreparedRoute(currentBrowserPath(), 'none')
+    }
+
+    window.addEventListener('popstate', handleNavigation)
+    return () => {
+      window.removeEventListener('popstate', handleNavigation)
+    }
+  }, [])
+
+  useEffect(() => {
+    function handleNavigationRequest(event: Event) {
+      const navigationEvent = event as NavigationRequestEvent
+      const { path: nextPath, replace } = navigationEvent.detail
+      navigationEvent.preventDefault()
+      transitionToPreparedRoute(nextPath, replace ? 'replace' : 'push')
+    }
+
+    window.addEventListener('caseclosed:navigate', handleNavigationRequest)
+    return () => {
+      window.removeEventListener('caseclosed:navigate', handleNavigationRequest)
     }
   }, [])
 
@@ -310,20 +573,87 @@ function App() {
   }
 
   if (session !== null) {
-    if (window.location.pathname === '/maintenance') {
-      return <MaintenanceView />
+    if (path === '/maintenance') {
+      return (
+        <>
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <MaintenanceView
+            initialData={
+              routePreload?.path === '/maintenance'
+                ? routePreload.maintenance
+                : undefined
+            }
+          />
+        </>
+      )
     }
-    if (window.location.pathname === '/mail') {
-      return <MailRouteGate />
+    if (path === '/mail') {
+      return (
+        <>
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <PreloadedMailRoute preload={routePreload ?? undefined} />
+        </>
+      )
     }
-    if (window.location.pathname === '/contacts') {
-      return <ContactsView mode="list" />
+    if (path === '/mail/compose') {
+      return (
+        <>
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <ComposeMailView />
+        </>
+      )
     }
-    if (window.location.pathname === '/contacts/pending') {
-      return <ContactsView mode="pending" />
+    if (path.startsWith('/mail/')) {
+      return (
+        <>
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <MailThreadView messageId={decodeURIComponent(path.slice('/mail/'.length))} />
+        </>
+      )
+    }
+    if (path === '/contacts') {
+      return (
+        <>
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <ContactsView
+            initialData={
+              routePreload?.path === '/contacts'
+                ? routePreload.contacts
+                : undefined
+            }
+            mode="list"
+          />
+        </>
+      )
+    }
+    if (path === '/contacts/pending') {
+      return (
+        <>
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <ContactsView
+            initialData={
+              routePreload?.path === '/contacts/pending'
+                ? routePreload.contacts
+                : undefined
+            }
+            mode="pending"
+          />
+        </>
+      )
     }
 
-    return <TopView session={session} sessionExpiresAt={sessionExpiresAt} />
+    return (
+      <>
+        {navigationError !== null && <p className="route-error">{navigationError}</p>}
+        <TopView
+          initialPendingCount={
+            routePreload?.path === '/' ? routePreload.pendingCount : undefined
+          }
+          session={session}
+          sessionExpiresAt={sessionExpiresAt}
+        />
+      </>
+    )
   }
 
   if (!isSessionChecked) {

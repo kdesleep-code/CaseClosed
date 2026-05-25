@@ -21,6 +21,9 @@ from caseclosed.db.models import Job
 from caseclosed.db.models import MailAutoState
 from caseclosed.db.runtime import get_session
 from caseclosed.db.runtime import jst_iso
+from caseclosed.services.mail_ingestion import (
+    apply_fixed_importance_rule_to_existing_contact_mail,
+)
 
 router = APIRouter(prefix="/api/v1/contacts", tags=["contacts"])
 
@@ -29,6 +32,8 @@ EMAIL_ADDRESS_STATUSES = {"active", "inactive", "deleted"}
 CONTACT_KINDS = {"person", "mailing_list"}
 SENDER_RESOLUTION_MODES = {"self", "reply_to"}
 RESERVED_CONTACT_TAGS = {"mailing-list"}
+MAIL_IMPORTANCE_RULE_ACTIONS = {"llm", "fixed", "llm_with_instruction"}
+MAIL_IMPORTANCE_RULE_VALUES = {"pinned", "high", "middle", "low"}
 
 
 class ContactEmailAddressInput(BaseModel):
@@ -44,6 +49,9 @@ class ContactCreate(BaseModel):
     kind: str = "person"
     sender_resolution_mode: str = "self"
     mailing_list_recipient_expression: str | None = None
+    mail_importance_rule_action: str = "llm"
+    mail_importance_rule_importance: str | None = None
+    mail_importance_rule_instruction: str | None = None
     tags: list[str] = []
     email_addresses: list[ContactEmailAddressInput] = []
     source_suggestion_id: str | None = None
@@ -57,6 +65,9 @@ class ContactPatch(BaseModel):
     kind: str | None = None
     sender_resolution_mode: str | None = None
     mailing_list_recipient_expression: str | None = None
+    mail_importance_rule_action: str | None = None
+    mail_importance_rule_importance: str | None = None
+    mail_importance_rule_instruction: str | None = None
     tags: list[str] | None = None
 
 
@@ -122,6 +133,44 @@ def validate_contact_tags(*, kind: str, tags: list[str]) -> None:
             422,
             "VALIDATION_ERROR",
             "Mailing list contacts do not use contact tags.",
+        )
+
+
+def validate_mail_importance_rule(
+    *,
+    action: str,
+    importance: str | None,
+    instruction: str | None,
+) -> None:
+    if action not in MAIL_IMPORTANCE_RULE_ACTIONS:
+        raise json_error(
+            422,
+            "VALIDATION_ERROR",
+            "Invalid mail importance rule action.",
+        )
+    if importance is not None and importance not in MAIL_IMPORTANCE_RULE_VALUES:
+        raise json_error(
+            422,
+            "VALIDATION_ERROR",
+            "Invalid mail importance rule value.",
+        )
+    if action == "fixed" and importance is None:
+        raise json_error(
+            422,
+            "VALIDATION_ERROR",
+            "Fixed mail importance rule requires an importance value.",
+        )
+    if action != "fixed" and importance is not None:
+        raise json_error(
+            422,
+            "VALIDATION_ERROR",
+            "Only fixed mail importance rules can set an importance value.",
+        )
+    if action == "llm_with_instruction" and normalize_optional_text(instruction) is None:
+        raise json_error(
+            422,
+            "VALIDATION_ERROR",
+            "LLM instruction rule requires instruction text.",
         )
 
 
@@ -268,6 +317,9 @@ def contact_data(contact: Contact, session: DatabaseSession) -> dict[str, object
         "kind": contact.kind,
         "sender_resolution_mode": contact.sender_resolution_mode,
         "mailing_list_recipient_expression": contact.mailing_list_recipient_expression,
+        "mail_importance_rule_action": contact.mail_importance_rule_action,
+        "mail_importance_rule_importance": contact.mail_importance_rule_importance,
+        "mail_importance_rule_instruction": contact.mail_importance_rule_instruction,
         "tags": [] if contact.kind == "mailing_list" else contact_tags(session, contact.id),
         "email_addresses": [
             email_address_data(email_address)
@@ -679,6 +731,11 @@ def create_contact(
         sender_resolution_mode=payload.sender_resolution_mode,
     )
     validate_contact_tags(kind=payload.kind, tags=payload.tags)
+    validate_mail_importance_rule(
+        action=payload.mail_importance_rule_action,
+        importance=payload.mail_importance_rule_importance,
+        instruction=payload.mail_importance_rule_instruction,
+    )
     if payload.kind == "mailing_list" and len(payload.email_addresses) > 1:
         raise json_error(
             422,
@@ -701,6 +758,11 @@ def create_contact(
         sender_resolution_mode=payload.sender_resolution_mode,
         mailing_list_recipient_expression=normalize_optional_text(
             payload.mailing_list_recipient_expression
+        ),
+        mail_importance_rule_action=payload.mail_importance_rule_action,
+        mail_importance_rule_importance=payload.mail_importance_rule_importance,
+        mail_importance_rule_instruction=normalize_optional_text(
+            payload.mail_importance_rule_instruction
         ),
         created_at=now,
         updated_at=now,
@@ -731,6 +793,9 @@ def update_contact(
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
     contact = get_contact_or_404(session, contact_id)
+    previous_status = contact.status
+    previous_mail_importance_rule_action = contact.mail_importance_rule_action
+    previous_mail_importance_rule_importance = contact.mail_importance_rule_importance
 
     next_kind = payload.kind if payload.kind is not None else contact.kind
     if next_kind != contact.kind:
@@ -751,12 +816,43 @@ def update_contact(
     )
     next_tags = payload.tags if payload.tags is not None else contact_tags(session, contact.id)
     validate_contact_tags(kind=next_kind, tags=next_tags)
+    next_mail_importance_rule_action = (
+        payload.mail_importance_rule_action
+        if payload.mail_importance_rule_action is not None
+        else contact.mail_importance_rule_action
+    )
+    next_mail_importance_rule_importance = (
+        payload.mail_importance_rule_importance
+        if payload.mail_importance_rule_importance is not None
+        else contact.mail_importance_rule_importance
+    )
+    next_mail_importance_rule_instruction = (
+        payload.mail_importance_rule_instruction
+        if payload.mail_importance_rule_instruction is not None
+        else contact.mail_importance_rule_instruction
+    )
+    validate_mail_importance_rule(
+        action=next_mail_importance_rule_action,
+        importance=next_mail_importance_rule_importance,
+        instruction=next_mail_importance_rule_instruction,
+    )
 
     if payload.status is not None:
         validate_contact_status(payload.status)
         contact.status = payload.status
     contact.kind = next_kind
     contact.sender_resolution_mode = next_sender_resolution_mode
+    contact.mail_importance_rule_action = next_mail_importance_rule_action
+    contact.mail_importance_rule_importance = (
+        next_mail_importance_rule_importance
+        if next_mail_importance_rule_action == "fixed"
+        else None
+    )
+    contact.mail_importance_rule_instruction = normalize_optional_text(
+        next_mail_importance_rule_instruction
+    )
+    if next_mail_importance_rule_action != "llm_with_instruction":
+        contact.mail_importance_rule_instruction = None
     if payload.mailing_list_recipient_expression is not None:
         contact.mailing_list_recipient_expression = normalize_optional_text(
             payload.mailing_list_recipient_expression
@@ -785,6 +881,21 @@ def update_contact(
 
     contact.version += 1
     contact.updated_at = now
+    fixed_importance_rule_changed = (
+        contact.mail_importance_rule_action == "fixed"
+        and (
+            previous_mail_importance_rule_action != contact.mail_importance_rule_action
+            or previous_mail_importance_rule_importance
+            != contact.mail_importance_rule_importance
+            or previous_status != contact.status
+        )
+    )
+    if fixed_importance_rule_changed:
+        apply_fixed_importance_rule_to_existing_contact_mail(
+            session,
+            contact=contact,
+            now=now,
+        )
     session.commit()
     return {"ok": True, "data": contact_data(contact, session)}
 

@@ -21,6 +21,9 @@ export type Contact = {
   kind?: 'person' | 'mailing_list'
   sender_resolution_mode?: 'self' | 'reply_to'
   mailing_list_recipient_expression?: string | null
+  mail_importance_rule_action?: 'llm' | 'fixed' | 'llm_with_instruction'
+  mail_importance_rule_importance?: 'pinned' | 'high' | 'middle' | 'low' | null
+  mail_importance_rule_instruction?: string | null
   tags: string[]
   email_addresses: ContactEmailAddress[]
   created_at: string
@@ -60,6 +63,9 @@ export type ContactCreatePayload = {
   kind: 'person' | 'mailing_list'
   sender_resolution_mode: 'self' | 'reply_to'
   mailing_list_recipient_expression?: string | null
+  mail_importance_rule_action?: 'llm' | 'fixed' | 'llm_with_instruction'
+  mail_importance_rule_importance?: 'pinned' | 'high' | 'middle' | 'low' | null
+  mail_importance_rule_instruction?: string | null
   tags: string[]
   email_addresses: Array<{
     email_address: string
@@ -76,6 +82,9 @@ export type ContactUpdatePayload = {
   kind: 'person' | 'mailing_list'
   sender_resolution_mode: 'self' | 'reply_to'
   mailing_list_recipient_expression?: string | null
+  mail_importance_rule_action: 'llm' | 'fixed' | 'llm_with_instruction'
+  mail_importance_rule_importance: 'pinned' | 'high' | 'middle' | 'low' | null
+  mail_importance_rule_instruction: string | null
   tags: string[]
 }
 

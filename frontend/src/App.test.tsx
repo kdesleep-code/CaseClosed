@@ -1,9 +1,11 @@
 ﻿import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { fireEvent } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import App from './App'
 import { applyLanguagePatch, resetLanguagePatch } from './i18n'
+import { navigateTo } from './navigation'
 
 function apiResponse(status: number, body: object) {
   return Promise.resolve(
@@ -277,6 +279,192 @@ describe('Phase 1 login screen', () => {
 })
 
 describe('Phase 4 mail screen', () => {
+  it('opens the compose mail view with a two-column drafting surface', async () => {
+    const user = userEvent.setup()
+    window.history.pushState({}, '', '/mail/compose')
+    let sentPayload: unknown = null
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        const path = input.toString()
+        if (path === '/api/v1/auth/session') {
+          return activeSessionResponse()
+        }
+        if (path === '/api/v1/mails/send') {
+          sentPayload = JSON.parse(String(init?.body ?? '{}'))
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                ok: true,
+                data: {
+                  id: 'mail_send_test',
+                  status: 'scheduled_mock',
+                  to_addresses: ['receiver@example.com'],
+                  cc_addresses: [],
+                  bcc_addresses: [],
+                  subject: 'Draft subject',
+                  body_text: 'Draft body',
+                  attachment_names: [],
+                  reply_to_message_id: null,
+                  sent_message_id: null,
+                  scheduled_at: '2026-05-25T10:01:00+09:00',
+                  created_at: '2026-05-25T10:00:00+09:00',
+                  updated_at: '2026-05-25T10:00:00+09:00',
+                  version: 1,
+                },
+              }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } },
+            ),
+          )
+        }
+        if (path === '/api/v1/mails/mail_send_test') {
+          return apiResponse(200, {
+            ok: true,
+            data: {
+              message: {
+                id: 'mail_send_test',
+                gmail_message_id: 'provisional:mail_send_test',
+                gmail_thread_id: 'provisional_thread_mail_send_test',
+                thread_id: 'provisional_thread_mail_send_test',
+                received_at: '2026-05-25T10:01:00+09:00',
+                received_date: '2026-05-25',
+                subject: 'Draft subject',
+                from_address: 'caseclosed.me@example.local',
+                from_name: 'CaseClosed',
+                from_contact: null,
+                sender_contact: null,
+                sender_address: null,
+                reply_to_address: null,
+                to_addresses: ['receiver@example.com'],
+                cc_addresses: [],
+                bcc_addresses: [],
+                to_recipients: [{ email_address: 'receiver@example.com', contact: null }],
+                cc_recipients: [],
+                bcc_recipients: [],
+                message_id_header: null,
+                in_reply_to_header: null,
+                references_header: null,
+                list_id: null,
+                snippet: 'Draft body',
+                gmail_link: null,
+                external_starred: false,
+                gmail_labels: ['SENT'],
+                body_text: 'Draft body',
+                body_html: null,
+                processed_status: 'processed',
+                read_status: 'read',
+                read_at: '2026-05-25T10:00:00+09:00',
+                user_importance: null,
+                effective_importance: 'sent',
+                importance_rank: 7,
+                external_importance: null,
+                suggested_importance: null,
+                llm_run_id: null,
+                pending_reason: null,
+                created_at: '2026-05-25T10:00:00+09:00',
+                updated_at: '2026-05-25T10:00:00+09:00',
+                version: 1,
+              },
+              thread_messages: [],
+              scheduled_send_requests: [
+                {
+                  id: 'mail_send_test',
+                  status: 'scheduled_mock',
+                  to_addresses: ['receiver@example.com'],
+                  cc_addresses: [],
+                  bcc_addresses: [],
+                  subject: 'Draft subject',
+                  body_text: 'Draft body',
+                  attachment_names: [],
+                  reply_to_message_id: null,
+                  sent_message_id: null,
+                  scheduled_at: '2026-05-25T10:01:00+09:00',
+                  created_at: '2026-05-25T10:00:00+09:00',
+                  updated_at: '2026-05-25T10:00:00+09:00',
+                  version: 1,
+                },
+              ],
+              user_state: {
+                user_importance: null,
+                processed_status: 'processed',
+                processed_at: '2026-05-25T10:00:00+09:00',
+                read_status: 'read',
+                read_at: '2026-05-25T10:00:00+09:00',
+                version: 1,
+              },
+              auto_state: {
+                external_importance: null,
+                suggested_importance: null,
+                llm_run_id: null,
+                effective_importance: 'sent',
+                pending_reason: null,
+              },
+              summary: null,
+              available_actions: [],
+            },
+          })
+        }
+
+        throw new Error(`Unexpected request: ${path}`)
+      }),
+    )
+
+    render(<App />)
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Compose Mail' }),
+    ).toBeInTheDocument()
+    expect(screen.getByLabelText('To')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Cc')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Bcc')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'CC/BCC' }))
+    expect(screen.getByLabelText('Cc')).toBeInTheDocument()
+    expect(screen.getByLabelText('Bcc')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'CC/BCC' }))
+    expect(screen.queryByLabelText('Cc')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Bcc')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Subject')).toBeInTheDocument()
+    expect(screen.getByLabelText('Body')).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'Attachments' })).toBeInTheDocument()
+    const dropZone = screen.getByText('Drop files here')
+    const attachment = new File(['hello'], 'review-note.txt', { type: 'text/plain' })
+    fireEvent.drop(dropZone, { dataTransfer: { files: [attachment] } })
+    expect(screen.getByText('review-note.txt')).toBeInTheDocument()
+    fireEvent.drop(dropZone, { dataTransfer: { files: [attachment] } })
+    expect(screen.getAllByText('review-note.txt')).toHaveLength(1)
+    await user.click(screen.getByRole('button', { name: 'Remove review-note.txt' }))
+    expect(screen.queryByText('review-note.txt')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Compose tools')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Schedule send' })).toBeDisabled()
+
+    await user.type(screen.getByLabelText('To'), 'receiver@example.com')
+    await user.type(screen.getByLabelText('Subject'), 'Draft subject')
+    await user.type(screen.getByLabelText('Body'), 'Draft body')
+
+    expect(screen.getByLabelText('To')).toHaveValue('receiver@example.com')
+    expect(screen.getByLabelText('Subject')).toHaveValue('Draft subject')
+    expect(screen.getByLabelText('Body')).toHaveValue('Draft body')
+    expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled()
+
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Draft subject' }),
+    ).toBeInTheDocument()
+    expect(screen.getByText('Scheduled send')).toBeInTheDocument()
+    expect(sentPayload).toEqual({
+      to_addresses: ['receiver@example.com'],
+      cc_addresses: [],
+      bcc_addresses: [],
+      subject: 'Draft subject',
+      body_text: 'Draft body',
+      attachment_names: [],
+      reply_to_message_id: null,
+      scheduled_at: null,
+    })
+  })
+
   it('ingests a mock mail and opens the detail view', async () => {
     const user = userEvent.setup()
     const createdMail = {
@@ -302,7 +490,70 @@ describe('Phase 4 mail screen', () => {
       llm_run_id: null,
       pending_reason: 'unresolved_from_contact',
     }
-    let ingested = false
+    const createdMailDetail = {
+      ...createdMail,
+      thread_id: 'thread_db',
+      from_name: null,
+      sender_address: null,
+      to_addresses: [],
+      cc_addresses: ['team@example.com'],
+      bcc_addresses: [],
+      cc_recipients: [{ email_address: 'team@example.com', contact: null }],
+      message_id_header: '<mock@test>',
+      in_reply_to_header: null,
+      references_header: null,
+      snippet: null,
+      gmail_link: 'https://mail.google.com/mail/u/0/#inbox/mock_created',
+      external_starred: false,
+      body_text: 'This is a mock mail for review.',
+      body_html: null,
+      created_at: '2026-05-23T13:00:00+09:00',
+      updated_at: '2026-05-23T13:00:00+09:00',
+      version: 1,
+    }
+    const sentMailDetail = {
+      ...createdMailDetail,
+      id: 'mail_sent_new',
+      gmail_message_id: 'mock_sent_created',
+      received_at: '2026-05-23T13:10:00+09:00',
+      received_date: '2026-05-23',
+      from_address: 'caseclosed.me@example.local',
+      to_addresses: ['review.mock.sender@example.com'],
+      cc_addresses: ['team@example.com'],
+      bcc_addresses: [],
+      to_recipients: [
+        {
+          email_address: 'review.mock.sender@example.com',
+          contact: null,
+        },
+      ],
+      cc_recipients: [{ email_address: 'team@example.com', contact: null }],
+      bcc_recipients: [],
+      gmail_labels: ['SENT'],
+      body_text: 'Sent body for resend.',
+      processed_status: 'processed',
+      read_status: 'read',
+      read_at: '2026-05-23T13:10:00+09:00',
+    }
+    const scheduledSendRequest = {
+      id: 'mail_send_scheduled',
+      status: 'scheduled_mock',
+      to_addresses: ['review.mock.sender@example.com'],
+      cc_addresses: ['team@example.com'],
+      bcc_addresses: [],
+      subject: 'Review mock mail',
+      body_text: 'Scheduled reply body.',
+      attachment_names: [],
+      reply_to_message_id: 'mail_new',
+      sent_message_id: null,
+      scheduled_at: '2026-05-23T13:30:00+09:00',
+      created_at: '2026-05-23T13:05:00+09:00',
+      updated_at: '2026-05-23T13:05:00+09:00',
+      version: 1,
+    }
+    const ingested = true
+    let processed = false
+    let scheduledCanceled = false
     const fetchMock = vi.fn((input: string | URL | Request, init?: RequestInit) => {
       const path = input.toString()
       if (path === '/api/v1/auth/session') {
@@ -311,22 +562,16 @@ describe('Phase 4 mail screen', () => {
       if (path === '/api/v1/contacts/unresolved-from-addresses') {
         return apiResponse(200, { ok: true, data: { items: [] } })
       }
+      if (path.startsWith('/api/v1/mails/dates') && init?.method === undefined) {
+        return apiResponse(200, {
+          ok: true,
+          data: { items: ingested ? [{ date: '2026-05-23', count: 1 }] : [] },
+        })
+      }
       if (path.startsWith('/api/v1/mails?') && init?.method === undefined) {
         return apiResponse(200, {
           ok: true,
           data: { items: ingested ? [createdMail] : [], next_cursor: null, limit: 25 },
-        })
-      }
-      if (path === '/api/v1/mails/mock-ingest' && init?.method === 'POST') {
-        ingested = true
-        return apiResponse(200, {
-          ok: true,
-          data: {
-            message_id: 'mail_new',
-            pending: true,
-            pending_address: 'review.mock.sender@example.com',
-            queued_job_id: null,
-          },
         })
       }
       if (path === '/api/v1/mails/mail_new') {
@@ -334,30 +579,21 @@ describe('Phase 4 mail screen', () => {
           ok: true,
           data: {
             message: {
-              ...createdMail,
-              thread_id: 'thread_db',
-              from_name: null,
-              sender_address: null,
-              to_addresses: [],
-              cc_addresses: [],
-              bcc_addresses: [],
-              message_id_header: '<mock@test>',
-              in_reply_to_header: null,
-              references_header: null,
-              snippet: null,
-              gmail_link: null,
-              external_starred: false,
-              body_text: 'This is a mock mail for review.',
-              body_html: null,
-              created_at: '2026-05-23T13:00:00+09:00',
-              updated_at: '2026-05-23T13:00:00+09:00',
-              version: 1,
+              ...createdMailDetail,
+              processed_status: processed ? 'processed' : 'unprocessed',
             },
-            thread_messages: [createdMail],
+            thread_messages: [
+              sentMailDetail,
+              {
+                ...createdMailDetail,
+                processed_status: processed ? 'processed' : 'unprocessed',
+              },
+            ],
+            scheduled_send_requests: scheduledCanceled ? [] : [scheduledSendRequest],
             user_state: {
               user_importance: null,
-              processed_status: 'unprocessed',
-              processed_at: null,
+              processed_status: processed ? 'processed' : 'unprocessed',
+              processed_at: processed ? '2026-05-23T13:02:00+09:00' : null,
               read_status: 'unread',
               read_at: null,
               version: 1,
@@ -373,6 +609,129 @@ describe('Phase 4 mail screen', () => {
           },
         })
       }
+      if (path === '/api/v1/mails/mail_new/read' && init?.method === 'POST') {
+        return apiResponse(200, {
+          ok: true,
+          data: {
+            message: {
+              ...createdMailDetail,
+              processed_status: processed ? 'processed' : 'unprocessed',
+              read_status: 'read',
+              read_at: '2026-05-23T13:01:00+09:00',
+            },
+            thread_messages: [
+              sentMailDetail,
+              {
+                ...createdMailDetail,
+                processed_status: processed ? 'processed' : 'unprocessed',
+                read_status: 'read',
+                read_at: '2026-05-23T13:01:00+09:00',
+              },
+            ],
+            scheduled_send_requests: scheduledCanceled ? [] : [scheduledSendRequest],
+            user_state: {
+              user_importance: null,
+              processed_status: processed ? 'processed' : 'unprocessed',
+              processed_at: processed ? '2026-05-23T13:02:00+09:00' : null,
+              read_status: 'read',
+              read_at: '2026-05-23T13:01:00+09:00',
+              version: 2,
+            },
+            auto_state: {
+              external_importance: null,
+              suggested_importance: null,
+              llm_run_id: null,
+              effective_importance: 'pending',
+              pending_reason: 'unresolved_from_contact',
+            },
+            available_actions: ['resolve_contact'],
+          },
+        })
+      }
+      if (path === '/api/v1/mails/mail_new/process' && init?.method === 'POST') {
+        processed = true
+        return apiResponse(200, {
+          ok: true,
+          data: {
+            message: {
+              ...createdMailDetail,
+              processed_status: 'processed',
+              read_status: 'read',
+              read_at: '2026-05-23T13:01:00+09:00',
+            },
+            thread_messages: [
+              sentMailDetail,
+              {
+                ...createdMailDetail,
+                processed_status: 'processed',
+                read_status: 'read',
+                read_at: '2026-05-23T13:01:00+09:00',
+              },
+            ],
+            scheduled_send_requests: scheduledCanceled ? [] : [scheduledSendRequest],
+            user_state: {
+              user_importance: null,
+              processed_status: 'processed',
+              processed_at: '2026-05-23T13:02:00+09:00',
+              read_status: 'read',
+              read_at: '2026-05-23T13:01:00+09:00',
+              version: 3,
+            },
+            auto_state: {
+              external_importance: null,
+              suggested_importance: null,
+              llm_run_id: null,
+              effective_importance: 'pending',
+              pending_reason: 'unresolved_from_contact',
+            },
+            available_actions: ['resolve_contact'],
+          },
+        })
+      }
+      if (
+        path === '/api/v1/mails/send-requests/mail_send_scheduled/send-now' &&
+        init?.method === 'POST'
+      ) {
+        return apiResponse(200, {
+          ok: true,
+          data: {
+            ...scheduledSendRequest,
+            status: 'queued_mock',
+            scheduled_at: null,
+            updated_at: '2026-05-23T13:06:00+09:00',
+            version: 2,
+          },
+        })
+      }
+      if (
+        path === '/api/v1/mails/send-requests/mail_send_scheduled/schedule' &&
+        init?.method === 'PATCH'
+      ) {
+        return apiResponse(200, {
+          ok: true,
+          data: {
+            ...scheduledSendRequest,
+            scheduled_at: '2026-05-23T14:00:00+09:00',
+            updated_at: '2026-05-23T13:07:00+09:00',
+            version: 2,
+          },
+        })
+      }
+      if (
+        path === '/api/v1/mails/send-requests/mail_send_scheduled/cancel' &&
+        init?.method === 'POST'
+      ) {
+        scheduledCanceled = true
+        return apiResponse(200, {
+          ok: true,
+          data: {
+            ...scheduledSendRequest,
+            status: 'canceled',
+            updated_at: '2026-05-23T13:08:00+09:00',
+            version: 2,
+          },
+        })
+      }
 
       throw new Error(`Unexpected request: ${path} ${init?.method ?? 'GET'}`)
     })
@@ -381,26 +740,97 @@ describe('Phase 4 mail screen', () => {
 
     render(<App />)
 
-    expect(await screen.findByText('Mock mail intake')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Ingest mock mail' }))
+    expect(screen.queryByText('Debug tools')).not.toBeInTheDocument()
+    expect(await screen.findByText('Review mock mail')).toBeInTheDocument()
+    expect(screen.getByText('No case')).toBeInTheDocument()
+    await user.click(screen.getByRole('link', { name: /Review mock mail/ }))
 
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Review mock mail' }),
+    ).toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/v1/mails/mock-ingest',
+      '/api/v1/mails/mail_new/read',
       expect.objectContaining({
         credentials: 'include',
         method: 'POST',
       }),
     )
-    expect(await screen.findByText('Pending contact created for review.mock.sender@example.com.')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: /Review mock mail/ }))
-    const detailHeading = screen.getByRole('heading', { name: 'Review mock mail' })
-    const detailCard = detailHeading.closest('article')
-    expect(detailCard).not.toBeNull()
+    expect(screen.getByRole('link', { name: 'Mail' })).toHaveAttribute(
+      'href',
+      '/mail?tab=unprocessed&date=2026-05-23',
+    )
+    expect(screen.getByRole('link', { name: 'Open in Gmail' })).toHaveAttribute(
+      'href',
+      'https://mail.google.com/mail/u/0/#inbox/mock_created',
+    )
+    expect(screen.getByText('This is a mock mail for review.')).toBeInTheDocument()
+    expect(screen.getAllByText('Head').length).toBeGreaterThan(0)
+    expect(screen.getAllByRole('heading', { name: 'Body' }).length).toBeGreaterThan(0)
+    expect(screen.getByText('Scheduled send')).toBeInTheDocument()
+    expect(screen.getByText('Scheduled reply body.')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Summary' }))
+    expect(screen.queryByText('Summary mock requested.')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Cancel send' }))
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/mails/send-requests/mail_send_scheduled/cancel',
+      expect.objectContaining({
+        credentials: 'include',
+        method: 'POST',
+      }),
+    )
+    expect(await screen.findByText('Scheduled send canceled.')).toBeInTheDocument()
+    expect(screen.queryByText('Scheduled reply body.')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Complete' }))
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/mails/mail_new/process',
+      expect.objectContaining({
+        credentials: 'include',
+        method: 'POST',
+      }),
+    )
+    expect(await screen.findByRole('button', { name: 'Reopen' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Reply' }))
     expect(
-      within(detailCard as HTMLElement).getByText(
-        'This mail is locked until the sender contact is resolved.',
-      ),
+      await screen.findByRole('heading', { level: 1, name: 'Compose Mail' }),
     ).toBeInTheDocument()
+    expect(screen.getByLabelText('To')).toHaveValue('review.mock.sender@example.com')
+    expect(screen.getByLabelText('Cc')).toHaveValue('team@example.com')
+    expect(screen.getByLabelText('Subject')).toHaveValue('Review mock mail')
+    expect(screen.getByLabelText('Body')).toHaveValue(
+      '\n\nOn 2026-05-23 13:00:00 JST, review.mock.sender@example.com wrote:\n> This is a mock mail for review.',
+    )
+
+    navigateTo('/mail/mail_new')
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Review mock mail' }),
+    ).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Resend' }))
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Compose Mail' }),
+    ).toBeInTheDocument()
+    expect(screen.getByLabelText('To')).toHaveValue('review.mock.sender@example.com')
+    expect(screen.getByLabelText('Cc')).toHaveValue('team@example.com')
+    expect(screen.getByLabelText('Subject')).toHaveValue('Review mock mail')
+    expect(screen.getByLabelText('Body')).toHaveValue('Sent body for resend.')
+
+    navigateTo('/mail/mail_new')
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Review mock mail' }),
+    ).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Follow-up' }))
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Compose Mail' }),
+    ).toBeInTheDocument()
+    expect(screen.getByLabelText('To')).toHaveValue('review.mock.sender@example.com')
+    expect(screen.getByLabelText('Cc')).toHaveValue('team@example.com')
+    expect(screen.getByLabelText('Subject')).toHaveValue('Review mock mail')
+    expect(screen.getByLabelText('Body')).toHaveValue(
+      '\n\nOn 2026-05-23 13:10:00 JST, I wrote:\n> Sent body for resend.',
+    )
 
     window.history.pushState({}, '', '/')
   })
@@ -499,6 +929,18 @@ describe('Phase 2 maintenance screen', () => {
                   created_at: '2026-05-23T09:00:00+09:00',
                   updated_at: '2026-05-23T09:02:00+09:00',
                 },
+                {
+                  id: 'job_succeeded',
+                  job_type: 'mail_import',
+                  priority: 1,
+                  status: 'succeeded',
+                  retry_count: 0,
+                  max_retries: 3,
+                  error_type: null,
+                  error_message: null,
+                  created_at: '2026-05-23T09:00:00+09:00',
+                  updated_at: '2026-05-23T09:02:00+09:00',
+                },
               ],
             },
           })
@@ -518,6 +960,22 @@ describe('Phase 2 maintenance screen', () => {
                   unknown_reason: 'Network response was lost.',
                   created_at: '2026-05-23T09:03:00+09:00',
                   updated_at: '2026-05-23T09:04:00+09:00',
+                },
+              ],
+            },
+          })
+        }
+        if (path === '/api/v1/mails?tab=pending&limit=50') {
+          return apiResponse(200, {
+            ok: true,
+            data: {
+              items: [
+                {
+                  id: 'mail_pending_review',
+                  received_at: '2026-05-24T09:00:00+09:00',
+                  subject: 'Pending review: normal person',
+                  from_address: 'pending.review@example.com',
+                  pending_reason: 'unresolved_from_contact',
                 },
               ],
             },
@@ -548,10 +1006,11 @@ describe('Phase 2 maintenance screen', () => {
       screen.getByRole('button', { name: /Pending write requests 2/ }),
     ).toBeInTheDocument()
     await user.click(screen.getByRole('tab', { name: /Needs Action/ }))
-    expect(await screen.findByLabelText('2 actions required')).toHaveTextContent('2')
+    expect(await screen.findByLabelText('3 actions required')).toHaveTextContent('3')
     expect(await screen.findByRole('row', { name: /job_failed/ })).toHaveTextContent(
       'gmail_sync',
     )
+    expect(screen.queryByRole('row', { name: /job_succeeded/ })).not.toBeInTheDocument()
     expect(
       screen.getByText(
         'The job failed. Reason: ReviewFailure - Review sample failure.',
@@ -586,6 +1045,14 @@ describe('Phase 2 maintenance screen', () => {
       'title',
       'Record that this external operation should be treated as canceled after manual confirmation.',
     )
+    expect(
+      await screen.findByRole('row', { name: /mail_pending_review/ }),
+    ).toHaveTextContent('Pending review: normal person')
+    expect(
+      screen.getByText(
+        'This mail is pending even though it may not appear in Pending Contacts. Check sender resolution consistency.',
+      ),
+    ).toBeInTheDocument()
   })
 
   it('retries failed jobs and resolves unknown external operations', async () => {
@@ -672,6 +1139,9 @@ describe('Phase 2 maintenance screen', () => {
                 },
         })
       }
+      if (path === '/api/v1/mails?tab=pending&limit=50') {
+        return apiResponse(200, { ok: true, data: { items: [] } })
+      }
 
       throw new Error(`Unexpected request: ${path} ${init?.method ?? 'GET'}`)
     })
@@ -698,9 +1168,8 @@ describe('Phase 2 maintenance screen', () => {
         body: JSON.stringify({ resolution: 'mark_succeeded' }),
       }),
     )
-    expect(screen.getByRole('row', { name: /job_failed/ })).toHaveTextContent(
-      'pending',
-    )
+    expect(screen.queryByRole('row', { name: /job_failed/ })).not.toBeInTheDocument()
+    expect(screen.getByText('No jobs requiring action.')).toBeInTheDocument()
     expect(screen.getByRole('row', { name: /op_unknown/ })).toHaveTextContent(
       'succeeded',
     )
@@ -731,6 +1200,9 @@ describe('Phase 2 maintenance screen', () => {
           return apiResponse(200, { ok: true, data: { items: [] } })
         }
         if (path === '/api/v1/external-operations') {
+          return apiResponse(200, { ok: true, data: { items: [] } })
+        }
+        if (path === '/api/v1/mails?tab=pending&limit=50') {
           return apiResponse(200, { ok: true, data: { items: [] } })
         }
 
@@ -795,6 +1267,107 @@ describe('Phase 2 maintenance screen', () => {
     ).not.toBeInTheDocument()
   })
 
+  it('shows mock send requests in the temporary Debug tab', async () => {
+    const user = userEvent.setup()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        const path = input.toString()
+        if (path === '/api/v1/auth/session') {
+          return activeSessionResponse()
+        }
+        if (path === '/api/v1/maintenance/status') {
+          return apiResponse(200, {
+            ok: true,
+            data: {
+              job_accepting: true,
+              running_jobs: 0,
+              pending_write_requests: 0,
+              external_unknown_count: 0,
+              backup_status: 'not_configured',
+            },
+          })
+        }
+        if (path === '/api/v1/jobs') {
+          return apiResponse(200, { ok: true, data: { items: [] } })
+        }
+        if (path === '/api/v1/external-operations') {
+          return apiResponse(200, { ok: true, data: { items: [] } })
+        }
+        if (path === '/api/v1/mails?tab=pending&limit=50') {
+          return apiResponse(200, { ok: true, data: { items: [] } })
+        }
+        if (path === '/api/v1/mails/send-requests') {
+          return apiResponse(200, {
+            ok: true,
+            data: {
+              items: [
+                {
+                  id: 'mail_send_review',
+                  status: 'scheduled_mock',
+                  to_addresses: ['review@example.com'],
+                  cc_addresses: ['team@example.com'],
+                  bcc_addresses: [],
+                  subject: 'Review send request',
+                  body_text: 'Hello.',
+                  attachment_names: ['note.txt'],
+                  reply_to_message_id: 'mail_reply_source',
+                  sent_message_id: null,
+                  scheduled_at: '2026-05-25T02:31:00+09:00',
+                  created_at: '2026-05-25T02:30:00+09:00',
+                  updated_at: '2026-05-25T02:30:00+09:00',
+                  version: 1,
+                },
+              ],
+            },
+          })
+        }
+        if (path === '/api/v1/jobs/run-next' && init?.method === 'POST') {
+          return apiResponse(200, {
+            ok: true,
+            data: { job_id: 'job_debug_run' },
+          })
+        }
+        if (path === '/api/v1/mails/mock-ingest' && init?.method === 'POST') {
+          return apiResponse(200, {
+            ok: true,
+            data: {
+              message_id: 'mail_debug_mock',
+              pending: true,
+              pending_address: 'review.mock.sender@example.com',
+              queued_job_id: null,
+            },
+          })
+        }
+
+        throw new Error(`Unexpected request: ${path}`)
+      }),
+    )
+
+    render(<App />)
+    await user.click(await screen.findByRole('tab', { name: 'Debug' }))
+
+    expect(screen.getByRole('heading', { name: 'Debug' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Debug tools' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Run next job' }))
+    expect(await screen.findByText('Job ran: job_debug_run')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Ingest mock mail' }))
+    expect(
+      await screen.findByText(
+        'Pending contact created for review.mock.sender@example.com.',
+      ),
+    ).toBeInTheDocument()
+    expect(await screen.findByRole('row', { name: /mail_send_review/ })).toHaveTextContent(
+      'Review send request',
+    )
+    expect(screen.getByRole('row', { name: /mail_send_review/ })).toHaveTextContent(
+      'scheduled_mock',
+    )
+    expect(
+      screen.getByText('Cc: team@example.com / Bcc: - / Reply target: mail_reply_source'),
+    ).toBeInTheDocument()
+  })
+
   it('caps the Jobs and Operations action badge at 9+', async () => {
     vi.stubGlobal(
       'fetch',
@@ -849,6 +1422,9 @@ describe('Phase 2 maintenance screen', () => {
             },
           })
         }
+        if (path === '/api/v1/mails?tab=pending&limit=50') {
+          return apiResponse(200, { ok: true, data: { items: [] } })
+        }
 
         throw new Error(`Unexpected request: ${path}`)
       }),
@@ -885,6 +1461,9 @@ describe('Phase 2 maintenance screen', () => {
           return apiResponse(404, { detail: 'Not Found' })
         }
         if (path === '/api/v1/external-operations') {
+          return apiResponse(200, { ok: true, data: { items: [] } })
+        }
+        if (path === '/api/v1/mails?tab=pending&limit=50') {
           return apiResponse(200, { ok: true, data: { items: [] } })
         }
 
@@ -1118,8 +1697,13 @@ describe('Phase 3 contacts screen', () => {
     await user.click(screen.getByRole('tab', { name: '+' }))
     expect(screen.getByRole('tabpanel', { name: '+ Contact List' })).toBeInTheDocument()
     expect(screen.getByLabelText('Custom tab name')).toHaveAttribute('maxlength', '12')
+    expect(screen.getByText('Example Student')).toBeInTheDocument()
+    expect(screen.getByText('KDE Student')).toBeInTheDocument()
     await user.type(screen.getByLabelText('Custom tab name'), 'TsukubaLab')
     await user.type(screen.getByLabelText('Tag expression'), 'tsukuba&student&!KDE')
+    expect(screen.getByText('Example Student')).toBeInTheDocument()
+    expect(screen.queryByText('KDE Student')).not.toBeInTheDocument()
+    expect(screen.queryByText('Example List')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'OK' }))
 
     expect(screen.getByText('Example Student')).toBeInTheDocument()
@@ -1585,6 +2169,9 @@ describe('Phase 3 contacts screen', () => {
           kind: 'person',
           sender_resolution_mode: 'self',
           mailing_list_recipient_expression: null,
+          mail_importance_rule_action: 'llm',
+          mail_importance_rule_importance: null,
+          mail_importance_rule_instruction: null,
           tags: ['lab', 'student', 'updated'],
         }),
       }),
@@ -1880,6 +2467,9 @@ describe('Phase 3 contacts screen', () => {
           kind: 'person',
           sender_resolution_mode: 'self',
           mailing_list_recipient_expression: null,
+          mail_importance_rule_action: 'llm',
+          mail_importance_rule_importance: null,
+          mail_importance_rule_instruction: null,
           tags: [],
           email_addresses: [
             { email_address: 'unknown.sender@example.com', is_primary: true },
@@ -1906,6 +2496,9 @@ describe('Phase 3 contacts screen', () => {
           kind: 'mailing_list',
           sender_resolution_mode: 'reply_to',
           mailing_list_recipient_expression: null,
+          mail_importance_rule_action: 'llm',
+          mail_importance_rule_importance: null,
+          mail_importance_rule_instruction: null,
           tags: [],
           email_addresses: [
             { email_address: 'list.sender@example.com', is_primary: true },
@@ -1987,6 +2580,9 @@ describe('Phase 3 contacts screen', () => {
           kind: 'person',
           sender_resolution_mode: 'self',
           mailing_list_recipient_expression: null,
+          mail_importance_rule_action: 'llm',
+          mail_importance_rule_importance: null,
+          mail_importance_rule_instruction: null,
           tags: [],
           email_addresses: [
             { email_address: 'new@example.com', is_primary: true },

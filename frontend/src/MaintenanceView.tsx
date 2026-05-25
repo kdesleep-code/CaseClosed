@@ -1,14 +1,29 @@
 import { Fragment, useEffect, useState } from 'react'
+import type { FormEvent } from 'react'
 import { t } from './i18n'
 import type { MessageKey } from './i18n'
+import { AppLink } from './navigation'
 import {
   listExternalOperations,
   listJobs,
+  listPendingMails,
   readMaintenanceStatus,
+  refreshPendingMail,
   resolveExternalOperation,
   retryJob,
 } from './phase2Api'
-import type { ExternalOperation, Job, MaintenanceStatus } from './phase2Api'
+import type {
+  ExternalOperation,
+  Job,
+  MaintenanceStatus,
+  PendingMail,
+} from './phase2Api'
+import {
+  ingestMockMail,
+  listMailSendRequests,
+  runNextJob,
+} from './phase4Api'
+import type { MailSendRequest } from './phase4Api'
 
 const usageMetrics = [
   { key: 'database', labelKey: 'maintenance.metric.database' },
@@ -78,9 +93,16 @@ const usageHistoryRanges = [
   axisLabelKeys: MessageKey[]
 }>
 
-type MaintenanceTab = 'usage' | 'jobs'
+type MaintenanceTab = 'usage' | 'jobs' | 'debug'
 type UsageMetric = (typeof usageMetrics)[number]
 type UsageHistoryRange = (typeof usageHistoryRanges)[number]
+
+export type MaintenanceInitialData = {
+  status: MaintenanceStatus
+  jobs: Job[]
+  operations: ExternalOperation[]
+  pendingMails: PendingMail[]
+}
 
 function updateById<T extends { id: string }>(items: T[], updated: T) {
   return items.map((item) => (item.id === updated.id ? updated : item))
@@ -90,11 +112,43 @@ function describeError(error: unknown) {
   return error instanceof Error ? error.message : t('maintenance.requestFailed')
 }
 
-function countRequiredActions(jobs: Job[], operations: ExternalOperation[]) {
+function jstInputNow() {
+  const now = new Date()
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  })
+    .formatToParts(now)
+    .reduce<Record<string, string>>((values, part) => {
+      values[part.type] = part.value
+      return values
+    }, {})
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:00+09:00`
+}
+
+function uniqueSuffix() {
+  return Date.now().toString(36)
+}
+
+function countRequiredActions(
+  jobs: Job[],
+  operations: ExternalOperation[],
+  pendingMails: PendingMail[],
+) {
   return (
-    jobs.filter((job) => job.status === 'failed').length +
-    operations.filter((operation) => operation.status === 'unknown').length
+    jobs.filter(jobNeedsAction).length +
+    operations.filter((operation) => operation.status === 'unknown').length +
+    pendingMails.length
   )
+}
+
+function jobNeedsAction(job: Job) {
+  return job.status === 'failed' || job.status === 'stale'
 }
 
 function usageMetricValue(metric: UsageMetric, status: MaintenanceStatus | null) {
@@ -153,10 +207,27 @@ function externalOperationStatusDetail(operation: ExternalOperation) {
   return `The external operation is in ${operation.status} status.`
 }
 
-function MaintenanceView() {
-  const [status, setStatus] = useState<MaintenanceStatus | null>(null)
-  const [jobs, setJobs] = useState<Job[]>([])
-  const [operations, setOperations] = useState<ExternalOperation[]>([])
+function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData }) {
+  const [status, setStatus] = useState<MaintenanceStatus | null>(
+    initialData?.status ?? null,
+  )
+  const [jobs, setJobs] = useState<Job[]>(initialData?.jobs ?? [])
+  const [operations, setOperations] = useState<ExternalOperation[]>(
+    initialData?.operations ?? [],
+  )
+  const [pendingMails, setPendingMails] = useState<PendingMail[]>(
+    initialData?.pendingMails ?? [],
+  )
+  const [sendRequests, setSendRequests] = useState<MailSendRequest[] | null>(null)
+  const [debugSubject, setDebugSubject] = useState('Review mock mail')
+  const [debugFromAddress, setDebugFromAddress] = useState(
+    'review.mock.sender@example.com',
+  )
+  const [debugBodyText, setDebugBodyText] = useState(
+    'This is a mock mail for review.',
+  )
+  const [debugNotice, setDebugNotice] = useState<string | null>(null)
+  const [isDebugBusy, setIsDebugBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<MaintenanceTab>('usage')
@@ -164,20 +235,30 @@ function MaintenanceView() {
     useState<UsageMetric>(usageMetrics[0])
   const [activeUsageHistoryRange, setActiveUsageHistoryRange] =
     useState<UsageHistoryRange>(usageHistoryRanges[0])
-  const requiredActionCount = countRequiredActions(jobs, operations)
+  const actionJobs = jobs.filter(jobNeedsAction)
+  const requiredActionCount = countRequiredActions(jobs, operations, pendingMails)
   const requiredActionLabel = requiredActionCount > 9 ? '9+' : requiredActionCount
 
   useEffect(() => {
+    if (initialData !== undefined) {
+      return
+    }
     let isMounted = true
 
-    Promise.all([readMaintenanceStatus(), listJobs(), listExternalOperations()])
-      .then(([nextStatus, nextJobs, nextOperations]) => {
+    Promise.all([
+      readMaintenanceStatus(),
+      listJobs(),
+      listExternalOperations(),
+      listPendingMails(),
+    ])
+      .then(([nextStatus, nextJobs, nextOperations, nextPendingMails]) => {
         if (!isMounted) {
           return
         }
         setStatus(nextStatus)
         setJobs(nextJobs)
         setOperations(nextOperations)
+        setPendingMails(nextPendingMails)
       })
       .catch((requestError) => {
         if (isMounted) {
@@ -188,7 +269,31 @@ function MaintenanceView() {
     return () => {
       isMounted = false
     }
-  }, [])
+  }, [initialData])
+
+  useEffect(() => {
+    if (activeTab !== 'debug' || sendRequests !== null) {
+      return
+    }
+
+    let isMounted = true
+    listMailSendRequests()
+      .then((nextSendRequests) => {
+        if (isMounted) {
+          setSendRequests(nextSendRequests)
+        }
+      })
+      .catch((requestError) => {
+        if (isMounted) {
+          setError(describeError(requestError))
+          setSendRequests([])
+        }
+      })
+
+    return () => {
+      isMounted = false
+    }
+  }, [activeTab, sendRequests])
 
   async function handleRetry(job: Job) {
     setBusyId(job.id)
@@ -222,6 +327,73 @@ function MaintenanceView() {
     }
   }
 
+  async function handleRefreshPendingMail(mail: PendingMail) {
+    setBusyId(mail.id)
+    setError(null)
+    try {
+      await refreshPendingMail(mail.id)
+      setPendingMails(await listPendingMails())
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function refreshSendRequests() {
+    setSendRequests(await listMailSendRequests())
+  }
+
+  async function handleDebugRunNextJob() {
+    setError(null)
+    setDebugNotice(null)
+    setIsDebugBusy(true)
+    try {
+      const result = await runNextJob()
+      setDebugNotice(
+        result.job_id === null
+          ? t('mail.job.none')
+          : t('mail.job.ran', { jobId: result.job_id }),
+      )
+      await refreshSendRequests()
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsDebugBusy(false)
+    }
+  }
+
+  async function handleDebugMockIngest(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setError(null)
+    setDebugNotice(null)
+    setIsDebugBusy(true)
+    const suffix = uniqueSuffix()
+
+    try {
+      const result = await ingestMockMail({
+        gmail_message_id: `mock_${suffix}`,
+        gmail_thread_id: `mock_thread_${suffix}`,
+        message_id_header: `<mock-${suffix}@caseclosed.local>`,
+        subject: debugSubject,
+        from_address: debugFromAddress,
+        received_at: jstInputNow(),
+        body_text: debugBodyText,
+      })
+      setDebugNotice(
+        result.pending
+          ? t('mail.mock.pending', {
+              email: result.pending_address ?? debugFromAddress,
+            })
+          : t('mail.mock.ingested'),
+      )
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsDebugBusy(false)
+    }
+  }
+
   return (
     <main className="app-shell">
       <div className="maintenance-shell">
@@ -230,7 +402,7 @@ function MaintenanceView() {
             <p>{t('app.name')}</p>
             <h1>{t('maintenance.heading')}</h1>
           </div>
-          <a href="/">{t('top.heading')}</a>
+          <AppLink href="/">{t('top.heading')}</AppLink>
         </header>
 
         {error !== null && (
@@ -272,6 +444,16 @@ function MaintenanceView() {
               >
                 {requiredActionLabel}
               </span>
+            </button>
+            <button
+              aria-controls="maintenance-debug-panel"
+              aria-selected={activeTab === 'debug'}
+              id="maintenance-debug-tab"
+              onClick={() => setActiveTab('debug')}
+              role="tab"
+              type="button"
+            >
+              {t('maintenance.debug')}
             </button>
           </div>
 
@@ -389,7 +571,7 @@ function MaintenanceView() {
                         </tr>
                       </thead>
                       <tbody>
-                        {jobs.map((job) => (
+                        {actionJobs.map((job) => (
                           <Fragment key={job.id}>
                             <tr>
                               <td>{job.id}</td>
@@ -425,7 +607,7 @@ function MaintenanceView() {
                             </tr>
                           </Fragment>
                         ))}
-                        {jobs.length === 0 && (
+                        {actionJobs.length === 0 && (
                           <tr>
                             <td colSpan={5}>{t('maintenance.jobs.empty')}</td>
                           </tr>
@@ -540,7 +722,229 @@ function MaintenanceView() {
                     </table>
                   </div>
                 </section>
+
+                <section
+                  aria-labelledby="pending-mails-heading"
+                  className="maintenance-section"
+                >
+                  <div className="section-heading">
+                    <h2 id="pending-mails-heading">
+                      {t('maintenance.pendingMails.heading')}
+                    </h2>
+                    <p>{t('maintenance.pendingMails.note')}</p>
+                  </div>
+
+                  <div className="maintenance-table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th scope="col">{t('common.id')}</th>
+                          <th scope="col">{t('mail.date')}</th>
+                          <th scope="col">{t('mail.subject')}</th>
+                          <th scope="col">{t('mail.from')}</th>
+                          <th scope="col">{t('mail.pendingReason')}</th>
+                          <th scope="col">{t('common.action')}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pendingMails.map((mail) => (
+                          <Fragment key={mail.id}>
+                            <tr>
+                              <td>{mail.id}</td>
+                              <td>{mail.received_at}</td>
+                              <td>{mail.subject ?? t('mail.noSubject')}</td>
+                              <td>{mail.from_address}</td>
+                              <td>
+                                <span data-status="pending">
+                                  {mail.pending_reason ?? t('common.none')}
+                                </span>
+                              </td>
+                              <td>
+                                <button
+                                  aria-label={t(
+                                    'maintenance.pendingMails.refreshFor',
+                                    { id: mail.id },
+                                  )}
+                                  disabled={busyId === mail.id}
+                                  onClick={() => handleRefreshPendingMail(mail)}
+                                  title={t('maintenance.pendingMails.refreshTitle')}
+                                  type="button"
+                                >
+                                  {t('maintenance.pendingMails.refresh')}
+                                </button>
+                              </td>
+                            </tr>
+                            <tr className="maintenance-detail-row">
+                              <td colSpan={6}>
+                                {t('maintenance.pendingMails.detail')}
+                              </td>
+                            </tr>
+                          </Fragment>
+                        ))}
+                        {pendingMails.length === 0 && (
+                          <tr>
+                            <td colSpan={6}>
+                              {t('maintenance.pendingMails.empty')}
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
               </div>
+            )}
+
+            {activeTab === 'debug' && (
+              <section
+                aria-labelledby="maintenance-debug-tab debug-heading"
+                className="maintenance-panel maintenance-section"
+                id="maintenance-debug-panel"
+                role="tabpanel"
+              >
+                <div className="section-heading">
+                  <h2 id="debug-heading">{t('maintenance.debug')}</h2>
+                  <p>{t('maintenance.debug.note')}</p>
+                </div>
+
+                {debugNotice !== null && (
+                  <div className="mail-feedback">
+                    <p>{debugNotice}</p>
+                  </div>
+                )}
+
+                <section
+                  aria-labelledby="maintenance-debug-tools-heading"
+                  className="mail-panel mail-dev-panel"
+                >
+                  <div className="section-heading">
+                    <h3 id="maintenance-debug-tools-heading">
+                      {t('mail.debug.heading')}
+                    </h3>
+                  </div>
+                  <div className="mail-actions mail-debug-actions">
+                    <button
+                      disabled={isDebugBusy}
+                      onClick={handleDebugRunNextJob}
+                      type="button"
+                    >
+                      {t('mail.job.runNext')}
+                    </button>
+                  </div>
+                  <form className="mail-mock-form" onSubmit={handleDebugMockIngest}>
+                    <label>
+                      <span>{t('mail.subject')}</span>
+                      <input
+                        onChange={(event) => setDebugSubject(event.target.value)}
+                        required
+                        value={debugSubject}
+                      />
+                    </label>
+                    <label>
+                      <span>{t('mail.from')}</span>
+                      <input
+                        onChange={(event) => setDebugFromAddress(event.target.value)}
+                        required
+                        type="email"
+                        value={debugFromAddress}
+                      />
+                    </label>
+                    <label>
+                      <span>{t('mail.body')}</span>
+                      <textarea
+                        onChange={(event) => setDebugBodyText(event.target.value)}
+                        value={debugBodyText}
+                      />
+                    </label>
+                    <button disabled={isDebugBusy} type="submit">
+                      {t('mail.mock.ingest')}
+                    </button>
+                  </form>
+                </section>
+
+                <section
+                  aria-labelledby="maintenance-send-requests-heading"
+                  className="maintenance-section"
+                >
+                  <div className="section-heading">
+                    <h3 id="maintenance-send-requests-heading">
+                      {t('maintenance.debug.sendRequests')}
+                    </h3>
+                    <button
+                      disabled={isDebugBusy}
+                      onClick={() => {
+                        void refreshSendRequests()
+                      }}
+                      type="button"
+                    >
+                      {t('mail.refresh')}
+                    </button>
+                  </div>
+
+                <div className="maintenance-table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th scope="col">{t('common.id')}</th>
+                        <th scope="col">{t('common.status')}</th>
+                        <th scope="col">{t('maintenance.debug.to')}</th>
+                        <th scope="col">{t('mail.subject')}</th>
+                        <th scope="col">{t('maintenance.debug.attachments')}</th>
+                        <th scope="col">{t('maintenance.debug.createdAt')}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sendRequests === null && (
+                        <tr>
+                          <td colSpan={6}>{t('maintenance.debug.loading')}</td>
+                        </tr>
+                      )}
+                      {sendRequests?.map((sendRequest) => (
+                        <Fragment key={sendRequest.id}>
+                          <tr>
+                            <td>{sendRequest.id}</td>
+                            <td>
+                              <span data-status={sendRequest.status}>
+                                {sendRequest.status}
+                              </span>
+                            </td>
+                            <td>{sendRequest.to_addresses.join(', ')}</td>
+                            <td>{sendRequest.subject ?? t('mail.noSubject')}</td>
+                            <td>
+                              {sendRequest.attachment_names.length === 0
+                                ? t('common.none')
+                                : sendRequest.attachment_names.join(', ')}
+                            </td>
+                            <td>{sendRequest.created_at}</td>
+                          </tr>
+                          <tr className="maintenance-detail-row">
+                            <td colSpan={6}>
+                              {t('maintenance.debug.sendRequestDetail', {
+                                cc:
+                                  sendRequest.cc_addresses.length === 0
+                                    ? t('common.none')
+                                    : sendRequest.cc_addresses.join(', '),
+                                bcc:
+                                  sendRequest.bcc_addresses.length === 0
+                                    ? t('common.none')
+                                    : sendRequest.bcc_addresses.join(', '),
+                                replyTo:
+                                  sendRequest.reply_to_message_id ?? t('common.none'),
+                              })}
+                            </td>
+                          </tr>
+                        </Fragment>
+                      ))}
+                      {sendRequests?.length === 0 && (
+                        <tr>
+                          <td colSpan={6}>{t('maintenance.debug.empty')}</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+                </section>
+              </section>
             )}
           </div>
         </div>

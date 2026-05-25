@@ -289,6 +289,13 @@ class Contact(Base):
         default="self",
     )
     mailing_list_recipient_expression: Mapped[str | None] = mapped_column(Text)
+    mail_importance_rule_action: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="llm",
+    )
+    mail_importance_rule_importance: Mapped[str | None] = mapped_column(Text)
+    mail_importance_rule_instruction: Mapped[str | None] = mapped_column(Text)
     deleted_at: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
@@ -470,6 +477,47 @@ class MailAutoState(Base):
     pending_from_address_id: Mapped[str | None] = mapped_column(
         ForeignKey("contact_email_addresses.id")
     )
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class MailSummary(Base):
+    __tablename__ = "mail_summaries"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    message_id: Mapped[str] = mapped_column(
+        ForeignKey("gmail_messages.id"),
+        nullable=False,
+        unique=True,
+    )
+    summary_text: Mapped[str] = mapped_column(Text, nullable=False)
+    action_required: Mapped[int | None] = mapped_column(Integer)
+    deadline_text: Mapped[str | None] = mapped_column(Text)
+    next_action: Mapped[str | None] = mapped_column(Text)
+    key_points_json: Mapped[str | None] = mapped_column(Text)
+    translation_text: Mapped[str | None] = mapped_column(Text)
+    language: Mapped[str] = mapped_column(Text, nullable=False, default="ja")
+    llm_run_id: Mapped[str | None] = mapped_column(ForeignKey("llm_runs.id"))
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class MailSendRequest(Base):
+    __tablename__ = "mail_send_requests"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    to_addresses_json: Mapped[str] = mapped_column(Text, nullable=False)
+    cc_addresses_json: Mapped[str | None] = mapped_column(Text)
+    bcc_addresses_json: Mapped[str | None] = mapped_column(Text)
+    subject: Mapped[str | None] = mapped_column(Text)
+    body_text: Mapped[str] = mapped_column(Text, nullable=False)
+    attachment_names_json: Mapped[str | None] = mapped_column(Text)
+    reply_to_message_id: Mapped[str | None] = mapped_column(ForeignKey("gmail_messages.id"))
+    sent_message_id: Mapped[str | None] = mapped_column(ForeignKey("gmail_messages.id"))
+    scheduled_at: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)

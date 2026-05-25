@@ -31,6 +31,21 @@ export type ExternalOperation = {
   updated_at: string
 }
 
+export type PendingMail = {
+  id: string
+  received_at: string
+  subject: string | null
+  from_address: string
+  pending_reason: string | null
+}
+
+export type PendingMailRefreshResult = {
+  changed: boolean
+  reason: string
+  queued_job_id: string | null
+  mail: PendingMail
+}
+
 type ListResponse<T> = {
   items: T[]
 }
@@ -119,6 +134,22 @@ export async function listExternalOperations(): Promise<ExternalOperation[]> {
     '/api/v1/external-operations',
   )
   return data.items
+}
+
+export async function listPendingMails(): Promise<PendingMail[]> {
+  const data = await request<ListResponse<PendingMail>>(
+    '/api/v1/mails?tab=pending&limit=50',
+  )
+  return data.items
+}
+
+export function refreshPendingMail(
+  messageId: string,
+): Promise<PendingMailRefreshResult> {
+  return request<PendingMailRefreshResult>(
+    `/api/v1/mails/${messageId}/refresh-pending`,
+    { method: 'POST' },
+  )
 }
 
 export function resolveExternalOperation(

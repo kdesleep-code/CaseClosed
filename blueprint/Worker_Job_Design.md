@@ -693,6 +693,24 @@ mail_auto_state.pending_reason = unresolved_from_contact
 contact_registration_prefill job may be created
 ```
 
+---
+
+# 18. Phase 4 note: sent mail route
+
+Sent Gmail messages are stored as thread history, but they do not enter the inbound
+mail automation route.
+
+- Gmail messages with the `SENT` label are treated as outgoing mail.
+- Outgoing mail does not create Pending Contact items from its From address.
+- Outgoing mail does not enqueue `mail_importance_classification`.
+- Outgoing mail is not a target of automatic summary generation.
+- Outgoing mail is saved with `mail_auto_state.effective_importance = sent`.
+- Outgoing mail is saved as already read and processed from the user's point of view.
+
+Inbound mail and outgoing mail share the thread display, but their worker routes are
+separate. Importance classification, Case decision, and Summary workers are inbound
+mail responsibilities unless a later phase explicitly defines an outgoing-mail use case.
+
 Fromが解決済み:
 
 ```text

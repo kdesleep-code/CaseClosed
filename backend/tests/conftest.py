@@ -50,6 +50,8 @@ PHASE_3_TABLES = {
 PHASE_4_TABLES = {
     "gmail_messages",
     "gmail_threads",
+    "mail_summaries",
+    "mail_send_requests",
     "mail_auto_state",
     "mail_user_state",
 }

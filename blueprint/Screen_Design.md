@@ -2262,3 +2262,18 @@ POST /maintenance/graceful-shutdown
 9. Case削除は作らない。
 10. Task削除は論理削除にする。
 ```
+## Phase 4 Current Send UI Note
+
+This note records the current Phase 4 send screen behavior and supersedes older
+draft/send wording until the real Gmail integration phase updates this document.
+
+- `Send` creates a cancelable scheduled send request for `now(JST) + 1 minute`.
+- `Schedule Send` creates a cancelable scheduled send request for the selected
+  time.
+- After either action, the UI navigates to the relevant thread detail view.
+- Send-only messages use a provisional thread until Gmail sync provides the
+  authoritative SENT message.
+- Before execution, the thread detail card exposes `Send now`, `Change time`,
+  and `Cancel send`.
+- Canceling removes the card from normal mail UI; maintenance/debug/log screens
+  may still show the request.

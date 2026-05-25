@@ -19,6 +19,10 @@ type ListResponse<T> = {
   limit?: number
 }
 
+type ItemsResponse<T> = {
+  items: T[]
+}
+
 export type MailListItem = {
   id: string
   gmail_message_id: string
@@ -41,29 +45,79 @@ export type MailListItem = {
   suggested_importance: string | null
   llm_run_id: string | null
   pending_reason: string | null
+  sender_contact?: {
+    id: string
+    display_name: string
+    avatar_url: string | null
+    kind: string
+    tags?: string[]
+  } | null
+  case_links?: Array<{
+    id: string
+    title: string
+  }>
+  summary?: string | null
+}
+
+export type MailContactSummary = {
+  id: string
+  display_name: string
+  avatar_url: string | null
+  kind: string
+  tags?: string[]
+}
+
+export type MailRecipient = {
+  email_address: string
+  contact: MailContactSummary | null
+}
+
+export type MailThreadMessage = MailListItem & {
+  thread_id: string
+  sender_address: string | null
+  to_addresses: string[]
+  cc_addresses: string[]
+  bcc_addresses: string[]
+  to_recipients?: MailRecipient[]
+  cc_recipients?: MailRecipient[]
+  bcc_recipients?: MailRecipient[]
+  from_contact?: MailContactSummary | null
+  message_id_header: string | null
+  in_reply_to_header: string | null
+  references_header: string | null
+  snippet: string | null
+  gmail_link: string | null
+  external_starred: boolean
+  gmail_labels?: string[]
+  body_text?: string | null
+  body_html?: string | null
+  created_at: string
+  updated_at: string
+  version: number
+}
+
+export type MailSummary = {
+  summary_text: string
+  items?: Array<{
+    id: string
+    message_id: string
+    summary_text: string
+    action_required: boolean | null
+    deadline_text: string | null
+    next_action: string | null
+    key_points: string[]
+    translation_text?: string | null
+    language: string
+    llm_run_id: string | null
+    updated_at: string
+    version: number
+  }>
 }
 
 export type MailDetail = {
-  message: MailListItem & {
-    thread_id: string
-    from_name: string | null
-    sender_address: string | null
-    to_addresses: string[]
-    cc_addresses: string[]
-    bcc_addresses: string[]
-    message_id_header: string | null
-    in_reply_to_header: string | null
-    references_header: string | null
-    snippet: string | null
-    gmail_link: string | null
-    external_starred: boolean
-    body_text?: string | null
-    body_html?: string | null
-    created_at: string
-    updated_at: string
-    version: number
-  }
-  thread_messages: MailListItem[]
+  message: MailThreadMessage
+  thread_messages: MailThreadMessage[]
+  scheduled_send_requests?: MailSendRequest[]
   user_state: {
     user_importance: string | null
     processed_status: string
@@ -79,6 +133,7 @@ export type MailDetail = {
     effective_importance: string
     pending_reason: string | null
   }
+  summary: MailSummary | null
   available_actions: string[]
 }
 
@@ -91,6 +146,36 @@ export type MockMailPayload = {
   received_at: string
   body_text: string
 }
+
+export type MailSendPayload = {
+  to_addresses: string[]
+  cc_addresses?: string[]
+  bcc_addresses?: string[]
+  subject?: string
+  body_text: string
+  attachment_names?: string[]
+  reply_to_message_id?: string | null
+  scheduled_at?: string | null
+}
+
+export type MailSendRequest = {
+  id: string
+  status: string
+  to_addresses: string[]
+  cc_addresses: string[]
+  bcc_addresses: string[]
+  subject: string | null
+  body_text: string
+  attachment_names: string[]
+  reply_to_message_id: string | null
+  sent_message_id: string | null
+  scheduled_at: string | null
+  created_at: string
+  updated_at: string
+  version: number
+}
+
+export type ScheduledSendRequest = MailSendRequest
 
 export type MailListFilters = {
   tab?: 'all' | 'pending' | 'unprocessed' | 'processed' | 'skip'
@@ -109,6 +194,11 @@ export type MailListPage = {
   items: MailListItem[]
   next_cursor: string | null
   limit: number
+}
+
+export type MailDateSummary = {
+  date: string
+  count: number
 }
 
 export class Phase4ApiError extends Error {
@@ -184,6 +274,19 @@ export async function listMailPage(
   }
 }
 
+export async function listMailDates(
+  tab: MailListFilters['tab'] = 'all',
+): Promise<MailDateSummary[]> {
+  const params = new URLSearchParams()
+  if (tab !== undefined && tab !== null) {
+    params.set('tab', tab)
+  }
+  const data = await request<ItemsResponse<MailDateSummary>>(
+    `/api/v1/mails/dates?${params.toString()}`,
+  )
+  return data.items
+}
+
 export function getMailDetail(messageId: string): Promise<MailDetail> {
   return request<MailDetail>(`/api/v1/mails/${encodeURIComponent(messageId)}`)
 }
@@ -201,6 +304,53 @@ export function ingestMockMail(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
+}
+
+export function sendMail(payload: MailSendPayload): Promise<MailSendRequest> {
+  return request('/api/v1/mails/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export function sendMailRequestNow(
+  sendRequestId: string,
+): Promise<MailSendRequest> {
+  return request(
+    `/api/v1/mails/send-requests/${encodeURIComponent(sendRequestId)}/send-now`,
+    { method: 'POST' },
+  )
+}
+
+export function rescheduleMailRequest(
+  sendRequestId: string,
+  scheduledAt: string,
+): Promise<MailSendRequest> {
+  return request(
+    `/api/v1/mails/send-requests/${encodeURIComponent(sendRequestId)}/schedule`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scheduled_at: scheduledAt }),
+    },
+  )
+}
+
+export function cancelMailSendRequest(
+  sendRequestId: string,
+): Promise<MailSendRequest> {
+  return request(
+    `/api/v1/mails/send-requests/${encodeURIComponent(sendRequestId)}/cancel`,
+    { method: 'POST' },
+  )
+}
+
+export async function listMailSendRequests(): Promise<MailSendRequest[]> {
+  const data = await request<ItemsResponse<MailSendRequest>>(
+    '/api/v1/mails/send-requests',
+  )
+  return data.items
 }
 
 export function runNextJob(): Promise<{ job_id: string | null }> {

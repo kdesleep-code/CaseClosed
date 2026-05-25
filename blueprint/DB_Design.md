@@ -625,6 +625,22 @@ updated_at                   TEXT NOT NULL
 
 ## 6.2 gmail_messages
 
+### Phase 4 send request boundary
+
+`gmail_messages` stores Gmail-originated primary information. A pre-send
+CaseClosed send request is not a Gmail message.
+
+Cancelable outgoing sends are represented by `mail_send_requests` until they are
+executed or canceled. Normal `Send` creates a scheduled request for
+`now(JST) + 1 minute`; explicit `Schedule Send` uses the user selected
+`scheduled_at`.
+
+When real Gmail sending is implemented, the sent message displayed as thread
+history should come from Gmail sync and be stored in `gmail_messages`. The
+internal `mail_send_requests` row may link to that synced message with
+`sent_message_id`, but normal UI must not show both the internal request and the
+synced Gmail SENT message.
+
 Gmail messageの一次情報。
 
 一度読み込んだメールは、原則として再取得・再監視しない。  

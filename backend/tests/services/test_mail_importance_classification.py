@@ -138,3 +138,86 @@ def test_mock_mail_importance_classification_keeps_external_star_high(
 
     assert auto_row[0:3] == ("high", "low", "high")
     assert auto_row[3].startswith("llm_run_")
+
+
+def test_high_or_middle_mail_queues_and_stores_mock_summary(
+    client,
+    database_path: Path,
+) -> None:
+    client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Summary Sender",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "summary.sender@example.com", "is_primary": True}
+            ],
+        },
+    )
+    ingest_response = client.post(
+        MOCK_MAILS_URL,
+        json={
+            "gmail_message_id": "gmail_summary_1",
+            "gmail_thread_id": "thread_summary",
+            "subject": "Review summary target",
+            "from_address": "summary.sender@example.com",
+            "received_at": "2026-05-23T12:20:00+09:00",
+            "body_text": "Please review the attached plan before the deadline.",
+        },
+    )
+    message_id = ingest_response.json()["data"]["message_id"]
+
+    orchestrator_module = importlib.import_module("caseclosed.services.orchestrator")
+    orchestrator = orchestrator_module.Orchestrator(
+        worker_id="worker-mail-summary",
+    )
+    importance_job_id = orchestrator.run_once()
+
+    with sqlite3.connect(database_path) as connection:
+        summary_job_row = connection.execute(
+            """
+            SELECT id, status
+            FROM jobs
+            WHERE job_type = 'mail_summary'
+            """
+        ).fetchone()
+
+    assert importance_job_id == ingest_response.json()["data"]["queued_job_id"]
+    assert summary_job_row[1] == "pending"
+    assert orchestrator.run_once() == summary_job_row[0]
+
+    detail_response = client.get(f"/api/v1/mails/{message_id}")
+    list_response = client.get("/api/v1/mails")
+
+    with sqlite3.connect(database_path) as connection:
+        summary_row = connection.execute(
+            """
+            SELECT summary_text, language, llm_run_id
+            FROM mail_summaries
+            WHERE message_id = ?
+            """,
+            (message_id,),
+        ).fetchone()
+        llm_run_row = connection.execute(
+            """
+            SELECT function_type, provider_name, model_name, input_source_json
+            FROM llm_runs
+            WHERE id = ?
+            """,
+            (summary_row[2],),
+        ).fetchone()
+
+    assert summary_row[0].startswith("Review summary target")
+    assert summary_row[1] == "ja"
+    assert llm_run_row[0:3] == (
+        "mail_summary",
+        "mock",
+        "deterministic-mail-summary-v1",
+    )
+    assert "Please review the attached plan" not in llm_run_row[3]
+    assert detail_response.json()["data"]["summary"]["summary_text"].startswith(
+        "Review summary target"
+    )
+    assert list_response.json()["data"]["items"][0]["summary"].startswith(
+        "Review summary target"
+    )

@@ -10,22 +10,25 @@ from caseclosed.db.models import ContactEmailAddress
 from caseclosed.db.models import GmailMessage
 from caseclosed.db.models import Job
 from caseclosed.db.models import MailAutoState
-from caseclosed.services.mail_ingestion import enqueue_importance_job
+from caseclosed.services.mail_ingestion import apply_contact_mail_importance_rule
 
 
 def handle_contact_resolution_followup(job: Job) -> dict[str, object]:
     payload = json.loads(job.payload_json)
-    contact_id = payload["contact_id"]
     email_address_id = payload["email_address_id"]
     now = runtime.jst_iso()
 
     with runtime.SessionLocal() as session:
-        contact = session.get(Contact, contact_id)
-        if contact is None or contact.deleted_at is not None:
-            raise LookupError(f"Contact not found: {contact_id}")
         email_address = session.get(ContactEmailAddress, email_address_id)
-        if email_address is None or email_address.contact_id != contact.id:
+        if email_address is None:
             raise LookupError(f"Contact email address not found: {email_address_id}")
+        if email_address.contact_id is None:
+            raise LookupError(
+                f"Contact email address is not linked to a contact: {email_address_id}"
+            )
+        contact = session.get(Contact, email_address.contact_id)
+        if contact is None or contact.deleted_at is not None:
+            raise LookupError(f"Contact not found: {email_address.contact_id}")
         if email_address.resolution_status != "linked":
             raise ValueError(f"Contact email address is not linked: {email_address_id}")
 
@@ -40,19 +43,15 @@ def handle_contact_resolution_followup(job: Job) -> dict[str, object]:
             if message is None:
                 continue
 
-            auto_state.pending_reason = None
-            auto_state.pending_from_address_id = None
-            auto_state.updated_at = now
-            auto_state.version += 1
-            if contact.status == "skipped":
-                auto_state.effective_importance = "skip"
-                continue
-
-            auto_state.effective_importance = (
-                "high" if auto_state.external_importance == "high" else "unclassified"
+            result = apply_contact_mail_importance_rule(
+                session,
+                message=message,
+                auto_state=auto_state,
+                contact=contact,
+                now=now,
             )
-            enqueue_importance_job(session, message, now)
-            queued_job_count += 1
+            if result.queued_job_id is not None:
+                queued_job_count += 1
 
         session.commit()
         return {

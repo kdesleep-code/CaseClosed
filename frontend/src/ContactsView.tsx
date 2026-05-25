@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
   addContactEmailAddress,
@@ -15,16 +15,30 @@ import {
 } from './phase3Api'
 import type { Contact, UnresolvedFromAddress } from './phase3Api'
 import { t } from './i18n'
+import { AppLink, navigateTo } from './navigation'
 
 type ContactsMode = 'list' | 'pending'
 type StatusFilter = 'all' | 'active' | 'skipped' | 'archived' | 'mailing_list'
 type ContactKind = 'person' | 'mailing_list'
 type SenderResolutionMode = 'self' | 'reply_to'
+type ContactMailImportanceRuleAction = 'llm' | 'fixed' | 'llm_with_instruction'
+type ContactMailImportanceRuleValue = 'pinned' | 'high' | 'middle' | 'low'
 type CustomContactTab = {
   id: string
   label: string
   expression: string
 }
+
+export type ContactsInitialData =
+  | {
+      mode: 'list'
+      contacts: Contact[]
+    }
+  | {
+      mode: 'pending'
+      contacts: Contact[]
+      unresolvedFromAddresses: UnresolvedFromAddress[]
+    }
 
 const maxCustomTabs = 5
 const maxCustomTabNameLength = 12
@@ -105,11 +119,23 @@ function shouldIgnoreContactCardClick(target: EventTarget | null) {
   )
 }
 
-function ContactsView({ mode }: { mode: ContactsMode }) {
-  const [contacts, setContacts] = useState<Contact[]>([])
+function ContactsView({
+  mode,
+  initialData,
+}: {
+  mode: ContactsMode
+  initialData?: ContactsInitialData
+}) {
+  const [contacts, setContacts] = useState<Contact[]>(
+    initialData?.contacts ?? [],
+  )
   const [unresolvedFromAddresses, setUnresolvedFromAddresses] = useState<
     UnresolvedFromAddress[]
-  >([])
+  >(
+    initialData?.mode === 'pending'
+      ? initialData.unresolvedFromAddresses
+      : [],
+  )
   const [pendingDisplayNames, setPendingDisplayNames] = useState<Record<string, string>>(
     {},
   )
@@ -144,6 +170,12 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
   const [detailKind, setDetailKind] = useState<ContactKind>('person')
   const [detailSenderResolutionMode, setDetailSenderResolutionMode] =
     useState<SenderResolutionMode>('self')
+  const [detailMailImportanceRuleAction, setDetailMailImportanceRuleAction] =
+    useState<ContactMailImportanceRuleAction>('llm')
+  const [detailMailImportanceRuleImportance, setDetailMailImportanceRuleImportance] =
+    useState<ContactMailImportanceRuleValue>('high')
+  const [detailMailImportanceRuleInstruction, setDetailMailImportanceRuleInstruction] =
+    useState('')
   const [
     detailMailingListRecipientExpression,
     setDetailMailingListRecipientExpression,
@@ -157,10 +189,20 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
   const [mergeDestinationQuery, setMergeDestinationQuery] = useState('')
   const [busyEmailAddress, setBusyEmailAddress] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
-  const [hasLoadedPendingContacts, setHasLoadedPendingContacts] = useState(false)
-  const [hasHadPendingContacts, setHasHadPendingContacts] = useState(false)
+  const [hasLoadedPendingContacts, setHasLoadedPendingContacts] = useState(
+    initialData?.mode === 'pending',
+  )
+  const [hasHadPendingContacts, setHasHadPendingContacts] = useState(
+    initialData?.mode === 'pending' &&
+      initialData.unresolvedFromAddresses.length > 0,
+  )
+  const handledDeepLinkRef = useRef('')
+  const pendingScrollContactIdRef = useRef<string | null>(null)
 
   useEffect(() => {
+    if (initialData !== undefined && initialData.mode === mode) {
+      return
+    }
     let isMounted = true
 
     const request = mode === 'pending'
@@ -196,7 +238,7 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
     return () => {
       isMounted = false
     }
-  }, [mode])
+  }, [initialData, mode])
 
   useEffect(() => {
     if (
@@ -205,9 +247,74 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
       hasHadPendingContacts &&
       unresolvedFromAddresses.length === 0
     ) {
-      window.location.href = '/'
+      navigateTo('/', true)
     }
   }, [hasHadPendingContacts, hasLoadedPendingContacts, mode, unresolvedFromAddresses.length])
+
+  useEffect(() => {
+    if (mode !== 'list') {
+      return
+    }
+
+    const deepLinkKey = window.location.search
+    if (deepLinkKey === '' || handledDeepLinkRef.current === deepLinkKey) {
+      return
+    }
+
+    const params = new URLSearchParams(deepLinkKey)
+    const contactId = params.get('contact_id')
+    const newEmail = params.get('new_email')
+
+    if (contactId !== null) {
+      const linkedContact = contacts.find((contact) => contact.id === contactId)
+      if (linkedContact === undefined) {
+        return
+      }
+      handledDeepLinkRef.current = deepLinkKey
+      setSearchQuery('')
+      setSelectedTagFilter(null)
+      setStatusFilter(
+        isMailingListContact(linkedContact)
+          ? 'mailing_list'
+          : linkedContact.status === 'active'
+            ? 'active'
+            : 'all',
+      )
+      setActiveCustomTabId(null)
+      setIsCustomTabEditorOpen(false)
+      pendingScrollContactIdRef.current = linkedContact.id
+      openContactDetail(linkedContact)
+      return
+    }
+
+    if (newEmail !== null && newEmail.trim() !== '') {
+      handledDeepLinkRef.current = deepLinkKey
+      setSearchQuery('')
+      setSelectedTagFilter(null)
+      setStatusFilter('all')
+      setActiveCustomTabId(null)
+      setIsCustomTabEditorOpen(false)
+      setIsCreateOpen(true)
+      setDisplayName(params.get('display_name') ?? newEmail.split('@')[0])
+      setEmailAddress(newEmail)
+      setStatus('active')
+    }
+  }, [contacts, mode])
+
+  useEffect(() => {
+    if (pendingScrollContactIdRef.current === null) {
+      return
+    }
+
+    const contactId = pendingScrollContactIdRef.current
+    window.setTimeout(() => {
+      const element = document.getElementById(`contact-row-${contactId}`)
+      if (element !== null) {
+        element.scrollIntoView({ block: 'center' })
+        pendingScrollContactIdRef.current = null
+      }
+    }, 0)
+  }, [selectedContactId, statusFilter, activeCustomTabId, isCustomTabEditorOpen])
 
   async function handleCreateContact(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -223,6 +330,9 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
         kind: 'person',
         sender_resolution_mode: 'self',
         mailing_list_recipient_expression: null,
+        mail_importance_rule_action: 'llm',
+        mail_importance_rule_importance: null,
+        mail_importance_rule_instruction: null,
         tags: [],
         email_addresses:
           emailAddress.trim() === ''
@@ -332,6 +442,9 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
         kind,
         sender_resolution_mode: kind === 'person' ? 'self' : senderResolution,
         mailing_list_recipient_expression: null,
+        mail_importance_rule_action: 'llm',
+        mail_importance_rule_importance: null,
+        mail_importance_rule_instruction: null,
         tags: [],
         email_addresses: [
           { email_address: item.email_address, is_primary: true },
@@ -372,6 +485,13 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
     setDetailStatus(contact.status as 'active' | 'skipped' | 'archived')
     setDetailKind(contact.kind ?? 'person')
     setDetailSenderResolutionMode(contact.sender_resolution_mode ?? 'self')
+    setDetailMailImportanceRuleAction(contact.mail_importance_rule_action ?? 'llm')
+    setDetailMailImportanceRuleImportance(
+      contact.mail_importance_rule_importance ?? 'high',
+    )
+    setDetailMailImportanceRuleInstruction(
+      contact.mail_importance_rule_instruction ?? '',
+    )
     setDetailMailingListRecipientExpression(
       contact.mailing_list_recipient_expression ?? '',
     )
@@ -394,6 +514,13 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
     setDetailStatus(contact.status as 'active' | 'skipped' | 'archived')
     setDetailKind(contact.kind ?? 'person')
     setDetailSenderResolutionMode(contact.sender_resolution_mode ?? 'self')
+    setDetailMailImportanceRuleAction(contact.mail_importance_rule_action ?? 'llm')
+    setDetailMailImportanceRuleImportance(
+      contact.mail_importance_rule_importance ?? 'high',
+    )
+    setDetailMailImportanceRuleInstruction(
+      contact.mail_importance_rule_instruction ?? '',
+    )
     setDetailMailingListRecipientExpression(
       contact.mailing_list_recipient_expression ?? '',
     )
@@ -432,6 +559,15 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
         mailing_list_recipient_expression:
           detailKind === 'mailing_list'
             ? detailMailingListRecipientExpression
+            : null,
+        mail_importance_rule_action: detailMailImportanceRuleAction,
+        mail_importance_rule_importance:
+          detailMailImportanceRuleAction === 'fixed'
+            ? detailMailImportanceRuleImportance
+            : null,
+        mail_importance_rule_instruction:
+          detailMailImportanceRuleAction === 'llm_with_instruction'
+            ? detailMailImportanceRuleInstruction
             : null,
         tags: detailKind === 'mailing_list' ? [] : parseTags(detailTags),
       })
@@ -694,6 +830,8 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
   function handleOpenCustomTabEditor() {
     setActiveCustomTabId(null)
     setStatusFilter('all')
+    setSearchQuery('')
+    setSelectedTagFilter(null)
     setIsCustomTabEditorOpen(true)
   }
 
@@ -751,8 +889,17 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
         ? 'add'
         : statusFilter
       : activeCustomTabId
+  const customTabPreviewExpression = isCustomTabEditorOpen
+    ? customTabExpression.trim()
+    : null
   const visibleContacts = contacts
     .filter((contact) => {
+      if (customTabPreviewExpression !== null) {
+        if (isMailingListContact(contact)) {
+          return false
+        }
+        return customTabMatches(contact, customTabPreviewExpression)
+      }
       if (activeCustomTab !== undefined) {
         if (isMailingListContact(contact)) {
           return false
@@ -820,9 +967,9 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
           </div>
           <nav aria-label={t('contacts.navLabel')}>
             {mode === 'pending' ? (
-              <a href="/contacts">{t('contacts.heading')}</a>
+              <AppLink href="/contacts">{t('contacts.heading')}</AppLink>
             ) : null}
-            <a href="/">{t('top.heading')}</a>
+            <AppLink href="/">{t('top.heading')}</AppLink>
           </nav>
         </header>
 
@@ -1311,11 +1458,18 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                     {visibleContacts.map((contact) => {
                       const email = primaryEmail(contact)
                       const isExpanded = selectedContact?.id === contact.id
+                      const fixedImportance = contact.mail_importance_rule_importance
                       return (
                         <article
                           className={`contact-row contact-expandable-row${
                             isExpanded ? ' contact-row-expanded' : ''
+                          }${
+                            contact.mail_importance_rule_action === 'fixed' &&
+                            fixedImportance != null
+                              ? ` contact-fixed-importance mail-priority-${fixedImportance}`
+                              : ''
                           }`}
+                          id={`contact-row-${contact.id}`}
                           key={contact.id}
                           onClick={(event) => {
                             if (shouldIgnoreContactCardClick(event.target)) {
@@ -1422,6 +1576,7 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                                       ? ' mailing-list-detail-form'
                                       : ''
                                   }`}
+                                  id="contact-detail-edit-form"
                                   onSubmit={handleUpdateContact}
                                 >
                                   <label className="contact-detail-primary">
@@ -1523,28 +1678,73 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                                         />
                                       </label>
                                     )}
-                                    <button
-                                      disabled
-                                      title={t('contacts.avatar.unimplemented')}
-                                      type="button"
-                                    >
-                                      {t('contacts.avatar.update')}
-                                    </button>
-                                    <button disabled={isSubmitting} type="submit">
-                                      {t('contacts.detail.save')}
-                                    </button>
-                                    <button
-                                      disabled={isSubmitting || !canDeleteSelectedContact}
-                                      onClick={handleDeleteContact}
-                                      title={
-                                        !canDeleteSelectedContact
-                                          ? t('contacts.detail.deleteUnavailable')
-                                          : undefined
-                                      }
-                                      type="button"
-                                    >
-                                      {t('contacts.detail.delete')}
-                                    </button>
+                                    <label>
+                                      <span>{t('contacts.importanceRule.label')}</span>
+                                      <select
+                                        aria-label={t('contacts.importanceRule.label')}
+                                        onChange={(event) =>
+                                          setDetailMailImportanceRuleAction(
+                                            event.target
+                                              .value as ContactMailImportanceRuleAction,
+                                          )
+                                        }
+                                        value={detailMailImportanceRuleAction}
+                                      >
+                                        <option value="llm">
+                                          {t('contacts.importanceRule.llm')}
+                                        </option>
+                                        <option value="fixed">
+                                          {t('contacts.importanceRule.fixed')}
+                                        </option>
+                                        <option value="llm_with_instruction">
+                                          {t('contacts.importanceRule.llmWithInstruction')}
+                                        </option>
+                                      </select>
+                                    </label>
+                                    {detailMailImportanceRuleAction === 'fixed' && (
+                                      <label>
+                                        <span>{t('contacts.importanceRule.value')}</span>
+                                        <select
+                                          aria-label={t('contacts.importanceRule.value')}
+                                          onChange={(event) =>
+                                            setDetailMailImportanceRuleImportance(
+                                              event.target
+                                                .value as ContactMailImportanceRuleValue,
+                                            )
+                                          }
+                                          value={detailMailImportanceRuleImportance}
+                                        >
+                                          {(['pinned', 'high', 'middle', 'low'] as const).map(
+                                            (importance) => (
+                                              <option key={importance} value={importance}>
+                                                {importance}
+                                              </option>
+                                            ),
+                                          )}
+                                        </select>
+                                      </label>
+                                    )}
+                                    {detailMailImportanceRuleAction ===
+                                      'llm_with_instruction' && (
+                                      <label>
+                                        <span>{t('contacts.importanceRule.instruction')}</span>
+                                        <textarea
+                                          aria-label={t(
+                                            'contacts.importanceRule.instruction',
+                                          )}
+                                          onChange={(event) =>
+                                            setDetailMailImportanceRuleInstruction(
+                                              event.target.value,
+                                            )
+                                          }
+                                          value={detailMailImportanceRuleInstruction}
+                                        />
+                                      </label>
+                                    )}
+                                    <div className="contact-related-cases contact-related-cases-compact">
+                                      <h3>{t('contacts.relatedCases.heading')}</h3>
+                                      <p>{t('contacts.relatedCases.empty')}</p>
+                                    </div>
                                   </div>
                                 </form>
                               ) : (
@@ -1589,6 +1789,36 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                                       <p>{t('contacts.relatedCases.empty')}</p>
                                     </div>
                                   )}
+                                </div>
+                              )}
+                              {!isContactDetailEditing && !selectedIsMailingList && (
+                                <div className="contact-detail-summary contact-detail-secondary">
+                                  <div className="contact-importance-rule-summary">
+                                    <span>{t('contacts.importanceRule.label')}</span>
+                                    <p>
+                                      {(selectedContact.mail_importance_rule_action ??
+                                        'llm') === 'fixed'
+                                        ? `${t('contacts.importanceRule.fixed')}: ${
+                                            selectedContact.mail_importance_rule_importance ??
+                                            'high'
+                                          }`
+                                        : (selectedContact.mail_importance_rule_action ??
+                                            'llm') === 'llm_with_instruction'
+                                          ? t('contacts.importanceRule.llmWithInstruction')
+                                          : t('contacts.importanceRule.llm')}
+                                    </p>
+                                    {(selectedContact.mail_importance_rule_action ??
+                                      'llm') === 'llm_with_instruction' &&
+                                      selectedContact.mail_importance_rule_instruction !==
+                                        null &&
+                                      selectedContact.mail_importance_rule_instruction !==
+                                        undefined &&
+                                      selectedContact.mail_importance_rule_instruction !== '' && (
+                                        <p className="contact-rule-instruction">
+                                          {selectedContact.mail_importance_rule_instruction}
+                                        </p>
+                                      )}
+                                  </div>
                                 </div>
                               )}
                               {!selectedIsMailingList && (
@@ -1759,7 +1989,37 @@ function ContactsView({ mode }: { mode: ContactsMode }) {
                                 )}
                                 </div>
                               )}
-                              {!selectedIsMailingList && (
+                              {isContactDetailEditing && (
+                                <div className="contact-detail-edit-buttons contact-detail-secondary">
+                                  <button
+                                    disabled
+                                    title={t('contacts.avatar.unimplemented')}
+                                    type="button"
+                                  >
+                                    {t('contacts.avatar.update')}
+                                  </button>
+                                  <button
+                                    disabled={isSubmitting}
+                                    form="contact-detail-edit-form"
+                                    type="submit"
+                                  >
+                                    {t('contacts.detail.save')}
+                                  </button>
+                                  <button
+                                    disabled={isSubmitting || !canDeleteSelectedContact}
+                                    onClick={handleDeleteContact}
+                                    title={
+                                      !canDeleteSelectedContact
+                                        ? t('contacts.detail.deleteUnavailable')
+                                        : undefined
+                                    }
+                                    type="button"
+                                  >
+                                    {t('contacts.detail.delete')}
+                                  </button>
+                                </div>
+                              )}
+                              {!isContactDetailEditing && !selectedIsMailingList && (
                                 <div className="contact-related-cases contact-detail-secondary">
                                 <h3>{t('contacts.relatedCases.heading')}</h3>
                                 <p>{t('contacts.relatedCases.empty')}</p>

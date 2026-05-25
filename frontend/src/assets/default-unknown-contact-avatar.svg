@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" role="img" aria-label="Unknown contact">
+  <rect width="96" height="96" rx="48" fill="#fdf8ef"/>
+  <circle cx="48" cy="34" r="15" fill="#b99a7d"/>
+  <path d="M23 78c4-18 15-28 25-28s21 10 25 28" fill="#b99a7d"/>
+  <circle cx="35" cy="35" r="3" fill="#fff8ef"/>
+  <circle cx="61" cy="35" r="3" fill="#fff8ef"/>
+  <path d="M41 44c4 4 10 4 14 0" fill="none" stroke="#fff8ef" stroke-linecap="round" stroke-width="4"/>
+  <circle cx="72" cy="23" r="12" fill="#f6debb" stroke="#d5b384" stroke-width="2"/>
+  <path d="M68 20c1-4 8-4 8 1 0 5-5 4-5 8" fill="none" stroke="#8a5d40" stroke-linecap="round" stroke-width="3"/>
+  <circle cx="71" cy="34" r="1.8" fill="#8a5d40"/>
+</svg>

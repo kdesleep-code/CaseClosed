@@ -236,6 +236,81 @@ def test_contact_resolution_followup_releases_pending_mail(
     assert message_id in importance_job[1]
 
 
+def test_contact_resolution_followup_uses_current_email_contact_after_merge(
+    client,
+    database_path: Path,
+) -> None:
+    ingest_response = client.post(
+        "/api/v1/mails/mock-ingest",
+        json={
+            "gmail_message_id": "gmail_followup_merged_1",
+            "gmail_thread_id": "thread_followup_merged",
+            "subject": "Followup merge test",
+            "from_address": "followup.merged@example.com",
+            "received_at": "2026-05-23T11:10:00+09:00",
+        },
+    )
+    message_id = ingest_response.json()["data"]["message_id"]
+    source_contact_id = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Merged Source",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "followup.merged@example.com", "is_primary": True}
+            ],
+        },
+    ).json()["data"]["id"]
+    target_contact_id = client.post(
+        CONTACTS_URL,
+        json={"display_name": "Merged Target", "status": "active"},
+    ).json()["data"]["id"]
+
+    merge_response = client.post(
+        f"{CONTACTS_URL}/{source_contact_id}/merge",
+        json={"target_contact_id": target_contact_id},
+    )
+    assert merge_response.status_code == 200
+
+    orchestrator_module = importlib.import_module("caseclosed.services.orchestrator")
+    orchestrator = orchestrator_module.Orchestrator(
+        worker_id="worker-contact-resolution-merged",
+    )
+
+    followup_job_id = orchestrator.run_once()
+
+    with sqlite3.connect(database_path) as connection:
+        followup_row = connection.execute(
+            """
+            SELECT status, result_json, error_type, error_message
+            FROM jobs
+            WHERE id = ?
+            """,
+            (followup_job_id,),
+        ).fetchone()
+        auto_row = connection.execute(
+            """
+            SELECT pending_reason, pending_from_address_id, effective_importance
+            FROM mail_auto_state
+            WHERE message_id = ?
+            """,
+            (message_id,),
+        ).fetchone()
+        email_contact_row = connection.execute(
+            """
+            SELECT contact_id
+            FROM contact_email_addresses
+            WHERE normalized_email_address = 'followup.merged@example.com'
+            """
+        ).fetchone()
+
+    assert followup_row[0] == "succeeded"
+    assert followup_row[2:4] == (None, None)
+    assert json.loads(followup_row[1])["contact_id"] == target_contact_id
+    assert auto_row == (None, None, "unclassified")
+    assert email_contact_row == (target_contact_id,)
+
+
 def test_mock_mail_to_prefilled_contact_to_classified_mail_pipeline(
     client,
     database_path: Path,

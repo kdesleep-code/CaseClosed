@@ -43,9 +43,14 @@ class MockMailImportanceProvider:
 
         text = " ".join(
             str(input_payload.get(key) or "")
-            for key in ("subject", "snippet", "body_text")
+            for key in ("subject", "snippet", "body_text", "additional_instruction")
         ).lower()
-        if any(token in text for token in ["urgent", "至急", "asap", "today"]):
+        instruction = str(input_payload.get("additional_instruction") or "").lower()
+        if "always high" in instruction or "常にhigh" in instruction:
+            importance = "high"
+        elif "always low" in instruction or "常にlow" in instruction:
+            importance = "low"
+        elif any(token in text for token in ["urgent", "至急", "asap", "today"]):
             importance = "high"
         elif any(token in text for token in ["meeting", "deadline", "確認", "review"]):
             importance = "middle"
@@ -91,12 +96,86 @@ class MockContactPrefillProvider:
         )
 
 
+class MockMailSummaryProvider:
+    provider_name = "mock"
+    model_name = "deterministic-mail-summary-v1"
+
+    def complete_json(
+        self,
+        *,
+        function_type: str,
+        input_payload: dict[str, object],
+    ) -> LlmProviderResponse:
+        if function_type != "mail_summary":
+            raise ValueError(f"Unsupported mock function type: {function_type}")
+
+        subject = compact_text(str(input_payload.get("subject") or "No subject"), 80)
+        body = normalized_text(
+            str(input_payload.get("body_text") or input_payload.get("snippet") or "")
+        )
+        key_points = [point for point in [subject, compact_text(body, 140)] if point]
+        summary = f"{subject}: {body}" if body else subject
+        output = {
+            "schema_version": "1.0",
+            "summary": summary,
+            "translation": mock_translation(body),
+            "needs_action": any(
+                token in f"{subject} {body}".lower()
+                for token in ["urgent", "asap", "today", "deadline", "review", "確認", "至急"]
+            ),
+            "deadline": {
+                "date_text": None,
+                "normalized_date": None,
+                "confidence": 0.0,
+            },
+            "next_action": "内容を確認する。",
+            "key_points": key_points[:3],
+            "reply_needed": False,
+            "confidence": 0.5,
+            "reasoning_summary": "Mock summary generated from subject and body snippet.",
+            "warnings": [],
+        }
+        return LlmProviderResponse(
+            output=output,
+            output_preview=str(output["summary"]),
+            prompt_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+            estimated_cost=0.0,
+        )
+
+
 def display_name_from_email(email_address: str) -> str:
     local_part = email_address.split("@", maxsplit=1)[0]
     words = [word for word in re.split(r"[._+\-]+", local_part) if word]
     if not words:
         return email_address
     return " ".join(word.capitalize() for word in words)
+
+
+def compact_text(value: str, limit: int) -> str:
+    normalized = normalized_text(value)
+    if len(normalized) <= limit:
+        return normalized
+    return f"{normalized[: max(0, limit - 3)]}..."
+
+
+def normalized_text(value: str) -> str:
+    return " ".join(value.split())
+
+
+def mock_translation(value: str) -> str | None:
+    text = normalized_text(value)
+    if text == "":
+        return None
+    has_ascii_letter = any(("a" <= character.lower() <= "z") for character in text)
+    has_japanese = any(
+        "\u3040" <= character <= "\u30ff" or "\u4e00" <= character <= "\u9fff"
+        for character in text
+    )
+    if not has_ascii_letter or has_japanese:
+        return None
+    return f"和訳（モック）: {text}"
 
 
 def suggested_tags_for_email(email_address: str) -> list[str]:

@@ -1,28 +1,42 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
-  getMailDetail,
-  ingestMockMail,
+  listMailDates,
   listMailPage,
-  markMailRead,
-  markMailUnread,
-  processMail,
-  runNextJob,
-  unprocessMail,
-  updateMailImportance,
 } from './phase4Api'
-import type { MailDetail, MailListFilters, MailListItem } from './phase4Api'
+import type { MailDateSummary, MailListFilters, MailListItem } from './phase4Api'
 import { t } from './i18n'
+import type { MessageKey } from './i18n'
+import { AppLink, navigateTo } from './navigation'
+import defaultContactAvatarUrl from './assets/default-contact-avatar.svg'
+import defaultMailingListAvatarUrl from './assets/default-mailing-list-avatar.svg'
+import unknownContactAvatarUrl from './assets/default-unknown-contact-avatar.svg'
 
-type MailTab = 'unprocessed' | 'processed' | 'skip'
-type MailScope = 'day' | 'all_unprocessed'
+export type MailTab = 'unprocessed' | 'processed' | 'skip'
 type SearchSort = 'newest' | 'importance'
+
+export type MailInitialData = {
+  mails: MailListItem[]
+  mailDates: MailDateSummary[]
+  nextCursor: string | null
+  activeTab: MailTab
+  selectedDate: string
+  calendarMonth: string
+}
 
 const MAIL_TABS: Array<{ key: MailTab; labelKey: string }> = [
   { key: 'unprocessed', labelKey: 'mail.tab.unprocessed' },
   { key: 'processed', labelKey: 'mail.tab.processed' },
   { key: 'skip', labelKey: 'mail.tab.skip' },
 ]
+
+const IMPORTANCE_LEGEND = [
+  { key: 'high', labelKey: 'mail.importance.high' },
+  { key: 'middle', labelKey: 'mail.importance.middle' },
+  { key: 'low', labelKey: 'mail.importance.low' },
+  { key: 'skip', labelKey: 'mail.importance.skip' },
+  { key: 'bug', labelKey: 'mail.importance.bug' },
+] satisfies Array<{ key: string; labelKey: MessageKey }>
 
 function mailTabLabel(tab: MailTab) {
   if (tab === 'processed') {
@@ -61,8 +75,35 @@ function jstDateToday() {
   return jstInputNow().slice(0, 10)
 }
 
-function uniqueSuffix() {
-  return Date.now().toString(36)
+function dateParts(date: string) {
+  const [year, month, day] = date.split('-').map(Number)
+  return { year, month, day }
+}
+
+function formatCalendarDate(year: number, month: number, day: number) {
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
+function addMonths(date: string, amount: number) {
+  const { year, month } = dateParts(date)
+  const nextDate = new Date(Date.UTC(year, month - 1 + amount, 1))
+  return formatCalendarDate(nextDate.getUTCFullYear(), nextDate.getUTCMonth() + 1, 1)
+}
+
+function calendarDays(date: string) {
+  const { year, month } = dateParts(date)
+  const firstDay = new Date(Date.UTC(year, month - 1, 1))
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate()
+  return [
+    ...Array.from({ length: firstDay.getUTCDay() }, () => null),
+    ...Array.from({ length: daysInMonth }, (_, index) =>
+      formatCalendarDate(year, month, index + 1),
+    ),
+  ]
+}
+
+function monthLabel(date: string) {
+  return date.slice(0, 7)
 }
 
 function startOfDate(date: string) {
@@ -77,8 +118,59 @@ function formatTime(value: string) {
   return value.slice(11, 16)
 }
 
-function priorityLabel(mail: MailListItem) {
-  return mail.effective_importance
+function senderDisplayName(mail: MailListItem) {
+  return mail.sender_contact?.display_name ?? mail.from_name ?? mail.from_address
+}
+
+function senderAvatarUrl(mail: MailListItem) {
+  if (mail.sender_contact === null || mail.sender_contact === undefined) {
+    return unknownContactAvatarUrl
+  }
+  return (
+    mail.sender_contact.avatar_url ??
+    (mail.sender_contact.kind === 'mailing_list'
+      ? defaultMailingListAvatarUrl
+      : defaultContactAvatarUrl)
+  )
+}
+
+function mailSummary(mail: MailListItem) {
+  if (!['high', 'middle'].includes(mail.effective_importance)) {
+    return null
+  }
+  const summary = mail.summary?.trim()
+  if (summary === undefined || summary === '') {
+    return null
+  }
+  return summary.length > 96 ? `${summary.slice(0, 95)}...` : summary
+}
+
+function mailPriorityClass(importance: string) {
+  if (importance === 'pending' || importance === 'unclassified') {
+    return 'mail-priority-bug'
+  }
+  return `mail-priority-${importance}`
+}
+
+function groupLabelForMail(mail: MailListItem, sort: SearchSort) {
+  if (sort === 'importance') {
+    return mail.effective_importance
+  }
+  return mail.received_date ?? mail.received_at.slice(0, 10)
+}
+
+function shouldShowMailGroupLabel(
+  mail: MailListItem,
+  index: number,
+  mailsToRender: MailListItem[],
+  sort: SearchSort,
+) {
+  if (index === 0) {
+    return true
+  }
+  return (
+    groupLabelForMail(mail, sort) !== groupLabelForMail(mailsToRender[index - 1], sort)
+  )
 }
 
 function compareVisibleMails(sort: SearchSort) {
@@ -93,35 +185,44 @@ function compareVisibleMails(sort: SearchSort) {
   }
 }
 
-function groupMailsByDate(mails: MailListItem[]) {
-  return mails.reduce<Array<{ date: string; items: MailListItem[] }>>((groups, mail) => {
-    const date = mail.received_date ?? mail.received_at.slice(0, 10)
-    const lastGroup = groups[groups.length - 1]
-    if (lastGroup?.date === date) {
-      lastGroup.items.push(mail)
-    } else {
-      groups.push({ date, items: [mail] })
-    }
-    return groups
-  }, [])
+function isMailTab(value: string | null): value is MailTab {
+  return value === 'unprocessed' || value === 'processed' || value === 'skip'
 }
 
-function MailView() {
-  const [mails, setMails] = useState<MailListItem[]>([])
-  const [nextCursor, setNextCursor] = useState<string | null>(null)
-  const [selectedMailId, setSelectedMailId] = useState<string | null>(null)
-  const [lockedMail, setLockedMail] = useState<MailListItem | null>(null)
-  const [detail, setDetail] = useState<MailDetail | null>(null)
-  const [activeTab, setActiveTab] = useState<MailTab>('unprocessed')
-  const [scope, setScope] = useState<MailScope>('day')
-  const [selectedDate, setSelectedDate] = useState(jstDateToday())
+function initialQueryParams() {
+  const params = new URLSearchParams(window.location.search)
+  const tab = params.get('tab')
+  const date = params.get('date')
+  return {
+    activeTab: isMailTab(tab) ? tab : 'unprocessed',
+    selectedDate: date !== null && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : jstDateToday(),
+  }
+}
+
+function MailView({ initialData }: { initialData?: MailInitialData }) {
+  const didUseInitialData = useRef(initialData !== undefined)
+  const didUsePreparedData = useRef(false)
+  const queryParams = useMemo(() => initialQueryParams(), [])
+  const [mails, setMails] = useState<MailListItem[]>(initialData?.mails ?? [])
+  const [mailDates, setMailDates] = useState<MailDateSummary[]>(
+    initialData?.mailDates ?? [],
+  )
+  const [nextCursor, setNextCursor] = useState<string | null>(
+    initialData?.nextCursor ?? null,
+  )
+  const [activeTab, setActiveTab] = useState<MailTab>(
+    initialData?.activeTab ?? queryParams.activeTab,
+  )
+  const [selectedDate, setSelectedDate] = useState(
+    initialData?.selectedDate ?? queryParams.selectedDate,
+  )
+  const [calendarMonth, setCalendarMonth] = useState(
+    initialData?.calendarMonth ?? queryParams.selectedDate,
+  )
   const [searchText, setSearchText] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
   const [searchSort, setSearchSort] = useState<SearchSort>('newest')
   const [pageSize, setPageSize] = useState(25)
-  const [subject, setSubject] = useState('Review mock mail')
-  const [fromAddress, setFromAddress] = useState('review.mock.sender@example.com')
-  const [bodyText, setBodyText] = useState('This is a mock mail for review.')
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isBusy, setIsBusy] = useState(false)
@@ -131,7 +232,18 @@ function MailView() {
     () => [...mails].sort(compareVisibleMails(isSearchMode ? searchSort : 'importance')),
     [isSearchMode, mails, searchSort],
   )
-  const groupedMails = useMemo(() => groupMailsByDate(visibleMails), [visibleMails])
+  const mailDateCounts = useMemo(
+    () => new Map(mailDates.map((item) => [item.date, item.count])),
+    [mailDates],
+  )
+  const sortedMailDates = useMemo(
+    () => mailDates.map((item) => item.date).sort(),
+    [mailDates],
+  )
+  const previousMailDate =
+    [...sortedMailDates].reverse().find((date) => date < selectedDate) ?? null
+  const nextMailDate = sortedMailDates.find((date) => date > selectedDate) ?? null
+  const selectedMonthDays = calendarDays(calendarMonth)
 
   function listFilters(cursor?: string): MailListFilters {
     const filters: MailListFilters = {
@@ -142,40 +254,75 @@ function MailView() {
     if (isSearchMode) {
       filters.q = searchQuery.trim()
       filters.tab = 'all'
-    } else if (scope === 'day') {
+    } else {
       filters.date_from = startOfDate(selectedDate)
       filters.date_to = endOfDate(selectedDate)
-    } else {
-      filters.tab = 'unprocessed'
     }
     return filters
   }
 
-  async function refreshMails(options: { keepDetail?: boolean } = {}) {
+  function dayListFilters(tab: MailTab, date: string): MailListFilters {
+    return {
+      limit: pageSize,
+      tab,
+      date_from: startOfDate(date),
+      date_to: endOfDate(date),
+    }
+  }
+
+  async function refreshMails() {
     const page = await listMailPage(listFilters())
     setMails(page.items)
     setNextCursor(page.next_cursor)
-    if (!options.keepDetail) {
-      setDetail(null)
-      setLockedMail(null)
-      setSelectedMailId(null)
-    } else if (selectedMailId !== null) {
-      const selectedStillExists = page.items.some((item) => item.id === selectedMailId)
-      if (!selectedStillExists) {
-        setDetail(null)
-        setLockedMail(null)
-        setSelectedMailId(null)
-      }
+  }
+
+  async function transitionMailList(nextTab: MailTab, nextDate: string) {
+    setError(null)
+    setNotice(null)
+    setIsBusy(true)
+    try {
+      const [page, dates] = await Promise.all([
+        listMailPage(dayListFilters(nextTab, nextDate)),
+        listMailDates(nextTab),
+      ])
+      didUsePreparedData.current = true
+      setActiveTab(nextTab)
+      setSelectedDate(nextDate)
+      setCalendarMonth(nextDate)
+      setSearchText('')
+      setSearchQuery('')
+      setMails(page.items)
+      setNextCursor(page.next_cursor)
+      setMailDates(dates)
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsBusy(false)
     }
   }
 
   useEffect(() => {
+    if (didUseInitialData.current) {
+      didUseInitialData.current = false
+      return
+    }
+    if (didUsePreparedData.current) {
+      didUsePreparedData.current = false
+      return
+    }
     let isMounted = true
-    listMailPage(listFilters())
-      .then((page) => {
+    Promise.allSettled([listMailPage(listFilters()), listMailDates(activeTab)])
+      .then(([pageResult, datesResult]) => {
         if (isMounted) {
-          setMails(page.items)
-          setNextCursor(page.next_cursor)
+          if (pageResult.status === 'fulfilled') {
+            setMails(pageResult.value.items)
+            setNextCursor(pageResult.value.next_cursor)
+          } else {
+            setError(describeError(pageResult.reason))
+          }
+          if (datesResult.status === 'fulfilled') {
+            setMailDates(datesResult.value)
+          }
         }
       })
       .catch((requestError) => {
@@ -187,88 +334,7 @@ function MailView() {
     return () => {
       isMounted = false
     }
-  }, [activeTab, scope, selectedDate, searchQuery, pageSize])
-
-  async function handleMockIngest(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    setError(null)
-    setNotice(null)
-    setIsBusy(true)
-    const suffix = uniqueSuffix()
-
-    try {
-      const result = await ingestMockMail({
-        gmail_message_id: `mock_${suffix}`,
-        gmail_thread_id: `mock_thread_${suffix}`,
-        message_id_header: `<mock-${suffix}@caseclosed.local>`,
-        subject,
-        from_address: fromAddress,
-        received_at: jstInputNow(),
-        body_text: bodyText,
-      })
-      await refreshMails()
-      setNotice(
-        result.pending
-          ? t('mail.mock.pending', { email: result.pending_address ?? fromAddress })
-          : t('mail.mock.ingested'),
-      )
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setIsBusy(false)
-    }
-  }
-
-  async function handleSelectMail(mail: MailListItem) {
-    setError(null)
-    setNotice(null)
-    setSelectedMailId(mail.id)
-    if (mail.pending_reason !== null) {
-      setLockedMail(mail)
-      setDetail(null)
-      return
-    }
-
-    setIsBusy(true)
-    try {
-      const nextDetail =
-        mail.read_status === 'unread'
-          ? await markMailRead(mail.id)
-          : await getMailDetail(mail.id)
-      setLockedMail(null)
-      setDetail(nextDetail)
-      setMails((currentMails) =>
-        currentMails.map((currentMail) =>
-          currentMail.id === mail.id
-            ? { ...currentMail, read_status: nextDetail.user_state.read_status, read_at: nextDetail.user_state.read_at }
-            : currentMail,
-        ),
-      )
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setIsBusy(false)
-    }
-  }
-
-  async function handleRunNextJob() {
-    setError(null)
-    setNotice(null)
-    setIsBusy(true)
-    try {
-      const result = await runNextJob()
-      await refreshMails({ keepDetail: true })
-      setNotice(
-        result.job_id === null
-          ? t('mail.job.none')
-          : t('mail.job.ran', { jobId: result.job_id }),
-      )
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setIsBusy(false)
-    }
-  }
+  }, [activeTab, selectedDate, searchQuery, pageSize])
 
   async function handleLoadMore() {
     if (nextCursor === null) {
@@ -288,24 +354,6 @@ function MailView() {
     }
   }
 
-  async function mutateDetail(action: () => Promise<MailDetail>) {
-    setError(null)
-    setNotice(null)
-    setIsBusy(true)
-    try {
-      const nextDetail = await action()
-      setDetail(nextDetail)
-      setLockedMail(null)
-      setSelectedMailId(nextDetail.message.id)
-      await refreshMails({ keepDetail: true })
-      setNotice(t('mail.updated'))
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setIsBusy(false)
-    }
-  }
-
   function handleSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setSearchQuery(searchText)
@@ -317,21 +365,57 @@ function MailView() {
   }
 
   function handleTabClick(nextTab: MailTab) {
-    setActiveTab(nextTab)
-    setScope('day')
-    setSearchText('')
-    setSearchQuery('')
+    if (nextTab === activeTab) {
+      return
+    }
+    void transitionMailList(nextTab, selectedDate)
+  }
+
+  function jumpToMailDate(date: string | null) {
+    if (date === null) {
+      return
+    }
+    void transitionMailList(activeTab, date)
+  }
+
+  function jumpToToday() {
+    const today = jstDateToday()
+    void transitionMailList(activeTab, today)
   }
 
   return (
     <main className="app-shell">
       <div className="mail-shell">
+        {!isSearchMode && (
+          <div className="mail-floating-day-nav" aria-label={t('mail.dayNavigation')}>
+            <button
+              aria-label={t('mail.previousDay')}
+              disabled={isBusy || previousMailDate === null}
+              onClick={() => jumpToMailDate(previousMailDate)}
+              type="button"
+            >
+              {'<'}
+            </button>
+            <button
+              aria-label={t('mail.nextDay')}
+              disabled={isBusy || nextMailDate === null}
+              onClick={() => jumpToMailDate(nextMailDate)}
+              type="button"
+            >
+              {'>'}
+            </button>
+          </div>
+        )}
+
         <header className="maintenance-header">
           <div>
             <p>{t('app.name')}</p>
             <h1>{t('mail.heading')}</h1>
           </div>
-          <a href="/">{t('top.heading')}</a>
+          <nav aria-label={t('mail.navigation')} className="maintenance-nav">
+            <AppLink href="/mail/compose">{t('work.composeMail')}</AppLink>
+            <AppLink href="/">{t('top.heading')}</AppLink>
+          </nav>
         </header>
 
         {(error !== null || notice !== null) && (
@@ -341,279 +425,236 @@ function MailView() {
           </div>
         )}
 
-        <section aria-labelledby="mail-search-heading" className="mail-panel mail-search-panel">
-          <div className="section-heading">
-            <h2 id="mail-search-heading">{t('mail.search.heading')}</h2>
-            <div className="mail-actions">
-              <button disabled={isBusy} onClick={handleRunNextJob} type="button">
-                {t('mail.job.runNext')}
-              </button>
-            </div>
-          </div>
-          <form className="mail-search-form" onSubmit={handleSearch}>
-            <input
-              aria-label={t('mail.search.label')}
-              onChange={(event) => setSearchText(event.target.value)}
-              placeholder={t('mail.search.placeholder')}
-              value={searchText}
-            />
-            <select
-              aria-label={t('mail.search.sort')}
-              onChange={(event) => setSearchSort(event.target.value as SearchSort)}
-              value={searchSort}
-            >
-              <option value="newest">{t('mail.sort.newest')}</option>
-              <option value="importance">{t('mail.sort.importance')}</option>
-            </select>
-            <select
-              aria-label={t('mail.pageSize')}
-              onChange={(event) => setPageSize(Number(event.target.value))}
-              value={pageSize}
-            >
-              <option value={10}>10</option>
-              <option value={25}>25</option>
-              <option value={50}>50</option>
-            </select>
-            <button disabled={isBusy} type="submit">
-              {t('mail.search.submit')}
-            </button>
-            <button disabled={isBusy || !isSearchMode} onClick={clearSearch} type="button">
-              {t('mail.search.clear')}
-            </button>
-          </form>
-        </section>
-
-        <section aria-labelledby="mock-mail-heading" className="mail-panel mail-dev-panel">
-          <details>
-            <summary id="mock-mail-heading">{t('mail.mock.heading')}</summary>
-            <form className="mail-mock-form" onSubmit={handleMockIngest}>
-              <label>
-                <span>{t('mail.subject')}</span>
-                <input
-                  onChange={(event) => setSubject(event.target.value)}
-                  required
-                  value={subject}
-                />
-              </label>
-              <label>
-                <span>{t('mail.from')}</span>
-                <input
-                  onChange={(event) => setFromAddress(event.target.value)}
-                  required
-                  type="email"
-                  value={fromAddress}
-                />
-              </label>
-              <label>
-                <span>{t('mail.body')}</span>
-                <textarea
-                  onChange={(event) => setBodyText(event.target.value)}
-                  value={bodyText}
-                />
-              </label>
-              <button disabled={isBusy} type="submit">
-                {t('mail.mock.ingest')}
-              </button>
-            </form>
-          </details>
-        </section>
-
-        {!isSearchMode && (
-          <nav aria-label={t('mail.tabs.label')} className="mail-tabs">
-            <div>
-              {MAIL_TABS.map((tab) => (
-                <button
-                  aria-selected={activeTab === tab.key}
-                  key={tab.key}
-                  onClick={() => handleTabClick(tab.key)}
-                  role="tab"
-                  type="button"
-                >
-                  {mailTabLabel(tab.key)}
-                </button>
-              ))}
-            </div>
-            <button
-              aria-pressed={scope === 'all_unprocessed'}
-              onClick={() => {
-                setActiveTab('unprocessed')
-                setScope(scope === 'all_unprocessed' ? 'day' : 'all_unprocessed')
-              }}
-              type="button"
-            >
-              {t('mail.scope.allUnprocessed')}
-            </button>
-          </nav>
-        )}
-
-        <section aria-labelledby="mail-list-heading" className="mail-grid">
-          <div className="mail-panel mail-list-panel">
-            <div className="section-heading">
-              <div>
-                <h2 id="mail-list-heading">
-                  {isSearchMode ? t('mail.search.results') : t('mail.list.heading')}
-                </h2>
-                <p>
-                  {isSearchMode
-                    ? t('mail.search.resultNote')
-                    : scope === 'all_unprocessed'
-                      ? t('mail.scope.allUnprocessed')
-                      : selectedDate}
-                </p>
-              </div>
-              {!isSearchMode && scope === 'day' && (
-                <input
-                  aria-label={t('mail.date')}
-                  onChange={(event) => setSelectedDate(event.target.value)}
-                  type="date"
-                  value={selectedDate}
-                />
+        <div className="mail-main-layout">
+          <div className="mail-main-column">
+            <section aria-labelledby="mail-list-heading" className="mail-list-workspace">
+              {!isSearchMode && (
+                <nav aria-label={t('mail.tabs.label')} className="mail-tabs">
+                  <div>
+                    {MAIL_TABS.map((tab) => (
+                      <button
+                        aria-selected={activeTab === tab.key}
+                        disabled={isBusy}
+                        key={tab.key}
+                        onClick={() => handleTabClick(tab.key)}
+                        role="tab"
+                        type="button"
+                      >
+                        {mailTabLabel(tab.key)}
+                      </button>
+                    ))}
+                  </div>
+                  <div
+                    aria-label={t('mail.importanceLegend.label')}
+                    className="mail-importance-legend"
+                  >
+                    {IMPORTANCE_LEGEND.map((item) => (
+                      <span
+                        className={`mail-legend-item mail-priority-${item.key}`}
+                        key={item.key}
+                        title={
+                          item.key === 'bug'
+                            ? t('mail.importance.bugTitle')
+                            : undefined
+                        }
+                      >
+                        {t(item.labelKey)}
+                      </span>
+                    ))}
+                  </div>
+                </nav>
               )}
-              <button disabled={isBusy} onClick={() => refreshMails()} type="button">
-                {t('mail.refresh')}
-              </button>
-            </div>
+              <div className="mail-panel mail-list-panel">
+                <div className="section-heading">
+                  {isSearchMode ? (
+                    <div>
+                      <h2 id="mail-list-heading">{t('mail.search.results')}</h2>
+                      <p>{t('mail.search.resultNote')}</p>
+                    </div>
+                  ) : (
+                    <h2 id="mail-list-heading">{selectedDate}</h2>
+                  )}
+                  <button disabled={isBusy} onClick={() => refreshMails()} type="button">
+                    {t('mail.refresh')}
+                  </button>
+                </div>
 
-            {visibleMails.length === 0 ? (
-              <p className="mail-empty">{t('mail.empty')}</p>
-            ) : (
-              <div className="mail-date-groups">
-                {groupedMails.map((group) => (
-                  <section className="mail-date-group" key={group.date}>
-                    <h3>{group.date}</h3>
+                {visibleMails.length === 0 ? (
+                  <p className="mail-empty">{t('mail.empty')}</p>
+                ) : (
+                  <div className="mail-date-groups">
                     <div className="mail-list" role="list">
-                      {group.items.map((mail) => (
-                        <button
-                          aria-pressed={selectedMailId === mail.id}
-                          className={`mail-list-item mail-priority-${mail.effective_importance} mail-read-${mail.read_status ?? 'unread'}`}
-                          key={mail.id}
-                          onClick={() => handleSelectMail(mail)}
-                          type="button"
-                        >
-                          <span className="mail-list-time">{formatTime(mail.received_at)}</span>
-                          <strong>{mail.subject ?? t('mail.noSubject')}</strong>
-                          <span>{mail.from_name ?? mail.from_address}</span>
-                          <span>
-                            {priorityLabel(mail)} | {mail.processed_status}
-                            {mail.pending_reason !== null ? ` | ${t('mail.locked')}` : ''}
-                          </span>
-                        </button>
+                      {visibleMails.map((mail, index) => (
+                        <div className="mail-list-entry" key={mail.id}>
+                          {isSearchMode &&
+                            shouldShowMailGroupLabel(
+                              mail,
+                              index,
+                              visibleMails,
+                              searchSort,
+                            ) && (
+                              <div className="mail-list-group-label">
+                                <span>{groupLabelForMail(mail, searchSort)}</span>
+                              </div>
+                            )}
+                          <article
+                            className={`mail-list-item ${mailPriorityClass(mail.effective_importance)} mail-read-${mail.read_status ?? 'unread'}`}
+                            onClick={() => navigateTo(`/mail/${encodeURIComponent(mail.id)}`)}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter' || event.key === ' ') {
+                                event.preventDefault()
+                                navigateTo(`/mail/${encodeURIComponent(mail.id)}`)
+                              }
+                            }}
+                            role="link"
+                            tabIndex={0}
+                          >
+                            <div className="mail-list-sender-media">
+                              <span className="mail-list-time">{formatTime(mail.received_at)}</span>
+                              <img
+                                alt={t('mail.senderAvatarAlt', {
+                                  name: senderDisplayName(mail),
+                                })}
+                                src={senderAvatarUrl(mail)}
+                              />
+                            </div>
+                            <div className="mail-list-main">
+                              <strong>{mail.subject ?? t('mail.noSubject')}</strong>
+                              <span>{senderDisplayName(mail)}</span>
+                            </div>
+                            <p className="mail-list-summary">
+                              {mailSummary(mail) ?? ''}
+                            </p>
+                            <div className="mail-list-cases">
+                              {(mail.case_links ?? []).length > 0 ? (
+                                mail.case_links?.map((caseLink) => (
+                                  <span key={caseLink.id}>{caseLink.title}</span>
+                                ))
+                              ) : (
+                                <span>{t('mail.noCase')}</span>
+                              )}
+                            </div>
+                          </article>
+                        </div>
                       ))}
                     </div>
-                  </section>
-                ))}
-                {nextCursor !== null && (
-                  <button
-                    className="mail-load-more"
-                    disabled={isBusy}
-                    onClick={handleLoadMore}
-                    type="button"
-                  >
-                    {t('mail.loadMore')}
-                  </button>
+                    {nextCursor !== null && (
+                      <button
+                        className="mail-load-more"
+                        disabled={isBusy}
+                        onClick={handleLoadMore}
+                        type="button"
+                      >
+                        {t('mail.loadMore')}
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
-            )}
+            </section>
           </div>
 
-          <div className="mail-panel">
-            <div className="section-heading">
-              <h2>{t('mail.detail.heading')}</h2>
-            </div>
-
-            {lockedMail !== null ? (
-              <article className="mail-detail mail-pending-lock">
-                <header>
-                  <p>{lockedMail.from_address}</p>
-                  <h3>{lockedMail.subject ?? t('mail.noSubject')}</h3>
-                  <span>{lockedMail.pending_reason}</span>
-                </header>
-                <p>{t('mail.pending.locked')}</p>
-              </article>
-            ) : detail === null ? (
-              <p className="mail-empty">{t('mail.detail.empty')}</p>
-            ) : (
-              <article className="mail-detail">
-                <header>
-                  <p>{detail.message.from_address}</p>
-                  <h3>{detail.message.subject ?? t('mail.noSubject')}</h3>
-                  <span>
-                    {detail.auto_state.effective_importance} |{' '}
-                    {detail.user_state.processed_status} | {detail.user_state.read_status}
+          <aside className="mail-side-column">
+            {!isSearchMode && (
+              <section aria-label={t('mail.calendar.label')} className="mail-panel mail-calendar-panel">
+              <button className="mail-calendar-today" onClick={jumpToToday} type="button">
+                {t('mail.today')}
+              </button>
+              <div className="mail-calendar-heading">
+                <button
+                  aria-label={t('mail.previousMonth')}
+                  disabled={isBusy}
+                  onClick={() => setCalendarMonth((currentMonth) => addMonths(currentMonth, -1))}
+                  type="button"
+                >
+                  {'<'}
+                </button>
+                <strong>{monthLabel(calendarMonth)}</strong>
+                <button
+                  aria-label={t('mail.nextMonth')}
+                  disabled={isBusy}
+                  onClick={() => setCalendarMonth((currentMonth) => addMonths(currentMonth, 1))}
+                  type="button"
+                >
+                  {'>'}
+                </button>
+              </div>
+              <div aria-label={t('mail.calendar.label')} className="mail-calendar-grid">
+                {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((weekday) => (
+                  <span className="mail-calendar-weekday" key={weekday}>
+                    {weekday}
                   </span>
-                </header>
-
-                <dl>
-                  <div>
-                    <dt>{t('mail.replyTo')}</dt>
-                    <dd>{detail.message.reply_to_address ?? t('common.none')}</dd>
-                  </div>
-                  <div>
-                    <dt>{t('mail.llmRun')}</dt>
-                    <dd>{detail.auto_state.llm_run_id ?? t('common.none')}</dd>
-                  </div>
-                  <div>
-                    <dt>{t('mail.pendingReason')}</dt>
-                    <dd>{detail.auto_state.pending_reason ?? t('common.none')}</dd>
-                  </div>
-                </dl>
-
-                <pre>{detail.message.body_text ?? t('mail.noBody')}</pre>
-
-                <div className="mail-actions">
-                  {['High', 'Middle', 'Low', 'Skip'].map((importance) => (
+                ))}
+                {selectedMonthDays.map((date, index) => {
+                  if (date === null) {
+                    return (
+                      <span
+                        aria-hidden="true"
+                        className="mail-calendar-empty"
+                        key={`empty-${index}`}
+                      />
+                    )
+                  }
+                  const count = mailDateCounts.get(date) ?? 0
+                  const hasMail = count > 0
+                  return (
                     <button
-                      disabled={isBusy || detail.auto_state.pending_reason !== null}
-                      key={importance}
-                      onClick={() =>
-                        mutateDetail(() =>
-                          updateMailImportance(detail.message.id, importance),
-                        )
-                      }
+                      aria-current={date === selectedDate ? 'date' : undefined}
+                      aria-label={hasMail ? t('mail.calendar.openDate', { date, count }) : date}
+                      className={hasMail ? 'mail-calendar-day' : 'mail-calendar-day mail-calendar-day-empty'}
+                      disabled={!hasMail || isBusy}
+                      key={date}
+                      onClick={() => jumpToMailDate(date)}
                       type="button"
                     >
-                      {importance}
+                      {Number(date.slice(8, 10))}
                     </button>
-                  ))}
-                  {detail.user_state.processed_status === 'processed' ? (
-                    <button
-                      disabled={isBusy}
-                      onClick={() => mutateDetail(() => unprocessMail(detail.message.id))}
-                      type="button"
-                    >
-                      {t('mail.unprocess')}
-                    </button>
-                  ) : (
-                    <button
-                      disabled={isBusy}
-                      onClick={() => mutateDetail(() => processMail(detail.message.id))}
-                      type="button"
-                    >
-                      {t('mail.process')}
-                    </button>
-                  )}
-                  {detail.user_state.read_status === 'read' ? (
-                    <button
-                      disabled={isBusy}
-                      onClick={() => mutateDetail(() => markMailUnread(detail.message.id))}
-                      type="button"
-                    >
-                      {t('mail.markUnread')}
-                    </button>
-                  ) : (
-                    <button
-                      disabled={isBusy}
-                      onClick={() => mutateDetail(() => markMailRead(detail.message.id))}
-                      type="button"
-                    >
-                      {t('mail.markRead')}
-                    </button>
-                  )}
-                </div>
-              </article>
+                  )
+                })}
+              </div>
+              </section>
             )}
-          </div>
-        </section>
+
+            <section aria-labelledby="mail-search-heading" className="mail-panel mail-search-panel">
+              <div className="section-heading">
+                <h2 id="mail-search-heading">{t('mail.search.heading')}</h2>
+              </div>
+              <form className="mail-search-form" onSubmit={handleSearch}>
+                <input
+                  aria-label={t('mail.search.label')}
+                  onChange={(event) => setSearchText(event.target.value)}
+                  placeholder={t('mail.search.placeholder')}
+                  value={searchText}
+                />
+                <select
+                  aria-label={t('mail.search.sort')}
+                  onChange={(event) => setSearchSort(event.target.value as SearchSort)}
+                  value={searchSort}
+                >
+                  <option value="newest">{t('mail.sort.newest')}</option>
+                  <option value="importance">{t('mail.sort.importance')}</option>
+                </select>
+                <select
+                  aria-label={t('mail.pageSize')}
+                  onChange={(event) => setPageSize(Number(event.target.value))}
+                  value={pageSize}
+                >
+                  <option value={10}>10</option>
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                </select>
+                <div className="mail-search-actions">
+                  <button disabled={isBusy} type="submit">
+                    {t('mail.search.submit')}
+                  </button>
+                  <button disabled={isBusy || !isSearchMode} onClick={clearSearch} type="button">
+                    {t('mail.search.clear')}
+                  </button>
+                </div>
+              </form>
+            </section>
+          </aside>
+        </div>
       </div>
     </main>
   )

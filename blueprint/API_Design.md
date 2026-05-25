@@ -725,6 +725,14 @@ Phase 4 initial implementation scope:
 - `cursor`: opaque cursor returned as `next_cursor`; ordering is `received_at DESC, id ASC`.
 - List items include `received_date`, `read_status`, `read_at`, and `importance_rank` so the frontend can group by received day and sort the visible page by priority without changing cursor semantics.
 - For the daily mail UI, the frontend should use `tab` and date range filters for date masks. For search UI, it should use `q` with `limit/cursor`; sorting such as "newest first" vs "priority first" is applied to the currently visible N results.
+- Phase 4 send requests are included only while they are pre-send/cancelable.
+  A send-only request with no reply target is exposed as a provisional outgoing
+  list item in the processed/Done tab for its `scheduled_at` date. It uses
+  `effective_importance = sent`, `processed_status = processed`, and
+  `read_status = read`.
+- Normal `Send` is intentionally modeled as scheduled send at
+  `now(JST) + 1 minute`; explicit `Schedule Send` uses the user-selected
+  `scheduled_at`.
 
 Response item:
 
@@ -778,6 +786,50 @@ Response data:
   "available_actions": []
 }
 ```
+
+Phase 4 send-request detail:
+
+- `{message_id}` may be a `mail_send_requests.id` for a send-only pre-send
+  request.
+- The response shape stays the same as mail detail.
+- `message` is synthesized from the send request.
+- `thread_messages` is empty for send-only requests.
+- `scheduled_send_requests` contains the visible request.
+- Reply send requests are shown inside the reply target thread.
+
+### 7.2.1 Mail send requests
+
+External Gmail send is not active in Phase 4 mock mode. The app uses
+`mail_send_requests` to represent cancelable pre-send requests.
+
+```http
+POST /api/v1/mails/send
+POST /api/v1/mails/send-requests/{send_request_id}/send-now
+PATCH /api/v1/mails/send-requests/{send_request_id}/schedule
+POST /api/v1/mails/send-requests/{send_request_id}/cancel
+GET /api/v1/mails/send-requests
+```
+
+Status values:
+
+```text
+scheduled_mock
+queued_mock
+sending_mock
+sent_mock
+canceled
+```
+
+Rules:
+
+- `POST /send` always creates a scheduled request in current Phase 4 behavior.
+- If `scheduled_at` is omitted, the API sets it to `now(JST) + 1 minute`.
+- `send-now` changes the request to immediate queue execution.
+- `schedule` changes the scheduled time.
+- `cancel` marks the request canceled and removes it from normal mail UI.
+- After real Gmail send succeeds, normal UI should rely on Gmail sync for the
+  authoritative sent message and avoid showing both the internal request and the
+  synced SENT message.
 
 監査ログ:
 
