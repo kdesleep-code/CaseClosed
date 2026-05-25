@@ -70,7 +70,7 @@ function composeReplyBody(message: MailThreadMessage) {
     .split('\n')
     .map((line) => `> ${line}`)
     .join('\n')
-  return `\n\nOn ${formatDateTime(message.received_at)}, ${message.from_address} wrote:\n${quotedBody}`
+  return `On ${formatDateTime(message.received_at)}, ${message.from_address} wrote:\n${quotedBody}`
 }
 
 function composeFollowUpBody(message: MailThreadMessage) {
@@ -78,14 +78,14 @@ function composeFollowUpBody(message: MailThreadMessage) {
     .split('\n')
     .map((line) => `> ${line}`)
     .join('\n')
-  return `\n\nOn ${formatDateTime(message.received_at)}, I wrote:\n${quotedBody}`
+  return `On ${formatDateTime(message.received_at)}, I wrote:\n${quotedBody}`
 }
 
 function replyHrefFor(message: MailThreadMessage) {
   const params = new URLSearchParams({
     to: message.reply_to_address ?? message.from_address,
     subject: message.subject ?? '',
-    body: composeReplyBody(message),
+    auto_body: composeReplyBody(message),
     reply_to_message_id: message.id,
   })
   const ccRecipients = recipientsFor(message.cc_addresses, message.cc_recipients)
@@ -96,12 +96,16 @@ function replyHrefFor(message: MailThreadMessage) {
   return `/mail/compose?${params.toString()}`
 }
 
-function composeAddressesHrefFor(message: MailThreadMessage, body: string) {
+function composeAddressesHrefFor(
+  message: MailThreadMessage,
+  body: string,
+  bodyMode: 'manual' | 'auto',
+) {
   const params = new URLSearchParams({
     to: message.to_addresses.join(', '),
     subject: message.subject ?? '',
-    body,
   })
+  params.set(bodyMode === 'manual' ? 'manual_body' : 'auto_body', body)
   if (message.cc_addresses.length > 0) {
     params.set('cc', message.cc_addresses.join(', '))
   }
@@ -112,11 +116,11 @@ function composeAddressesHrefFor(message: MailThreadMessage, body: string) {
 }
 
 function resendHrefFor(message: MailThreadMessage) {
-  return composeAddressesHrefFor(message, mailBody(message))
+  return composeAddressesHrefFor(message, mailBody(message), 'manual')
 }
 
 function followUpHrefFor(message: MailThreadMessage) {
-  return composeAddressesHrefFor(message, composeFollowUpBody(message))
+  return composeAddressesHrefFor(message, composeFollowUpBody(message), 'auto')
 }
 
 function scheduledAtLocalValue(sendRequest: MailSendRequest) {

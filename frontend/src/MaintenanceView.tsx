@@ -19,11 +19,13 @@ import type {
   PendingMail,
 } from './phase2Api'
 import {
+  applyMailLlmBlockFilter,
   ingestMockMail,
+  listLlmBlockedMails,
   listMailSendRequests,
   runNextJob,
 } from './phase4Api'
-import type { MailSendRequest } from './phase4Api'
+import type { LlmBlockedMail, MailSendRequest } from './phase4Api'
 
 const usageMetrics = [
   { key: 'database', labelKey: 'maintenance.metric.database' },
@@ -219,6 +221,7 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
     initialData?.pendingMails ?? [],
   )
   const [sendRequests, setSendRequests] = useState<MailSendRequest[] | null>(null)
+  const [llmBlockedMails, setLlmBlockedMails] = useState<LlmBlockedMail[] | null>(null)
   const [debugSubject, setDebugSubject] = useState('Review mock mail')
   const [debugFromAddress, setDebugFromAddress] = useState(
     'review.mock.sender@example.com',
@@ -227,6 +230,8 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
     'This is a mock mail for review.',
   )
   const [debugNotice, setDebugNotice] = useState<string | null>(null)
+  const [llmBlockQuery, setLlmBlockQuery] = useState('password')
+  const [llmBlockReason, setLlmBlockReason] = useState('May contain password.')
   const [isDebugBusy, setIsDebugBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
@@ -295,6 +300,30 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
     }
   }, [activeTab, sendRequests])
 
+  useEffect(() => {
+    if (activeTab !== 'debug' || llmBlockedMails !== null) {
+      return
+    }
+
+    let isMounted = true
+    listLlmBlockedMails()
+      .then((nextMails) => {
+        if (isMounted) {
+          setLlmBlockedMails(nextMails)
+        }
+      })
+      .catch((requestError) => {
+        if (isMounted) {
+          setError(describeError(requestError))
+          setLlmBlockedMails([])
+        }
+      })
+
+    return () => {
+      isMounted = false
+    }
+  }, [activeTab, llmBlockedMails])
+
   async function handleRetry(job: Job) {
     setBusyId(job.id)
     setError(null)
@@ -344,6 +373,10 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
     setSendRequests(await listMailSendRequests())
   }
 
+  async function refreshLlmBlockedMails() {
+    setLlmBlockedMails(await listLlmBlockedMails())
+  }
+
   async function handleDebugRunNextJob() {
     setError(null)
     setDebugNotice(null)
@@ -356,6 +389,7 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
           : t('mail.job.ran', { jobId: result.job_id }),
       )
       await refreshSendRequests()
+      await refreshLlmBlockedMails()
     } catch (requestError) {
       setError(describeError(requestError))
     } finally {
@@ -387,6 +421,30 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
             })
           : t('mail.mock.ingested'),
       )
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsDebugBusy(false)
+    }
+  }
+
+  async function handleApplyLlmBlockFilter(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setError(null)
+    setDebugNotice(null)
+    setIsDebugBusy(true)
+    try {
+      const result = await applyMailLlmBlockFilter(
+        llmBlockQuery,
+        llmBlockReason.trim() === '' ? null : llmBlockReason,
+      )
+      setDebugNotice(
+        t('maintenance.debug.llmBlockApplied', {
+          matched: result.matched,
+          changed: result.changed,
+        }),
+      )
+      await refreshLlmBlockedMails()
     } catch (requestError) {
       setError(describeError(requestError))
     } finally {
@@ -860,6 +918,82 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                       {t('mail.mock.ingest')}
                     </button>
                   </form>
+                </section>
+
+                <section
+                  aria-labelledby="maintenance-llm-block-heading"
+                  className="maintenance-section"
+                >
+                  <div className="section-heading">
+                    <h3 id="maintenance-llm-block-heading">
+                      {t('maintenance.debug.llmBlock')}
+                    </h3>
+                    <button
+                      disabled={isDebugBusy}
+                      onClick={() => {
+                        void refreshLlmBlockedMails()
+                      }}
+                      type="button"
+                    >
+                      {t('mail.refresh')}
+                    </button>
+                  </div>
+
+                  <form className="mail-mock-form" onSubmit={handleApplyLlmBlockFilter}>
+                    <label>
+                      <span>{t('maintenance.debug.llmBlockQuery')}</span>
+                      <input
+                        onChange={(event) => setLlmBlockQuery(event.target.value)}
+                        required
+                        value={llmBlockQuery}
+                      />
+                    </label>
+                    <label>
+                      <span>{t('maintenance.debug.llmBlockReason')}</span>
+                      <input
+                        onChange={(event) => setLlmBlockReason(event.target.value)}
+                        value={llmBlockReason}
+                      />
+                    </label>
+                    <button disabled={isDebugBusy} type="submit">
+                      {t('maintenance.debug.applyLlmBlock')}
+                    </button>
+                  </form>
+
+                  <div className="maintenance-table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th scope="col">{t('common.id')}</th>
+                          <th scope="col">{t('mail.from')}</th>
+                          <th scope="col">{t('mail.subject')}</th>
+                          <th scope="col">{t('maintenance.debug.reason')}</th>
+                          <th scope="col">{t('maintenance.debug.blockedAt')}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {llmBlockedMails === null && (
+                          <tr>
+                            <td colSpan={5}>{t('maintenance.debug.loading')}</td>
+                          </tr>
+                        )}
+                        {llmBlockedMails?.map((mail) => (
+                          <tr key={mail.id}>
+                            <td>{mail.id}</td>
+                            <td>{mail.from_address}</td>
+                            <td>{mail.subject ?? t('mail.noSubject')}</td>
+                            <td>{mail.llm_block_reason ?? t('common.none')}</td>
+                            <td>{mail.llm_blocked_at ?? t('common.none')}</td>
+                          </tr>
+                        ))}
+                        {llmBlockedMails?.length === 0 && (
+                          <tr>
+                            <td colSpan={5}>{t('maintenance.debug.empty')}</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
                 </section>
 
                 <section

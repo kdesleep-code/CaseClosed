@@ -45,6 +45,9 @@ export type MailListItem = {
   suggested_importance: string | null
   llm_run_id: string | null
   pending_reason: string | null
+  llm_blocked?: boolean
+  llm_block_reason?: string | null
+  llm_blocked_at?: string | null
   sender_contact?: {
     id: string
     display_name: string
@@ -132,6 +135,9 @@ export type MailDetail = {
     llm_run_id: string | null
     effective_importance: string
     pending_reason: string | null
+    llm_blocked?: boolean
+    llm_block_reason?: string | null
+    llm_blocked_at?: string | null
   }
   summary: MailSummary | null
   available_actions: string[]
@@ -176,6 +182,21 @@ export type MailSendRequest = {
 }
 
 export type ScheduledSendRequest = MailSendRequest
+
+export type LlmBlockedMail = {
+  id: string
+  received_at: string
+  subject: string | null
+  from_address: string
+  llm_block_reason: string | null
+  llm_blocked_at: string | null
+}
+
+export type MailLlmBlockFilterResult = {
+  matched: number
+  changed: number
+  items: LlmBlockedMail[]
+}
 
 export type MailListFilters = {
   tab?: 'all' | 'pending' | 'unprocessed' | 'processed' | 'skip'
@@ -351,6 +372,24 @@ export async function listMailSendRequests(): Promise<MailSendRequest[]> {
     '/api/v1/mails/send-requests',
   )
   return data.items
+}
+
+export async function listLlmBlockedMails(): Promise<LlmBlockedMail[]> {
+  const data = await request<ItemsResponse<LlmBlockedMail>>(
+    '/api/v1/mails/llm-blocked',
+  )
+  return data.items
+}
+
+export function applyMailLlmBlockFilter(
+  q: string,
+  reason: string | null,
+): Promise<MailLlmBlockFilterResult> {
+  return request('/api/v1/mails/llm-block-filter', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ q, reason }),
+  })
 }
 
 export function runNextJob(): Promise<{ job_id: string | null }> {

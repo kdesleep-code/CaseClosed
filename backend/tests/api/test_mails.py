@@ -115,6 +115,52 @@ def test_mail_detail_returns_message_state_and_available_actions(client) -> None
     assert "set_importance" in data["available_actions"]
 
 
+def test_llm_block_filter_marks_matching_mail_and_worker_skips_llm(
+    client,
+    database_path,
+) -> None:
+    message_id = create_known_sender_mail(
+        client,
+        subject="Password reset notice",
+        body_text="Your temporary password is hunter2.",
+    )
+
+    response = client.post(
+        f"{MAILS_URL}/llm-block-filter",
+        json={"q": "temporary password", "reason": "May contain password."},
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["matched"] == 1
+    assert data["changed"] == 1
+    assert data["items"][0]["id"] == message_id
+    assert data["items"][0]["llm_block_reason"] == "May contain password."
+
+    detail_response = client.get(f"{MAILS_URL}/{message_id}")
+    assert detail_response.status_code == 200
+    detail = detail_response.json()["data"]
+    assert detail["auto_state"]["llm_blocked"] is True
+    assert detail["auto_state"]["llm_block_reason"] == "May contain password."
+    assert detail["message"]["llm_blocked"] is True
+
+    run_response = client.post("/api/v1/jobs/run-next")
+    assert run_response.status_code == 200
+    with sqlite3.connect(database_path) as connection:
+        llm_run_count = connection.execute("SELECT COUNT(*) FROM llm_runs").fetchone()
+        job_row = connection.execute(
+            """
+            SELECT status, result_json
+            FROM jobs
+            WHERE job_type = 'mail_importance_classification'
+            """
+        ).fetchone()
+
+    assert llm_run_count == (0,)
+    assert job_row[0] == "succeeded"
+    assert json.loads(job_row[1])["reason"] == "llm_blocked"
+
+
 def test_send_mail_records_mock_send_request(client, database_path) -> None:
     message_id = create_known_sender_mail(
         client,

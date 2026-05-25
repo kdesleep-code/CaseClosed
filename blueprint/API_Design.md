@@ -1132,7 +1132,8 @@ Request:
   "display_name": "...",
   "organization": "...",
   "role": "...",
-  "memo": "...",
+  "user_memo": "...",
+  "ai_memo": "...",
   "status": "active|skipped",
   "kind": "person|mailing_list",
   "sender_resolution_mode": "self|reply_to",
@@ -1203,7 +1204,8 @@ PATCH /api/v1/contacts/{contact_id}
 {
   "display_name": "...",
   "avatar_url": "...",
-  "memo": "...",
+  "user_memo": "...",
+  "ai_memo": "...",
   "status": "active|skipped|archived",
   "kind": "person|mailing_list",
   "sender_resolution_mode": "self|reply_to",
@@ -2616,3 +2618,23 @@ POST /api/v1/contacts/unresolved-from-addresses/{encoded_email}/generate-prefill
 ```
 
 初期運用ではPendingが多く出ることを想定し、メール詳細画面内だけでなく、まとめて処理できる独立画面を用意する。
+# Phase 4 Contact Memo Split Note
+
+Contact memo fields are split into two API fields.
+
+- `user_memo`: user-owned memo edited from the Contact UI.
+- `ai_memo`: AI-owned memo updated by future Contact context update workers.
+- Legacy `memo` payloads may be accepted only as compatibility input and are treated as `user_memo`.
+- Ordinary Contact edit/save operations must not overwrite `ai_memo`.
+
+# Phase 4 Mail LLM Block API Note
+
+Sensitive mails can be excluded from all LLM body submission.
+
+```http
+POST /api/v1/mails/llm-block-filter
+GET  /api/v1/mails/llm-blocked
+```
+
+`POST /api/v1/mails/llm-block-filter` accepts a space-separated query and a reason. Matching mail instances are marked with `llm_blocked = true`.
+Workers must treat this flag as authoritative and skip importance classification, summary, translation, and future Contact AI memo updates for the mail body.

@@ -281,6 +281,8 @@ class Contact(Base):
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
     avatar_url: Mapped[str | None] = mapped_column(Text)
     memo: Mapped[str | None] = mapped_column(Text)
+    user_memo: Mapped[str | None] = mapped_column(Text)
+    ai_memo: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
     kind: Mapped[str] = mapped_column(Text, nullable=False, default="person")
     sender_resolution_mode: Mapped[str] = mapped_column(
@@ -477,6 +479,9 @@ class MailAutoState(Base):
     pending_from_address_id: Mapped[str | None] = mapped_column(
         ForeignKey("contact_email_addresses.id")
     )
+    llm_blocked: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    llm_block_reason: Mapped[str | None] = mapped_column(Text)
+    llm_blocked_at: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)

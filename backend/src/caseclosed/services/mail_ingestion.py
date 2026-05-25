@@ -193,6 +193,9 @@ def ingest_mock_mail(
                 if sender_resolution.pending_address is not None
                 else None
             ),
+            llm_blocked=0,
+            llm_block_reason=None,
+            llm_blocked_at=None,
             created_at=now,
             updated_at=now,
             version=1,
@@ -397,7 +400,10 @@ def apply_contact_mail_importance_rule(
     if sender_resolution.fixed_importance is not None:
         auto_state.effective_importance = sender_resolution.fixed_importance
         queued_job_id = None
-        if sender_resolution.fixed_importance in SUMMARY_TARGET_IMPORTANCE:
+        if (
+            sender_resolution.fixed_importance in SUMMARY_TARGET_IMPORTANCE
+            and not bool(auto_state.llm_blocked)
+        ):
             queued_job_id = enqueue_summary_job(session, message, now)
         return AppliedContactMailRule(
             changed=True,
@@ -408,15 +414,21 @@ def apply_contact_mail_importance_rule(
     auto_state.effective_importance = (
         "high" if auto_state.external_importance == "high" else "unclassified"
     )
-    queued_job_id = enqueue_importance_job(
-        session,
-        message,
-        now,
-        llm_instruction=sender_resolution.llm_instruction,
-    )
+    queued_job_id = None
+    if not bool(auto_state.llm_blocked):
+        queued_job_id = enqueue_importance_job(
+            session,
+            message,
+            now,
+            llm_instruction=sender_resolution.llm_instruction,
+        )
     return AppliedContactMailRule(
         changed=True,
-        reason="released_to_importance_job",
+        reason=(
+            "released_but_llm_blocked"
+            if bool(auto_state.llm_blocked)
+            else "released_to_importance_job"
+        ),
         queued_job_id=queued_job_id,
     )
 

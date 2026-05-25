@@ -95,6 +95,9 @@ def test_phase_4_migrations_add_mail_tables(
         "llm_run_id",
         "pending_reason",
         "pending_from_address_id",
+        "llm_blocked",
+        "llm_block_reason",
+        "llm_blocked_at",
     } <= auto_state_columns
     assert {"read_status", "read_at"} <= user_state_columns
     assert {

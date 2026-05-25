@@ -101,6 +101,14 @@ def ensure_runtime_schema() -> None:
     with engine.begin() as connection:
         if "avatar_url" not in contact_columns:
             connection.execute(text("ALTER TABLE contacts ADD COLUMN avatar_url TEXT"))
+        if "user_memo" not in contact_columns:
+            connection.execute(text("ALTER TABLE contacts ADD COLUMN user_memo TEXT"))
+            if "memo" in contact_columns:
+                connection.execute(
+                    text("UPDATE contacts SET user_memo = memo WHERE user_memo IS NULL")
+                )
+        if "ai_memo" not in contact_columns:
+            connection.execute(text("ALTER TABLE contacts ADD COLUMN ai_memo TEXT"))
         if "mail_importance_rule_action" not in contact_columns:
             connection.execute(
                 text(
@@ -118,6 +126,21 @@ def ensure_runtime_schema() -> None:
             )
         if "mail_auto_state" in table_names and "llm_run_id" not in mail_auto_state_columns:
             connection.execute(text("ALTER TABLE mail_auto_state ADD COLUMN llm_run_id TEXT"))
+        if "mail_auto_state" in table_names and "llm_blocked" not in mail_auto_state_columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE mail_auto_state "
+                    "ADD COLUMN llm_blocked INTEGER NOT NULL DEFAULT 0"
+                )
+            )
+        if "mail_auto_state" in table_names and "llm_block_reason" not in mail_auto_state_columns:
+            connection.execute(
+                text("ALTER TABLE mail_auto_state ADD COLUMN llm_block_reason TEXT")
+            )
+        if "mail_auto_state" in table_names and "llm_blocked_at" not in mail_auto_state_columns:
+            connection.execute(
+                text("ALTER TABLE mail_auto_state ADD COLUMN llm_blocked_at TEXT")
+            )
         if "mail_user_state" in table_names and "read_status" not in mail_user_state_columns:
             connection.execute(
                 text(

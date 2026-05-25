@@ -465,6 +465,138 @@ describe('Phase 4 mail screen', () => {
     })
   })
 
+  it('combines editable body and auto body before sending', async () => {
+    const user = userEvent.setup()
+    window.history.pushState(
+      {},
+      '',
+      '/mail/compose?to=receiver%40example.com&subject=Combined&manual_body=Manual%20line&auto_body=Auto%20line',
+    )
+    let sentPayload: unknown = null
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        const path = input.toString()
+        if (path === '/api/v1/auth/session') {
+          return activeSessionResponse()
+        }
+        if (path === '/api/v1/mails/send') {
+          sentPayload = JSON.parse(String(init?.body ?? '{}'))
+          return apiResponse(200, {
+            ok: true,
+            data: {
+              id: 'mail_send_combined',
+              status: 'scheduled_mock',
+              to_addresses: ['receiver@example.com'],
+              cc_addresses: [],
+              bcc_addresses: [],
+              subject: 'Combined',
+              body_text: 'Manual line\n\nAuto line',
+              attachment_names: [],
+              reply_to_message_id: null,
+              sent_message_id: null,
+              scheduled_at: '2026-05-25T10:01:00+09:00',
+              created_at: '2026-05-25T10:00:00+09:00',
+              updated_at: '2026-05-25T10:00:00+09:00',
+              version: 1,
+            },
+          })
+        }
+        if (path === '/api/v1/mails/mail_send_combined') {
+          return apiResponse(200, {
+            ok: true,
+            data: {
+              message: {
+                id: 'mail_send_combined',
+                gmail_message_id: 'provisional:mail_send_combined',
+                gmail_thread_id: 'provisional_thread_mail_send_combined',
+                thread_id: 'provisional_thread_mail_send_combined',
+                received_at: '2026-05-25T10:01:00+09:00',
+                received_date: '2026-05-25',
+                subject: 'Combined',
+                from_address: 'caseclosed.me@example.local',
+                from_name: 'CaseClosed',
+                from_contact: null,
+                sender_contact: null,
+                sender_address: null,
+                reply_to_address: null,
+                to_addresses: ['receiver@example.com'],
+                cc_addresses: [],
+                bcc_addresses: [],
+                to_recipients: [{ email_address: 'receiver@example.com', contact: null }],
+                cc_recipients: [],
+                bcc_recipients: [],
+                message_id_header: null,
+                in_reply_to_header: null,
+                references_header: null,
+                list_id: null,
+                snippet: 'Manual line',
+                gmail_link: null,
+                external_starred: false,
+                gmail_labels: ['SENT'],
+                body_text: 'Manual line\n\nAuto line',
+                body_html: null,
+                processed_status: 'processed',
+                read_status: 'read',
+                read_at: '2026-05-25T10:00:00+09:00',
+                user_importance: null,
+                effective_importance: 'sent',
+                importance_rank: 7,
+                external_importance: null,
+                suggested_importance: null,
+                llm_run_id: null,
+                pending_reason: null,
+                created_at: '2026-05-25T10:00:00+09:00',
+                updated_at: '2026-05-25T10:00:00+09:00',
+                version: 1,
+              },
+              thread_messages: [],
+              scheduled_send_requests: [],
+              user_state: {
+                user_importance: null,
+                processed_status: 'processed',
+                processed_at: '2026-05-25T10:00:00+09:00',
+                read_status: 'read',
+                read_at: '2026-05-25T10:00:00+09:00',
+                version: 1,
+              },
+              auto_state: {
+                external_importance: null,
+                suggested_importance: null,
+                llm_run_id: null,
+                effective_importance: 'sent',
+                pending_reason: null,
+              },
+              summary: null,
+              available_actions: [],
+            },
+          })
+        }
+        throw new Error(`Unexpected request: ${path}`)
+      }),
+    )
+
+    render(<App />)
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Compose Mail' }),
+    ).toBeInTheDocument()
+    expect(screen.getByLabelText('Body')).toHaveValue('Manual line')
+    await user.click(screen.getByRole('button', { name: 'Auto body' }))
+    expect(screen.getByLabelText('Auto body preview').textContent).toBe('Auto line')
+
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Combined' }),
+    ).toBeInTheDocument()
+    expect(sentPayload).toEqual(
+      expect.objectContaining({
+        body_text: 'Manual line\n\nAuto line',
+      }),
+    )
+  })
+
   it('ingests a mock mail and opens the detail view', async () => {
     const user = userEvent.setup()
     const createdMail = {
@@ -800,8 +932,14 @@ describe('Phase 4 mail screen', () => {
     expect(screen.getByLabelText('To')).toHaveValue('review.mock.sender@example.com')
     expect(screen.getByLabelText('Cc')).toHaveValue('team@example.com')
     expect(screen.getByLabelText('Subject')).toHaveValue('Review mock mail')
-    expect(screen.getByLabelText('Body')).toHaveValue(
-      '\n\nOn 2026-05-23 13:00:00 JST, review.mock.sender@example.com wrote:\n> This is a mock mail for review.',
+    expect(screen.getByLabelText('Body')).toHaveValue('')
+    expect(screen.getByRole('button', { name: 'Auto body' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    )
+    await user.click(screen.getByRole('button', { name: 'Auto body' }))
+    expect(screen.getByLabelText('Auto body preview').textContent).toBe(
+      'On 2026-05-23 13:00:00 JST, review.mock.sender@example.com wrote:\n> This is a mock mail for review.',
     )
 
     navigateTo('/mail/mail_new')
@@ -816,6 +954,7 @@ describe('Phase 4 mail screen', () => {
     expect(screen.getByLabelText('Cc')).toHaveValue('team@example.com')
     expect(screen.getByLabelText('Subject')).toHaveValue('Review mock mail')
     expect(screen.getByLabelText('Body')).toHaveValue('Sent body for resend.')
+    expect(screen.queryByRole('button', { name: 'Auto body' })).not.toBeInTheDocument()
 
     navigateTo('/mail/mail_new')
     expect(
@@ -828,8 +967,10 @@ describe('Phase 4 mail screen', () => {
     expect(screen.getByLabelText('To')).toHaveValue('review.mock.sender@example.com')
     expect(screen.getByLabelText('Cc')).toHaveValue('team@example.com')
     expect(screen.getByLabelText('Subject')).toHaveValue('Review mock mail')
-    expect(screen.getByLabelText('Body')).toHaveValue(
-      '\n\nOn 2026-05-23 13:10:00 JST, I wrote:\n> Sent body for resend.',
+    expect(screen.getByLabelText('Body')).toHaveValue('')
+    await user.click(screen.getByRole('button', { name: 'Auto body' }))
+    expect(screen.getByLabelText('Auto body preview').textContent).toBe(
+      'On 2026-05-23 13:10:00 JST, I wrote:\n> Sent body for resend.',
     )
 
     window.history.pushState({}, '', '/')
@@ -1322,6 +1463,23 @@ describe('Phase 2 maintenance screen', () => {
             },
           })
         }
+        if (path === '/api/v1/mails/llm-blocked') {
+          return apiResponse(200, {
+            ok: true,
+            data: {
+              items: [
+                {
+                  id: 'mail_blocked_review',
+                  received_at: '2026-05-25T02:20:00+09:00',
+                  subject: 'Password notice',
+                  from_address: 'secret@example.com',
+                  llm_block_reason: 'May contain password.',
+                  llm_blocked_at: '2026-05-25T02:21:00+09:00',
+                },
+              ],
+            },
+          })
+        }
         if (path === '/api/v1/jobs/run-next' && init?.method === 'POST') {
           return apiResponse(200, {
             ok: true,
@@ -1349,6 +1507,7 @@ describe('Phase 2 maintenance screen', () => {
 
     expect(screen.getByRole('heading', { name: 'Debug' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Debug tools' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'LLM block filter' })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Run next job' }))
     expect(await screen.findByText('Job ran: job_debug_run')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Ingest mock mail' }))
@@ -1366,6 +1525,9 @@ describe('Phase 2 maintenance screen', () => {
     expect(
       screen.getByText('Cc: team@example.com / Bcc: - / Reply target: mail_reply_source'),
     ).toBeInTheDocument()
+    expect(screen.getByRole('row', { name: /mail_blocked_review/ })).toHaveTextContent(
+      'Password notice',
+    )
   })
 
   it('caps the Jobs and Operations action badge at 9+', async () => {
@@ -1500,7 +1662,7 @@ describe('Phase 3 contacts screen', () => {
                   id: 'contact_student',
                   display_name: 'Example Student',
                   avatar_url: 'https://example.com/student.png',
-                  memo: 'Phase 3 dummy contact.',
+                  user_memo: 'Phase 3 dummy contact.',
                   status: 'active',
                   tags: ['student', 'lab', '遲第ｳ｢螟ｧ蟄ｦ'],
                   email_addresses: [
@@ -1523,7 +1685,7 @@ describe('Phase 3 contacts screen', () => {
                   id: 'contact_mailing_list',
                   display_name: 'Example List',
                   avatar_url: null,
-                  memo: 'Mailing list dummy contact.',
+                  user_memo: 'Mailing list dummy contact.',
                   status: 'skipped',
                   kind: 'mailing_list',
                   sender_resolution_mode: 'reply_to',
@@ -1634,7 +1796,7 @@ describe('Phase 3 contacts screen', () => {
                 id: 'contact_student',
                 display_name: 'Example Student',
                 avatar_url: null,
-                memo: null,
+                user_memo: null,
                   status: 'active',
                   tags: ['tsukuba', 'student'],
                   email_addresses: [],
@@ -1646,7 +1808,7 @@ describe('Phase 3 contacts screen', () => {
                 id: 'contact_kde',
                 display_name: 'KDE Student',
                 avatar_url: null,
-                memo: null,
+                user_memo: null,
                   status: 'active',
                   tags: ['tsukuba', 'student', 'KDE'],
                   email_addresses: [],
@@ -1658,7 +1820,7 @@ describe('Phase 3 contacts screen', () => {
                 id: 'contact_list',
                 display_name: 'Example List',
                 avatar_url: null,
-                memo: null,
+                user_memo: null,
                   status: 'skipped',
                   kind: 'mailing_list',
                   sender_resolution_mode: 'self',
@@ -1745,7 +1907,7 @@ describe('Phase 3 contacts screen', () => {
                 id: 'contact_student',
                 display_name: 'Example Student',
                 avatar_url: null,
-                memo: 'Phase 3 dummy contact.',
+                user_memo: 'Phase 3 dummy contact.',
                 status: 'active',
                 tags: ['student', 'lab'],
                 email_addresses: [
@@ -1782,7 +1944,7 @@ describe('Phase 3 contacts screen', () => {
                 id: 'contact_teacher',
                 display_name: 'Example Teacher',
                 avatar_url: null,
-                memo: 'Another dummy contact.',
+                user_memo: 'Another dummy contact.',
                 status: 'active',
                 tags: ['teacher'],
                 email_addresses: [
@@ -1812,7 +1974,7 @@ describe('Phase 3 contacts screen', () => {
             id: 'contact_student',
             display_name: 'Example Researcher',
             avatar_url: null,
-            memo: 'Updated memo.',
+            user_memo: 'Updated memo.',
             status: 'active',
             tags: ['lab', 'student', 'updated'],
             email_addresses: [
@@ -1857,7 +2019,7 @@ describe('Phase 3 contacts screen', () => {
             id: 'contact_student',
             display_name: 'Example Researcher',
             avatar_url: null,
-            memo: 'Updated memo.',
+            user_memo: 'Updated memo.',
             status: 'active',
             tags: ['lab', 'student', 'updated'],
             email_addresses: [
@@ -1914,7 +2076,7 @@ describe('Phase 3 contacts screen', () => {
             id: 'contact_student',
             display_name: 'Example Researcher',
             avatar_url: null,
-            memo: 'Updated memo.',
+            user_memo: 'Updated memo.',
             status: 'active',
             tags: ['lab', 'student', 'updated'],
             email_addresses: [
@@ -1959,7 +2121,7 @@ describe('Phase 3 contacts screen', () => {
             id: 'contact_student',
             display_name: 'Example Researcher',
             avatar_url: null,
-            memo: 'Updated memo.',
+            user_memo: 'Updated memo.',
             status: 'active',
             tags: ['lab', 'student', 'updated'],
             email_addresses: [
@@ -2004,7 +2166,7 @@ describe('Phase 3 contacts screen', () => {
             id: 'contact_student',
             display_name: 'Example Researcher',
             avatar_url: null,
-            memo: 'Updated memo.',
+            user_memo: 'Updated memo.',
             status: 'active',
             tags: ['lab', 'student', 'updated'],
             email_addresses: [
@@ -2050,7 +2212,7 @@ describe('Phase 3 contacts screen', () => {
               id: 'contact_student',
               display_name: 'Example Researcher',
               avatar_url: null,
-              memo: 'Updated memo.',
+              user_memo: 'Updated memo.',
               status: 'active',
               tags: ['lab', 'student', 'updated'],
               email_addresses: [
@@ -2075,7 +2237,7 @@ describe('Phase 3 contacts screen', () => {
               id: 'contact_teacher',
               display_name: 'Example Teacher',
               avatar_url: null,
-              memo: 'Another dummy contact.',
+              user_memo: 'Another dummy contact.',
               status: 'active',
               tags: ['teacher'],
               email_addresses: [
@@ -2150,8 +2312,8 @@ describe('Phase 3 contacts screen', () => {
     await user.click(screen.getByRole('button', { name: 'Clear contact display name' }))
     expect(screen.getByLabelText('Contact display name')).toHaveValue('')
     await user.type(screen.getByLabelText('Contact display name'), 'Example Researcher')
-    await user.clear(screen.getByLabelText('Contact memo'))
-    await user.type(screen.getByLabelText('Contact memo'), 'Updated memo.')
+    await user.clear(screen.getByLabelText('Contact user memo'))
+    await user.type(screen.getByLabelText('Contact user memo'), 'Updated memo.')
     await user.clear(screen.getByLabelText('Contact tags'))
     await user.type(screen.getByLabelText('Contact tags'), 'lab, student, updated')
     await user.click(screen.getByRole('button', { name: 'Save changes' }))
@@ -2164,7 +2326,7 @@ describe('Phase 3 contacts screen', () => {
         body: JSON.stringify({
           display_name: 'Example Researcher',
           avatar_url: null,
-          memo: 'Updated memo.',
+          user_memo: 'Updated memo.',
           status: 'active',
           kind: 'person',
           sender_resolution_mode: 'self',
@@ -2282,7 +2444,7 @@ describe('Phase 3 contacts screen', () => {
                 id: 'contact_existing',
                 display_name: 'Existing Contact',
                 avatar_url: null,
-                memo: null,
+                user_memo: null,
                 status: 'active',
                 tags: [],
                 email_addresses: [
@@ -2376,7 +2538,7 @@ describe('Phase 3 contacts screen', () => {
             id: `contact_${body.status}_${body.display_name.replaceAll(' ', '_')}`,
             display_name: body.display_name,
             avatar_url: null,
-            memo: '',
+            user_memo: '',
             status: body.status,
             tags: [],
             email_addresses: [],
@@ -2396,7 +2558,7 @@ describe('Phase 3 contacts screen', () => {
             id: 'contact_existing',
             display_name: 'Existing Contact',
             avatar_url: null,
-            memo: null,
+            user_memo: null,
             status: 'active',
             tags: [],
             email_addresses: [
@@ -2462,7 +2624,7 @@ describe('Phase 3 contacts screen', () => {
         method: 'POST',
         body: JSON.stringify({
           display_name: 'Unknown Sender',
-          memo: '',
+          user_memo: '',
           status: 'active',
           kind: 'person',
           sender_resolution_mode: 'self',
@@ -2491,7 +2653,7 @@ describe('Phase 3 contacts screen', () => {
         method: 'POST',
         body: JSON.stringify({
           display_name: 'List Sender',
-          memo: '',
+          user_memo: '',
           status: 'skipped',
           kind: 'mailing_list',
           sender_resolution_mode: 'reply_to',
@@ -2527,7 +2689,7 @@ describe('Phase 3 contacts screen', () => {
             id: 'contact_new',
             display_name: 'New Example',
             avatar_url: null,
-            memo: '',
+            user_memo: '',
             status: 'active',
             tags: [],
             email_addresses: [
@@ -2575,7 +2737,7 @@ describe('Phase 3 contacts screen', () => {
         method: 'POST',
         body: JSON.stringify({
           display_name: 'New Example',
-          memo: '',
+          user_memo: '',
           status: 'active',
           kind: 'person',
           sender_resolution_mode: 'self',
@@ -2598,6 +2760,6 @@ describe('Phase 3 contacts screen', () => {
       'true',
     )
     expect(screen.getByLabelText('Contact display name')).toHaveValue('New Example')
-    expect(screen.getByLabelText('Contact memo')).toHaveValue('')
+    expect(screen.getByLabelText('Contact user memo')).toHaveValue('')
   })
 })

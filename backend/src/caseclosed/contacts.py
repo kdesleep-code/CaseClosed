@@ -45,6 +45,8 @@ class ContactCreate(BaseModel):
     display_name: str
     avatar_url: str | None = None
     memo: str | None = None
+    user_memo: str | None = None
+    ai_memo: str | None = None
     status: str = "active"
     kind: str = "person"
     sender_resolution_mode: str = "self"
@@ -61,6 +63,8 @@ class ContactPatch(BaseModel):
     display_name: str | None = None
     avatar_url: str | None = None
     memo: str | None = None
+    user_memo: str | None = None
+    ai_memo: str | None = None
     status: str | None = None
     kind: str | None = None
     sender_resolution_mode: str | None = None
@@ -308,11 +312,13 @@ def email_address_data(email_address: ContactEmailAddress) -> dict[str, object]:
 
 
 def contact_data(contact: Contact, session: DatabaseSession) -> dict[str, object]:
+    user_memo = contact.user_memo if contact.user_memo is not None else contact.memo
     return {
         "id": contact.id,
         "display_name": contact.display_name,
         "avatar_url": contact.avatar_url,
-        "memo": contact.memo,
+        "user_memo": user_memo,
+        "ai_memo": contact.ai_memo,
         "status": contact.status,
         "kind": contact.kind,
         "sender_resolution_mode": contact.sender_resolution_mode,
@@ -753,6 +759,8 @@ def create_contact(
         display_name=display_name,
         avatar_url=payload.avatar_url,
         memo=payload.memo,
+        user_memo=payload.user_memo if payload.user_memo is not None else payload.memo,
+        ai_memo=payload.ai_memo,
         status=payload.status,
         kind=payload.kind,
         sender_resolution_mode=payload.sender_resolution_mode,
@@ -870,8 +878,14 @@ def update_contact(
         )
     if payload.avatar_url is not None:
         contact.avatar_url = payload.avatar_url.strip() or None
-    if payload.memo is not None:
+    if payload.user_memo is not None:
+        contact.user_memo = payload.user_memo
+        contact.memo = payload.user_memo
+    elif payload.memo is not None:
+        contact.user_memo = payload.memo
         contact.memo = payload.memo
+    if payload.ai_memo is not None:
+        contact.ai_memo = payload.ai_memo
 
     now = jst_iso()
     if payload.tags is not None:
@@ -1114,10 +1128,26 @@ def merge_contact(
         if source_contact.created_at <= target_contact.created_at
         else (target_contact, source_contact)
     )
-    target_contact.memo = (
-        older_contact.memo
-        if normalize_optional_text(older_contact.memo) is not None
+    older_user_memo = (
+        older_contact.user_memo
+        if older_contact.user_memo is not None
+        else older_contact.memo
+    )
+    newer_user_memo = (
+        newer_contact.user_memo
+        if newer_contact.user_memo is not None
         else newer_contact.memo
+    )
+    target_contact.user_memo = (
+        older_user_memo
+        if normalize_optional_text(older_user_memo) is not None
+        else newer_user_memo
+    )
+    target_contact.memo = target_contact.user_memo
+    target_contact.ai_memo = (
+        older_contact.ai_memo
+        if normalize_optional_text(older_contact.ai_memo) is not None
+        else newer_contact.ai_memo
     )
     target_has_active_primary = any(
         email_address.is_primary

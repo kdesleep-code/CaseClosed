@@ -10,6 +10,7 @@ type ComposeState = {
   bcc: string
   subject: string
   body: string
+  autoBody: string
 }
 
 type ComposeAttachment = {
@@ -26,7 +27,8 @@ function initialStateFromQuery(): ComposeState {
     cc: params.get('cc') ?? '',
     bcc: '',
     subject: params.get('subject') ?? '',
-    body: params.get('body') ?? '',
+    body: params.get('manual_body') ?? '',
+    autoBody: params.get('auto_body') ?? params.get('body') ?? '',
   }
 }
 
@@ -59,6 +61,7 @@ export default function ComposeMailView() {
   const [isSending, setIsSending] = useState(false)
   const [showSchedule, setShowSchedule] = useState(false)
   const [scheduledAt, setScheduledAt] = useState('')
+  const [showAutoBody, setShowAutoBody] = useState(false)
   const bodyRef = useRef<HTMLTextAreaElement | null>(null)
 
   useEffect(() => {
@@ -72,6 +75,18 @@ export default function ComposeMailView() {
 
   function updateField(field: keyof ComposeState, value: string) {
     setForm((current) => ({ ...current, [field]: value }))
+  }
+
+  function composedBodyText() {
+    const manualBody = form.body.trimEnd()
+    const autoBody = form.autoBody.trim()
+    if (manualBody === '') {
+      return autoBody
+    }
+    if (autoBody === '') {
+      return manualBody
+    }
+    return `${manualBody}\n\n${autoBody}`
   }
 
   function defaultScheduleLocal() {
@@ -94,7 +109,7 @@ export default function ComposeMailView() {
         cc_addresses: splitAddressList(form.cc),
         bcc_addresses: splitAddressList(form.bcc),
         subject: form.subject,
-        body_text: form.body,
+        body_text: composedBodyText(),
         attachment_names: attachments.map((attachment) => attachment.name),
         reply_to_message_id: replyToMessageId,
         scheduled_at: scheduledAtIso,
@@ -236,6 +251,23 @@ export default function ComposeMailView() {
                 />
               </label>
 
+              {form.autoBody.trim() !== '' && (
+                <section className="compose-auto-body">
+                  <button
+                    aria-expanded={showAutoBody}
+                    onClick={() => setShowAutoBody((current) => !current)}
+                    type="button"
+                  >
+                    {t('mail.compose.autoBody')}
+                  </button>
+                  {showAutoBody && (
+                    <pre aria-label={t('mail.compose.autoBodyPreview')}>
+                      {form.autoBody}
+                    </pre>
+                  )}
+                </section>
+              )}
+
               <div className="compose-footer">
                 <section className="compose-attachments" aria-label={t('mail.compose.attachments')}>
                   <div
@@ -282,7 +314,7 @@ export default function ComposeMailView() {
                     disabled={
                       isSending ||
                       form.to.trim() === '' ||
-                      form.body.trim() === '' ||
+                      composedBodyText().trim() === '' ||
                       (showSchedule && scheduledAt === '')
                     }
                     onClick={handleScheduleSend}
@@ -292,7 +324,7 @@ export default function ComposeMailView() {
                   </button>
                   <button
                     className="compose-send-button"
-                    disabled={isSending || form.to.trim() === '' || form.body.trim() === ''}
+                    disabled={isSending || form.to.trim() === '' || composedBodyText().trim() === ''}
                     type="submit"
                   >
                     {t('mail.compose.send')}

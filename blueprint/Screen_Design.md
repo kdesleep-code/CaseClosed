@@ -2277,3 +2277,20 @@ draft/send wording until the real Gmail integration phase updates this document.
   and `Cancel send`.
 - Canceling removes the card from normal mail UI; maintenance/debug/log screens
   may still show the request.
+# Phase 4 Contact Memo Split Note
+
+Contact detail UI shows two memo areas.
+
+- User memo: editable in Contact edit mode.
+- AI memo: read-only display area for future LLM-generated Contact context.
+
+Saving ordinary Contact edits updates User memo only. AI memo remains unchanged unless an AI/context update workflow writes it.
+
+# Phase 4 Maintenance LLM Block UI Note
+
+Maintenance Debug contains a temporary LLM block filter.
+
+- User enters a filter query and reason.
+- Matching mails are marked as LLM-blocked.
+- Blocked mails are listed in the same Debug area.
+- The normal mail UI may still show and open the mail, but LLM workers must not submit its body text.

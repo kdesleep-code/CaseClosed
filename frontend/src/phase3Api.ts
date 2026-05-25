@@ -16,7 +16,8 @@ export type Contact = {
   id: string
   display_name: string
   avatar_url: string | null
-  memo: string | null
+  user_memo: string | null
+  ai_memo: string | null
   status: string
   kind?: 'person' | 'mailing_list'
   sender_resolution_mode?: 'self' | 'reply_to'
@@ -58,7 +59,8 @@ export type UnresolvedFromAddress = {
 export type ContactCreatePayload = {
   display_name: string
   avatar_url?: string | null
-  memo: string
+  user_memo: string
+  ai_memo?: string | null
   status: 'active' | 'skipped'
   kind: 'person' | 'mailing_list'
   sender_resolution_mode: 'self' | 'reply_to'
@@ -77,7 +79,8 @@ export type ContactCreatePayload = {
 export type ContactUpdatePayload = {
   display_name: string
   avatar_url: string | null
-  memo: string
+  user_memo: string
+  ai_memo?: string | null
   status: 'active' | 'skipped' | 'archived'
   kind: 'person' | 'mailing_list'
   sender_resolution_mode: 'self' | 'reply_to'

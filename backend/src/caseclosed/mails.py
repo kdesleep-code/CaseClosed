@@ -86,6 +86,11 @@ class MailSendSchedulePayload(BaseModel):
     scheduled_at: str
 
 
+class MailLlmBlockFilterPayload(BaseModel):
+    q: str
+    reason: str | None = None
+
+
 IMPORTANCE_RANKS = {
     "pinned": 0,
     "high": 1,
@@ -457,6 +462,9 @@ def message_data(
         data["suggested_importance"] = auto_state.suggested_importance
         data["llm_run_id"] = auto_state.llm_run_id
         data["pending_reason"] = auto_state.pending_reason
+        data["llm_blocked"] = bool(auto_state.llm_blocked)
+        data["llm_block_reason"] = auto_state.llm_block_reason
+        data["llm_blocked_at"] = auto_state.llm_blocked_at
     if session is not None:
         data["to_recipients"] = recipient_list_data(session, to_addresses)
         data["cc_recipients"] = recipient_list_data(session, cc_addresses)
@@ -499,6 +507,9 @@ def auto_state_data(
         "effective_importance": effective_importance,
         "pending_reason": auto_state.pending_reason,
         "pending_from_address_id": auto_state.pending_from_address_id,
+        "llm_blocked": bool(auto_state.llm_blocked),
+        "llm_block_reason": auto_state.llm_block_reason,
+        "llm_blocked_at": auto_state.llm_blocked_at,
         "updated_at": auto_state.updated_at,
         "version": auto_state.version,
     }
@@ -668,6 +679,20 @@ def row_matches_query(message: GmailMessage, tokens: list[str]) -> bool:
     searchable_text = "\n".join(value for value in searchable_values if value)
     searchable_text = searchable_text.lower()
     return all(token in searchable_text for token in tokens)
+
+
+def llm_blocked_mail_data(
+    message: GmailMessage,
+    auto_state: MailAutoState,
+) -> dict[str, object]:
+    return {
+        "id": message.id,
+        "received_at": message.received_at,
+        "subject": message.subject,
+        "from_address": message.from_address,
+        "llm_block_reason": auto_state.llm_block_reason,
+        "llm_blocked_at": auto_state.llm_blocked_at,
+    }
 
 
 def aggregate_thread_rows(
@@ -913,6 +938,9 @@ def list_item_data(
         "suggested_importance": auto_state.suggested_importance,
         "llm_run_id": auto_state.llm_run_id,
         "pending_reason": auto_state.pending_reason,
+        "llm_blocked": bool(auto_state.llm_blocked),
+        "llm_block_reason": auto_state.llm_block_reason,
+        "llm_blocked_at": auto_state.llm_blocked_at,
         "sender_contact": (
             contact_summary(contact_row, session)
             if contact_row is not None
@@ -1311,6 +1339,76 @@ def list_mails(
             "items": [item for _, _, item in visible_items],
             "next_cursor": next_cursor,
             "limit": normalized_limit,
+        },
+    }
+
+
+@router.get("/llm-blocked")
+def list_llm_blocked_mails(
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    rows = session.execute(
+        select(GmailMessage, MailAutoState)
+        .join(MailAutoState, MailAutoState.message_id == GmailMessage.id)
+        .where(MailAutoState.llm_blocked == 1)
+        .order_by(GmailMessage.received_at.desc(), GmailMessage.id.desc())
+        .limit(100)
+    ).all()
+    return {
+        "ok": True,
+        "data": {
+            "items": [
+                llm_blocked_mail_data(message, auto_state)
+                for message, auto_state in rows
+            ],
+        },
+    }
+
+
+@router.post("/llm-block-filter")
+def apply_llm_block_filter(
+    payload: MailLlmBlockFilterPayload,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    tokens = [token.lower() for token in payload.q.strip().split()]
+    if len(tokens) == 0:
+        raise json_error(422, "VALIDATION_ERROR", "Filter query is required.")
+
+    now = jst_iso()
+    reason = payload.reason.strip() if payload.reason is not None else ""
+    if reason == "":
+        reason = f"Matched maintenance LLM block filter: {payload.q.strip()}"
+
+    rows = session.execute(
+        select(GmailMessage, MailAutoState)
+        .join(MailAutoState, MailAutoState.message_id == GmailMessage.id)
+        .order_by(GmailMessage.received_at.desc(), GmailMessage.id.desc())
+    ).all()
+    matched_rows = [
+        (message, auto_state)
+        for message, auto_state in rows
+        if row_matches_query(message, tokens)
+    ]
+    changed = 0
+    for message, auto_state in matched_rows:
+        if not bool(auto_state.llm_blocked):
+            changed += 1
+        auto_state.llm_blocked = 1
+        auto_state.llm_block_reason = reason
+        auto_state.llm_blocked_at = now
+        auto_state.updated_at = now
+        auto_state.version += 1
+
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "matched": len(matched_rows),
+            "changed": changed,
+            "items": [
+                llm_blocked_mail_data(message, auto_state)
+                for message, auto_state in matched_rows[:50]
+            ],
         },
     }
 

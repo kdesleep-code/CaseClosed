@@ -325,7 +325,7 @@ function ContactsView({
     try {
       const createdContact = await createContact({
         display_name: displayName,
-        memo: '',
+        user_memo: '',
         status,
         kind: 'person',
         sender_resolution_mode: 'self',
@@ -437,7 +437,7 @@ function ContactsView({
     try {
       const createdContact = await createContact({
         display_name: nextDisplayName,
-        memo: '',
+        user_memo: '',
         status,
         kind,
         sender_resolution_mode: kind === 'person' ? 'self' : senderResolution,
@@ -481,7 +481,7 @@ function ContactsView({
     setSelectedContactId(contact.id)
     setIsContactDetailEditing(false)
     setDetailDisplayName(contact.display_name)
-    setDetailMemo(contact.memo ?? '')
+    setDetailMemo(contact.user_memo ?? '')
     setDetailStatus(contact.status as 'active' | 'skipped' | 'archived')
     setDetailKind(contact.kind ?? 'person')
     setDetailSenderResolutionMode(contact.sender_resolution_mode ?? 'self')
@@ -510,7 +510,7 @@ function ContactsView({
     setError(null)
     setNotice(null)
     setDetailDisplayName(contact.display_name)
-    setDetailMemo(contact.memo ?? '')
+    setDetailMemo(contact.user_memo ?? '')
     setDetailStatus(contact.status as 'active' | 'skipped' | 'archived')
     setDetailKind(contact.kind ?? 'person')
     setDetailSenderResolutionMode(contact.sender_resolution_mode ?? 'self')
@@ -551,7 +551,7 @@ function ContactsView({
       const updatedContact = await updateContact(selectedContact.id, {
         display_name: detailDisplayName,
         avatar_url: selectedContact.avatar_url,
-        memo: detailMemo,
+        user_memo: detailMemo,
         status: detailStatus,
         kind: detailKind,
         sender_resolution_mode:
@@ -935,7 +935,7 @@ function ContactsView({
 
       const searchableText = [
         contact.display_name,
-        contact.memo ?? '',
+        contact.user_memo ?? '',
         contact.status,
         contact.kind ?? 'person',
         contact.sender_resolution_mode ?? 'self',
@@ -1644,9 +1644,9 @@ function ContactsView({
                                   )}
                                   <div className="contact-detail-primary contact-detail-memo-field">
                                     <label>
-                                      <span>{t('contacts.memo')}</span>
+                                      <span>{t('contacts.userMemo')}</span>
                                       <textarea
-                                        aria-label={t('contacts.detail.memo')}
+                                        aria-label={t('contacts.detail.userMemo')}
                                         onChange={(event) => setDetailMemo(event.target.value)}
                                         value={detailMemo}
                                       />
@@ -1745,14 +1745,23 @@ function ContactsView({
                                       <h3>{t('contacts.relatedCases.heading')}</h3>
                                       <p>{t('contacts.relatedCases.empty')}</p>
                                     </div>
+                                    {!selectedIsMailingList && (
+                                      <div className="contact-ai-memo-readonly">
+                                        <span>{t('contacts.aiMemo')}</span>
+                                        <p>
+                                          {selectedContact.ai_memo ??
+                                            t('contacts.detail.noAiMemo')}
+                                        </p>
+                                      </div>
+                                    )}
                                   </div>
                                 </form>
                               ) : (
                                 <div className="contact-detail-summary contact-detail-primary">
                                   {selectedIsMailingList && (
                                     <div className="mailing-list-memo-summary">
-                                      <span>{t('contacts.memo')}</span>
-                                      <p>{selectedContact.memo ?? t('contacts.detail.noMemo')}</p>
+                                      <span>{t('contacts.userMemo')}</span>
+                                      <p>{selectedContact.user_memo ?? t('contacts.detail.noMemo')}</p>
                                     </div>
                                   )}
                                   {selectedIsMailingList && (
@@ -1770,9 +1779,18 @@ function ContactsView({
                                   )}
                                   {!selectedIsMailingList && (
                                   <div>
-                                    <span>{t('contacts.memo')}</span>
-                                    <p>{selectedContact.memo ?? t('contacts.detail.noMemo')}</p>
+                                    <span>{t('contacts.userMemo')}</span>
+                                    <p>{selectedContact.user_memo ?? t('contacts.detail.noMemo')}</p>
                                   </div>
+                                  )}
+                                  {!selectedIsMailingList && (
+                                    <div>
+                                      <span>{t('contacts.aiMemo')}</span>
+                                      <p>
+                                        {selectedContact.ai_memo ??
+                                          t('contacts.detail.noAiMemo')}
+                                      </p>
+                                    </div>
                                   )}
                                   {selectedIsMailingList && (
                                     <div>

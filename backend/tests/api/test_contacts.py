@@ -15,7 +15,8 @@ def test_contact_can_be_created_and_listed(client, database_path: Path) -> None:
         json={
             "display_name": "Example Student",
             "avatar_url": "https://example.com/student.png",
-            "memo": "Phase 3 dummy contact.",
+            "user_memo": "Phase 3 dummy contact.",
+            "ai_memo": "AI context placeholder.",
             "status": "active",
             "kind": "person",
             "sender_resolution_mode": "self",
@@ -30,6 +31,8 @@ def test_contact_can_be_created_and_listed(client, database_path: Path) -> None:
     data = response.json()["data"]
     assert data["display_name"] == "Example Student"
     assert data["avatar_url"] == "https://example.com/student.png"
+    assert data["user_memo"] == "Phase 3 dummy contact."
+    assert data["ai_memo"] == "AI context placeholder."
     assert data["status"] == "active"
     assert data["kind"] == "person"
     assert data["sender_resolution_mode"] == "self"
@@ -54,6 +57,8 @@ def test_contact_can_be_created_and_listed(client, database_path: Path) -> None:
     detail_data = detail_response.json()["data"]
     assert detail_data["contact"]["id"] == data["id"]
     assert detail_data["contact"]["display_name"] == "Example Student"
+    assert detail_data["contact"]["user_memo"] == "Phase 3 dummy contact."
+    assert detail_data["contact"]["ai_memo"] == "AI context placeholder."
     assert detail_data["related_cases"] == []
 
 
@@ -436,12 +441,13 @@ def test_person_contacts_can_be_merged(client) -> None:
     assert [item["id"] for item in list_response.json()["data"]["items"]] == [target_id]
 
 
-def test_contact_merge_uses_older_memo_unless_it_is_empty(client) -> None:
+def test_contact_merge_uses_older_user_memo_unless_it_is_empty(client) -> None:
     older_id = client.post(
         CONTACTS_URL,
         json={
             "display_name": "Older Memo",
-            "memo": "older memo",
+            "user_memo": "older memo",
+            "ai_memo": "older AI memo",
             "status": "active",
             "email_addresses": [
                 {"email_address": "older-memo@example.com", "is_primary": True}
@@ -452,7 +458,8 @@ def test_contact_merge_uses_older_memo_unless_it_is_empty(client) -> None:
         CONTACTS_URL,
         json={
             "display_name": "Newer Memo",
-            "memo": "newer memo",
+            "user_memo": "newer memo",
+            "ai_memo": "newer AI memo",
             "status": "active",
             "email_addresses": [
                 {"email_address": "newer-memo@example.com", "is_primary": True}
@@ -466,13 +473,15 @@ def test_contact_merge_uses_older_memo_unless_it_is_empty(client) -> None:
     )
 
     assert response.status_code == 200
-    assert response.json()["data"]["target_contact"]["memo"] == "older memo"
+    assert response.json()["data"]["target_contact"]["user_memo"] == "older memo"
+    assert response.json()["data"]["target_contact"]["ai_memo"] == "older AI memo"
 
     empty_older_id = client.post(
         CONTACTS_URL,
         json={
             "display_name": "Empty Older",
-            "memo": "",
+            "user_memo": "",
+            "ai_memo": "",
             "status": "active",
             "email_addresses": [
                 {"email_address": "empty-older@example.com", "is_primary": True}
@@ -483,7 +492,8 @@ def test_contact_merge_uses_older_memo_unless_it_is_empty(client) -> None:
         CONTACTS_URL,
         json={
             "display_name": "Filled Newer",
-            "memo": "fallback memo",
+            "user_memo": "fallback memo",
+            "ai_memo": "fallback AI memo",
             "status": "active",
             "email_addresses": [
                 {"email_address": "filled-newer@example.com", "is_primary": True}
@@ -497,7 +507,10 @@ def test_contact_merge_uses_older_memo_unless_it_is_empty(client) -> None:
     )
 
     assert fallback_response.status_code == 200
-    assert fallback_response.json()["data"]["target_contact"]["memo"] == "fallback memo"
+    assert fallback_response.json()["data"]["target_contact"]["user_memo"] == "fallback memo"
+    assert fallback_response.json()["data"]["target_contact"]["ai_memo"] == (
+        "fallback AI memo"
+    )
 
 
 def test_duplicate_contact_display_name_gets_number_suffix(client) -> None:

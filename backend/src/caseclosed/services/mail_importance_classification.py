@@ -43,6 +43,12 @@ def handle_mail_importance_classification(
             raise LookupError(f"Mail auto state not found: {message.id}")
         if auto_state.pending_reason is not None:
             raise ValueError(f"Mail is still pending: {message.id}")
+        if bool(auto_state.llm_blocked):
+            return {
+                "message_id": message.id,
+                "skipped": True,
+                "reason": "llm_blocked",
+            }
 
         provider_response = llm_provider.complete_json(
             function_type=FUNCTION_TYPE,

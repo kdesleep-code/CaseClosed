@@ -1926,3 +1926,11 @@ MVPという用語は用いない。以下の順に段階的に実装する。
 14. UIは最初から完成形を狙わず、触りながら調整する。
 15. 機能追加ごとに必要テーブルをmigrationで追加する。
 ```
+# Phase 4 Contact Memo Split Note
+
+Contact memo is split into two ownership domains.
+
+- User memo: manually edited by the user and never overwritten by LLM workers.
+- AI memo: maintained by future LLM Contact context update flow from received mail/thread history.
+
+The former single Contact memo is migrated to User memo. AI memo starts empty and is displayed separately in Contact detail UI.

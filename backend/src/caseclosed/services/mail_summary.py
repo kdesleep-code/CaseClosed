@@ -80,6 +80,12 @@ def handle_mail_summary(
         )
         if auto_state is None:
             raise LookupError(f"Mail auto state not found: {message.id}")
+        if bool(auto_state.llm_blocked):
+            return {
+                "message_id": message.id,
+                "skipped": True,
+                "reason": "llm_blocked",
+            }
         if not should_summarize(message, auto_state):
             return {
                 "message_id": message.id,
@@ -199,6 +205,7 @@ def should_summarize(message: GmailMessage, auto_state: MailAutoState) -> bool:
     return (
         not message_is_sent(message)
         and auto_state.pending_reason is None
+        and not bool(auto_state.llm_blocked)
         and auto_state.effective_importance in SUMMARY_TARGET_IMPORTANCE
     )
 

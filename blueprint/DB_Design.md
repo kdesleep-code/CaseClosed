@@ -2355,3 +2355,28 @@ handover_log_generation
 
 ただし、状態遷移のうちDB制約に関わる部分は本書に取り込んでいる。
 
+# Phase 4 Contact Memo Split Note
+
+`contacts.memo` is legacy compatibility data. New Contact memo ownership is split as follows.
+
+```text
+user_memo  TEXT NULL  -- user-authored memo edited in Contact UI
+ai_memo    TEXT NULL  -- AI-authored memo updated by Contact context workers
+```
+
+Migration `20260525_0014` copies existing `contacts.memo` into `contacts.user_memo`.
+Future Contact AI memo update jobs must update `ai_memo` only and must not overwrite `user_memo`.
+Mailing List contacts may keep `user_memo`, but automatic AI memo update is intended for person Contacts.
+
+# Phase 4 Mail LLM Block Note
+
+Each mail auto state can block LLM processing before the mail body is sent to any LLM provider.
+
+```text
+mail_auto_state.llm_blocked      INTEGER NOT NULL DEFAULT 0
+mail_auto_state.llm_block_reason TEXT NULL
+mail_auto_state.llm_blocked_at   TEXT NULL
+```
+
+When `llm_blocked = 1`, mail importance classification, summary, translation, and future Contact AI memo update workflows must skip this mail body.
+This is intended for mails that may contain passwords, credentials, one-time codes, or similarly sensitive text.
