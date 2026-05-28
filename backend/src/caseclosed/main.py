@@ -23,6 +23,7 @@ from caseclosed.mail_drafts import router as mail_drafts_router
 from caseclosed.mails import router as mails_router
 from caseclosed.maintenance import router as maintenance_router
 from caseclosed.services.background_worker import BackgroundWorkerSupervisor
+from caseclosed.services.gmail_auto_import import GmailAutoImportSupervisor
 from caseclosed.settings import is_background_worker_enabled
 
 FRONTEND_DIST = Path(__file__).resolve().parents[3] / "frontend" / "dist"
@@ -34,6 +35,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     bootstrap_database()
     bootstrap_mail_drafts_database()
     background_worker = None
+    gmail_auto_import = GmailAutoImportSupervisor()
+    gmail_auto_import.start()
     if is_background_worker_enabled():
         background_worker = BackgroundWorkerSupervisor()
         background_worker.start()
@@ -42,6 +45,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     finally:
         if background_worker is not None:
             await background_worker.stop()
+        await gmail_auto_import.stop()
 
 
 app = FastAPI(title="CaseClosed", lifespan=lifespan)

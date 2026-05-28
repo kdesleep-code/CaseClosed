@@ -44,9 +44,9 @@ CaseClosedは、自分用の業務支援Webアプリである。
 3. Gmailを読み込める
 4. Pending Contactを解消できる
 5. メール一覧を見て処理できる
-6. LLMで重要度・要約・Case判定できる
-7. メールからTask / Draft / Calendarへ流せる
-8. Caseにメール・Task・予定・Contact・Fileを集約できる
+6. LLMで重要度・要約・返信生成を支援できる
+7. File / Storage基盤でメール添付と生成物を保存できる
+8. Caseにメール・File・Task・予定・Contactを集約できる
 9. Worker / Job / External Operationが安全に動く
 10. 運用保守できる
 ```
@@ -480,19 +480,25 @@ API:
 
 ---
 
-## Phase 5: 重要度判定・要約・Case判定
+## Phase 5: Mail Intelligence安定化
 
 ### 目的
 
-メールをLLMで整理し、Caseへ流し込めるようにする。
+実メール運用に必要なメールAI処理を安定させる。
+
+このPhaseでは、Case自動判定は扱わない。Case連携はStorage基盤を作った後に実装する。
 
 ### 実装対象
 
 LLM:
 
 - mail_importance_classification
-- mail_summary_ja
-- mail_case_selection
+- mail_summary
+- mail_thread_summary
+- reply_draft_generation
+- new_mail_draft_generation
+- contact_registration_prefill
+- contact_ai_memo_update
 
 DB:
 
@@ -500,8 +506,8 @@ DB:
 - prompt_versions
 - llm_runs
 - llm_instruction_rules
-- case_candidate_rules
-- case_mail_links
+- mail_drafts
+- app_settings
 
 API:
 
@@ -509,11 +515,12 @@ API:
 - `GET /llm-runs/{id}`
 - `GET /mail-importance-rules`
 - `POST /mail-importance-rules`
-- `GET /case-candidate-rules`
-- `POST /case-candidate-rules`
 - `POST /mails/{id}/run-importance`
 - `POST /mails/{id}/summarize`
-- `POST /mails/{id}/run-case-selection`
+- `POST /mails/{id}/summarize-thread`
+- `POST /mails/generate-draft`
+- `GET /mail-drafts`
+- `POST /mail-drafts`
 
 画面:
 
@@ -522,39 +529,171 @@ API:
 - LLM実行履歴
 - LLM追加指示設定
 - 重要度ルール設定
+- メール作成画面の署名・Draft・LLM Generationガジェット
 
 機能:
 
 - High / Middle / Low判定
 - High / Middleのみ自動要約
-- High / MiddleのみCase判定
 - Lowは自動要約なし
-- HighならGmailスター付与external_operation
+- Pinnedは自動要約なし
 - LLMはPinned/Skip/Pendingを出力不可
 - JSON schema validation
 - JSON不正リトライ
+- スレッド要約
+- 返信引用部分の折りたたみ
+- HTMLメール表示
+- 返信生成時の言語制御
+- 送信先Contacts情報を使った本文生成
 
 ### 完了条件
 
 - Pending中はLLM重要度判定されない
 - Contact解決後に重要度判定が走る
 - Lowは要約されない
-- HighになったらGmailスター付与operationが作られる
-- Caseが関連メール集合を持つ形で表示される
-- Inbox requiredはInboxへ入る
-- no_case_neededはCaseリンクなし
+- Pinnedは要約されない
+- High / Middleのメール・スレッド要約が作られる
+- 要約失敗・LLM失敗がMaintenanceで見える
+- メール生成でInstruction / Standard Prompt / Contact memo / 返信元本文を参照できる
+- 英語メールへの返信は英語、日本語メールへの返信は日本語になるよう簡易チェックされる
+- HTMLメール本文が実用上読める
+- 返信引用部分を折りたためる
 
 ### レビュー観点
 
 - 重要度判定が実用上大きくズレないか
 - 要約が一覧で役に立つか
-- Case判定が勝手に変な上書きをしないか
 - LLM失敗時の表示が分かりやすいか
 - 追加指示を変えたくなる場所が見えているか
+- メール作成支援がユーザーの邪魔をしていないか
+- 実メールのHTML/引用/長文が破綻しないか
 
 ---
 
-## Phase 6: Case / Task中核
+## Phase 6: File / Storage基盤
+
+### 目的
+
+メール添付・手元ファイル・生成物を安全に保存し、後続のCase連携で使えるようにする。
+
+### 実装対象
+
+DB:
+
+- files
+- storage_objects
+- file_links
+- file_versions
+- file_security_rules
+- file_summaries
+- attachment_fetch_jobs
+
+API:
+
+- `GET /files`
+- `GET /files/{id}`
+- `POST /files/upload`
+- `POST /attachments/{id}/fetch`
+- `POST /files/{id}/summarize`
+- `PATCH /files/{id}/llm-policy`
+- `POST /files/{id}/trash`
+- `POST /files/{id}/restore`
+- `DELETE /files/{id}`
+
+画面:
+
+- File一覧
+- File詳細
+- Mail添付カード
+- Storage設定
+- LLM Policy設定
+
+LLM:
+
+- file_security_meta_classification
+- file_summary
+
+### 完了条件
+
+- ファイルをローカル保存できる
+- 物理保存はIDベースで、元ファイル名とは分離される
+- メール添付を必要時に取得・保存できる
+- 添付元メールを辿れる
+- LLM Policyを設定できる
+- forbiddenはLLM投入不可
+- trash / restore / purgeが区別される
+- purge後もDBメタ情報は残る
+- 保存失敗・取得失敗がMaintenanceで見える
+
+### レビュー観点
+
+- ファイルがどこに保存されたか理解できるか
+- メール添付の保存操作が自然か
+- LLM Policyが怖くないか
+- 誤削除しにくいか
+- 後続のCase連携に必要なメタ情報が足りているか
+
+---
+
+## Phase 7: Case連携
+
+### 目的
+
+Mail / Contact / FileをCaseへ流し込めるようにする。
+
+### 実装対象
+
+DB:
+
+- case_candidate_rules
+- case_mail_links
+- case_file_links
+- contact_case_links
+- case_context_versions
+
+API:
+
+- `GET /case-candidate-rules`
+- `POST /case-candidate-rules`
+- `POST /mails/{id}/run-case-selection`
+- `GET /cases/{id}/mails`
+- `POST /cases/{id}/mails`
+- `DELETE /cases/{id}/mails/{message_id}`
+- `GET /cases/{id}/files`
+- `POST /cases/{id}/files`
+
+画面:
+
+- Mail詳細のCase候補表示
+- Case詳細内Mail一覧
+- Case詳細内File一覧
+- Inbox Case表示
+
+LLM:
+
+- mail_case_selection
+
+### 完了条件
+
+- High / MiddleのみCase判定される
+- Low / Skip / Pending / Pinnedは自動Case判定されない
+- Caseが関連メール集合を持つ形で表示される
+- Inbox requiredはInboxへ入る
+- no_case_neededはCaseリンクなし
+- ユーザーが手動でCaseリンクを修正できる
+- Case判定がユーザー確定値を上書きしない
+- 関連ファイルもCaseに紐づけられる
+
+### レビュー観点
+
+- Case判定が勝手に変な上書きをしないか
+- Inbox required / no_case_neededの判断が自然か
+- Case詳細が案件の基地として機能しているか
+- メールとファイルを辿りやすいか
+
+---
+
+## Phase 8: Case / Task中核
 
 ### 目的
 
@@ -569,8 +708,6 @@ DB:
 - task_suggestions
 - task_work_blocks
 - case_tags
-- case_context_versions
-- contact_case_links
 
 API:
 
@@ -579,9 +716,6 @@ API:
 - `PATCH /cases/{id}`
 - `POST /cases/{id}/close`
 - `POST /cases/{id}/archive`
-- `GET /cases/{id}/mails`
-- `POST /cases/{id}/mails`
-- `DELETE /cases/{id}/mails/{message_id}`
 - `GET /tasks`
 - `POST /tasks`
 - `PATCH /tasks/{id}`
@@ -613,81 +747,18 @@ LLM:
 - Task作成・完了・キャンセル・論理削除できる
 - Task削除はdeleted_at
 - メールからTask化したら原則processedになる
-- Case詳細に関連メール・Taskが集約表示される
+- Case詳細に関連メール・Task・Fileが集約表示される
 
 ### レビュー観点
 
 - Case一覧で「今止まっているもの」が分かるか
-- Case詳細が案件の基地として機能しているか
 - Task化の手数が少ないか
 - Task削除が実削除になっていないか
 - ClosedとArchiveの違いがUIで分かるか
 
 ---
 
-## Phase 7: Draft / Gmail送信 / Follow-up基盤
-
-### 目的
-
-メール対応をアプリ内で完結させる。
-
-### 実装対象
-
-DB:
-
-- mail_drafts
-- follow_up_watches
-- external_operations
-
-API:
-
-- `POST /mails/{id}/generate-reply-draft`
-- `POST /drafts`
-- `GET /drafts`
-- `GET /drafts/{id}`
-- `PATCH /drafts/{id}`
-- `POST /drafts/{id}/regenerate`
-- `POST /drafts/{id}/send`
-- `POST /follow-up-watches`
-
-画面:
-
-- 返信草案画面/モーダル
-- 新規メール作成画面
-- Draft一覧/詳細
-- Follow-up候補表示
-
-LLM:
-
-- reply_draft_generation
-- new_mail_draft_generation
-- reminder_mail_generation
-
-外部副作用:
-
-- Gmail send external_operation
-
-### 完了条件
-
-- 返信草案を生成・編集・保存できる
-- 新規メールを作成できる
-- 送信前確認が出る
-- Gmail送信がexternal_operation経由
-- unknown時に自動再送しない
-- 送信成功後にprocessedになる
-- 必要ならFollow-up Watch候補を出せる
-
-### レビュー観点
-
-- 返信草案が実用的か
-- 新規メール作成の導線が自然か
-- 送信前確認が邪魔すぎないか
-- unknown時の表示が怖くないか
-- Gmail送信済みのDB反映が分かりやすいか
-
----
-
-## Phase 8: Calendar連携
+## Phase 9: Calendar連携
 
 ### 目的
 
@@ -744,68 +815,63 @@ LLM:
 
 ---
 
-## Phase 9: File / Storage基盤
+## Phase 10: Gmail送信 / Follow-up仕上げ
 
 ### 目的
 
-Caseにファイルを集約する。
+送信・送信後確認・フォローアップ監視を外部副作用込みで仕上げる。
 
 ### 実装対象
 
 DB:
 
-- files
-- storage_objects
-- file_links
-- file_versions
-- file_security_rules
-- file_summaries
+- follow_up_watches
+- external_operations
 
 API:
 
-- `GET /files`
-- `GET /files/{id}`
-- `POST /files/upload`
-- `POST /attachments/{id}/fetch`
-- `POST /files/{id}/summarize`
-- `PATCH /files/{id}/llm-policy`
-- `POST /files/{id}/trash`
-- `POST /files/{id}/restore`
-- `DELETE /files/{id}`
+- `POST /drafts/{id}/send`
+- `POST /mails/send`
+- `POST /follow-up-watches`
+- `GET /follow-up-watches`
+- `PATCH /follow-up-watches/{id}`
 
 画面:
 
-- File一覧
-- File詳細
-- Case詳細内Fileカード
-- Mail添付カード
+- 送信前確認
+- 送信履歴
+- Follow-up候補表示
+- Follow-up一覧
 
 LLM:
 
-- file_security_meta_classification
-- file_summary
+- reminder_mail_generation
+
+外部副作用:
+
+- Gmail send external_operation
+- Gmail star external_operation
 
 ### 完了条件
 
-- ファイルをローカル保存できる
-- 物理保存はIDベース
-- UIではCaseベース表示
-- 添付元メールを辿れる
-- LLM Policyを設定できる
-- forbiddenはLLM投入不可
-- trash / restore / purgeが区別される
-- purge後もDBメタ情報は残る
+- 送信前確認が出る
+- Gmail送信がexternal_operation経由
+- unknown時に自動再送しない
+- 送信成功後にprocessedになる
+- HighになったらGmailスター付与operationが作られる
+- 必要ならFollow-up Watch候補を出せる
+- Follow-up Watchを完了・解除できる
 
 ### レビュー観点
 
-- Case内ファイル表示が分かりやすいか
-- LLM Policyが怖くないか
-- 添付ファイル取得タイミングが適切か
-- 誤削除しにくいか
+- 送信前確認が邪魔すぎないか
+- unknown時の表示が怖くないか
+- Gmail送信済みのDB反映が分かりやすいか
+- Follow-upが過剰に出すぎないか
 
 ---
 
-## Phase 10: Case Context / Contact Context / 引継ぎログ
+## Phase 11: Case Context / Contact Context / 引継ぎログ
 
 ### 目的
 
@@ -857,7 +923,7 @@ LLM:
 
 ---
 
-## Phase 11: Backup / Restore / 証明書管理詳細
+## Phase 12: Backup / Restore / 証明書管理詳細
 
 ### 目的
 
@@ -906,7 +972,7 @@ API:
 
 ---
 
-## Phase 12: 後続拡張
+## Phase 13: 後続拡張
 
 ### 候補
 
@@ -1113,41 +1179,50 @@ CaseClosedの設計書群に従って、[機能名] を実装してください�
 - High/Middle/Lowが実用的か
 - Lowが要約されていないか
 - Pending中にLLM判定されていないか
-- High時にGmailスターoperationが作られるか
+- Pinnedが要約されていないか
+- メール生成の言語・宛先文脈が自然か
+- HTMLメール・返信引用表示が破綻していないか
 
 ## Phase 6
+
+- 添付ファイルを保存・再参照できるか
+- Fileの保存場所と元メールが辿れるか
+- LLM Policyが効いているか
+- purge後もメタ情報が残るか
+
+## Phase 7
+
+- Case判定がユーザー確定値を上書きしないか
+- Inbox required / no_case_neededが自然か
+- CaseにMail / Fileを集約できるか
+
+## Phase 8
 
 - Case詳細が案件の基地になっているか
 - Task化でprocessedになるか
 - Task削除が論理削除か
 - Case Closed条件が効いているか
 
-## Phase 7
-
-- Draft編集がしやすいか
-- Gmail送信が確認付きか
-- 送信がexternal_operations経由か
-- unknown時に止まるか
-
-## Phase 8
+## Phase 9
 
 - 予定候補抽出が使えるか
 - 登録前編集ができるか
 - Calendar作成がexternal_operations経由か
 
-## Phase 9
-
-- FileがCase内で見やすいか
-- LLM Policyが効いているか
-- purge後もメタ情報が残るか
-
 ## Phase 10
+
+- Gmail送信が確認付きか
+- 送信がexternal_operations経由か
+- High時にGmailスターoperationが作られるか
+- unknown時に止まるか
+
+## Phase 11
 
 - Case Contextが役に立つか
 - 引継ぎログが読めるか
 - 高機密情報を勝手に含めていないか
 
-## Phase 11
+## Phase 12
 
 - 証明書更新Taskが作られるか
 - Backup履歴が見えるか
@@ -1155,11 +1230,11 @@ CaseClosedの設計書群に従って、[機能名] を実装してください�
 
 ---
 
-# 5. 実装開始前チェックリスト
+# 5. 現在の到達状況と次の目標
 
-当面の到達目標はPhase 4完了とする。
+当初の到達目標はPhase 4完了だったが、実装はメール実運用を優先して進んだ。
 
-Phase 4完了時点で期待する状態:
+Phase 4完了時点で期待していた状態:
 
 ```text
 安全にログインできる
@@ -1176,11 +1251,25 @@ Gmail本文をDB保存できる
 Pending中はLLM自動処理が止まる
 ```
 
-Phase 1〜2は省略せず、しっかり実装する。
+現状はPhase 4を越えて、Phase 5のMail IntelligenceとPhase 10のGmail送信機能の一部まで先行実装済みである。
+
+次の主目標はPhase 6: File / Storage基盤とする。
+
+Phase 6開始時に特に確認する:
+
+```text
+□ 保存先ルートと容量方針
+□ 物理ファイル名をIDベースにする方針
+□ 元ファイル名・MIME・サイズ・hashの保存方針
+□ メール添付をいつ取得するか
+□ LLM投入可否Policyの初期値
+□ trash / restore / purgeの責務分離
+□ 保存失敗・取得失敗のMaintenance表示
+```
 
 
 
-実装開始前に確認する。
+全体実装開始前に確認していた項目:
 
 ```text
 □ 技術スタックを決めた

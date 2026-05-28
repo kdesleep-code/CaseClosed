@@ -18,6 +18,19 @@ export type Job = {
   max_retries: number
   created_at: string
   updated_at: string
+  related_mail: JobRelatedMail | null
+}
+
+export type JobRelatedMail = {
+  context_type: string
+  message_id: string | null
+  thread_id: string | null
+  gmail_message_id: string | null
+  gmail_thread_id: string | null
+  subject: string | null
+  received_at: string | null
+  from_address: string | null
+  mail_url: string | null
 }
 
 export type ExternalOperation = {

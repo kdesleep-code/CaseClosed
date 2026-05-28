@@ -116,6 +116,46 @@ def test_sending_mail_deletes_drafts_for_same_reply_target_only(client) -> None:
     ]
 
 
+def test_mail_drafts_older_than_thirty_days_are_deleted(
+    client,
+    database_path: Path,
+) -> None:
+    old_response = client.post(
+        MAIL_DRAFTS_URL,
+        json={
+            "to_addresses": ["old@example.com"],
+            "subject": "Old draft",
+            "body_text": "Expired.",
+        },
+    )
+    current_response = client.post(
+        MAIL_DRAFTS_URL,
+        json={
+            "to_addresses": ["current@example.com"],
+            "subject": "Current draft",
+            "body_text": "Still useful.",
+        },
+    )
+
+    with sqlite3.connect(draft_database_path(database_path)) as connection:
+        connection.execute(
+            "UPDATE mail_drafts SET created_at = ?, updated_at = ? WHERE key = ?",
+            (
+                "2000-01-01T00:00:00+09:00",
+                "2000-01-01T00:00:00+09:00",
+                old_response.json()["data"]["key"],
+            ),
+        )
+        connection.commit()
+
+    list_response = client.get(MAIL_DRAFTS_URL)
+
+    assert list_response.status_code == 200
+    assert [item["key"] for item in list_response.json()["data"]["items"]] == [
+        current_response.json()["data"]["key"]
+    ]
+
+
 def test_resolve_mail_draft_attachments_reads_existing_files(
     client,
     tmp_path: Path,
@@ -141,4 +181,3 @@ def test_resolve_mail_draft_attachments_reads_existing_files(
     assert data["missing"] == [
         {"name": "missing.txt", "path": str(tmp_path / "missing.txt")}
     ]
-

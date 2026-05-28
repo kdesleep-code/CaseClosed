@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
+  getMailDayStats,
+  getGoogleGmailStatus,
   importUnloadedGoogleGmailByDate,
   listMailDates,
   listMailPage,
 } from './phase4Api'
-import type { MailDateSummary, MailListFilters, MailListItem } from './phase4Api'
+import type { MailDateSummary, MailDayStats, MailListFilters, MailListItem } from './phase4Api'
 import { t } from './i18n'
 import type { MessageKey } from './i18n'
 import { AppLink, navigateTo } from './navigation'
@@ -255,6 +257,8 @@ function initialQueryParams() {
 function MailView({ initialData }: { initialData?: MailInitialData }) {
   const didUseInitialData = useRef(initialData !== undefined)
   const didUsePreparedData = useRef(false)
+  const lastSeenAutoImportSuccessAt = useRef<string | null>(null)
+  const isAutoImportRefreshInFlight = useRef(false)
   const queryParams = useMemo(() => initialQueryParams(), [])
   const [mails, setMails] = useState<MailListItem[]>(initialData?.mails ?? [])
   const [mailDates, setMailDates] = useState<MailDateSummary[]>(
@@ -280,6 +284,12 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
   const [error, setError] = useState<string | null>(null)
   const [isBusy, setIsBusy] = useState(false)
   const [isGmailImporting, setIsGmailImporting] = useState(false)
+  const [lastAutoImportRunAt, setLastAutoImportRunAt] = useState<string | null>(null)
+  const [lastAutoImportError, setLastAutoImportError] = useState<string | null>(null)
+  const [mailDayStats, setMailDayStats] = useState<MailDayStats | null>(null)
+  const [autoImportUnloadedDates, setAutoImportUnloadedDates] = useState<Set<string>>(
+    () => new Set(),
+  )
 
   const isSearchMode = searchQuery.trim() !== ''
   const isActionNeededMode = initialData?.viewMode === 'action-needed'
@@ -339,19 +349,126 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
     setNextCursor(page.next_cursor)
   }
 
+  async function refreshMailData() {
+    const [page, dates, stats] = await Promise.all([
+      listMailPage(listFilters()),
+      listMailDates(activeTab),
+      getMailDayStats(selectedDate),
+    ])
+    setMails(page.items)
+    setNextCursor(page.next_cursor)
+    setMailDates(dates)
+    setMailDayStats(stats)
+  }
+
+  useEffect(() => {
+    let canceled = false
+    void getGoogleGmailStatus()
+      .then((status) => {
+        if (!canceled) {
+          lastSeenAutoImportSuccessAt.current = status.auto_import.last_success_at
+          setLastAutoImportRunAt(status.auto_import.last_run_at)
+          setLastAutoImportError(status.auto_import.last_error)
+          setAutoImportUnloadedDates(new Set(status.auto_import.unloaded_dates))
+        }
+      })
+      .catch(() => {
+        if (!canceled) {
+          setLastAutoImportRunAt(null)
+        }
+      })
+    return () => {
+      canceled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let isMounted = true
+
+    async function checkAutoImportStatus() {
+      if (document.visibilityState !== 'visible') {
+        return
+      }
+      try {
+        const status = await getGoogleGmailStatus()
+        if (!isMounted) {
+          return
+        }
+        const autoImport = status.auto_import
+        setLastAutoImportRunAt(autoImport.last_run_at)
+        setLastAutoImportError(autoImport.last_error)
+        setAutoImportUnloadedDates(new Set(autoImport.unloaded_dates))
+
+        const importedByLatestRun =
+          autoImport.last_success_at !== null &&
+          autoImport.last_success_at !== lastSeenAutoImportSuccessAt.current &&
+          autoImport.last_imported_count > 0
+        lastSeenAutoImportSuccessAt.current = autoImport.last_success_at
+        if (importedByLatestRun && !isAutoImportRefreshInFlight.current) {
+          isAutoImportRefreshInFlight.current = true
+          try {
+            await refreshMailData()
+          } finally {
+            isAutoImportRefreshInFlight.current = false
+          }
+        }
+      } catch {
+        // Keep the current list if a background status check fails.
+      }
+    }
+
+    const timerId = window.setInterval(() => {
+      void checkAutoImportStatus()
+    }, 15000)
+
+    return () => {
+      isMounted = false
+      window.clearInterval(timerId)
+    }
+  }, [activeTab, isActionNeededMode, pageSize, searchQuery, selectedDate])
+
+  useEffect(() => {
+    if (isSearchLikeMode) {
+      setMailDayStats(null)
+      return
+    }
+    let isMounted = true
+    void getMailDayStats(selectedDate)
+      .then((stats) => {
+        if (isMounted) {
+          setMailDayStats(stats)
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setMailDayStats(null)
+        }
+      })
+    return () => {
+      isMounted = false
+    }
+  }, [isSearchLikeMode, selectedDate])
+
   async function importSelectedDateFromGmail() {
     setError(null)
     setNotice(null)
     setIsGmailImporting(true)
     try {
       const result = await importUnloadedGoogleGmailByDate(selectedDate)
-      const [page, dates] = await Promise.all([
+      setAutoImportUnloadedDates((current) => {
+        const nextDates = new Set(current)
+        nextDates.delete(selectedDate)
+        return nextDates
+      })
+      const [page, dates, stats] = await Promise.all([
         listMailPage(listFilters()),
         listMailDates(activeTab),
+        getMailDayStats(selectedDate),
       ])
       setMails(page.items)
       setNextCursor(page.next_cursor)
       setMailDates(dates)
+      setMailDayStats(stats)
       setNotice(
         result.imported_count === 0
           ? t('mail.gmailImport.none', { date: result.date })
@@ -372,9 +489,10 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
     setNotice(null)
     setIsBusy(true)
     try {
-      const [page, dates] = await Promise.all([
+      const [page, dates, stats] = await Promise.all([
         listMailPage(dayListFilters(nextTab, nextDate)),
         listMailDates(nextTab),
+        getMailDayStats(nextDate),
       ])
       didUsePreparedData.current = true
       setActiveTab(nextTab)
@@ -385,6 +503,7 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
       setMails(page.items)
       setNextCursor(page.next_cursor)
       setMailDates(dates)
+      setMailDayStats(stats)
     } catch (requestError) {
       setError(describeError(requestError))
     } finally {
@@ -407,7 +526,10 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
       const latestDate = dates.some((item) => item.date === today)
         ? today
         : dates.at(-1)?.date ?? today
-      const page = await listMailPage(dayListFilters('unprocessed', latestDate))
+      const [page, stats] = await Promise.all([
+        listMailPage(dayListFilters('unprocessed', latestDate)),
+        getMailDayStats(latestDate),
+      ])
       didUsePreparedData.current = true
       setActiveTab('unprocessed')
       setSelectedDate(latestDate)
@@ -417,6 +539,7 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
       setMails(page.items)
       setNextCursor(page.next_cursor)
       setMailDates(dates)
+      setMailDayStats(stats)
     } catch (requestError) {
       setError(describeError(requestError))
     } finally {
@@ -434,8 +557,12 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
       return
     }
     let isMounted = true
-    Promise.allSettled([listMailPage(listFilters()), listMailDates(activeTab)])
-      .then(([pageResult, datesResult]) => {
+    Promise.allSettled([
+      listMailPage(listFilters()),
+      listMailDates(activeTab),
+      getMailDayStats(selectedDate),
+    ])
+      .then(([pageResult, datesResult, statsResult]) => {
         if (isMounted) {
           if (pageResult.status === 'fulfilled') {
             setMails(pageResult.value.items)
@@ -445,6 +572,9 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
           }
           if (datesResult.status === 'fulfilled') {
             setMailDates(datesResult.value)
+          }
+          if (statsResult.status === 'fulfilled') {
+            setMailDayStats(statsResult.value)
           }
         }
       })
@@ -562,17 +692,29 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
         <header className="maintenance-header">
           <div>
             <p>{t('app.name')}</p>
-            <h1>{t('mail.heading')}</h1>
+            <div className="mail-title-row">
+              <h1>{t('mail.heading')}</h1>
+              <span>
+                {t('mail.autoImportLastRun', {
+                  time: lastAutoImportRunAt ?? t('common.none'),
+                })}
+              </span>
+            </div>
           </div>
           <nav aria-label={t('mail.navigation')} className="maintenance-nav">
             <AppLink href="/">{t('top.heading')}</AppLink>
           </nav>
         </header>
 
-        {(error !== null || notice !== null) && (
+        {(error !== null || notice !== null || lastAutoImportError !== null) && (
           <div className="mail-feedback">
             {error !== null && <p role="alert">{error}</p>}
             {notice !== null && <p>{notice}</p>}
+            {lastAutoImportError !== null && (
+              <p role="alert">
+                {t('mail.autoImportLastError', { error: lastAutoImportError })}
+              </p>
+            )}
           </div>
         )}
 
@@ -636,22 +778,49 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
                       </p>
                     </div>
                   ) : (
-                    <h2 id="mail-list-heading">{selectedDate}</h2>
+                    <div>
+                      <h2 id="mail-list-heading">{selectedDate}</h2>
+                      {mailDayStats !== null && (
+                        <p>
+                          {t('mail.dayStats', {
+                            total: mailDayStats.total_count,
+                            received: mailDayStats.received_count,
+                            sent: mailDayStats.sent_count,
+                          })}
+                        </p>
+                      )}
+                    </div>
                   )}
                   <div className="mail-list-heading-actions">
                     {isSearchLikeMode && (
-                      <button disabled={isBusy} onClick={openLatestInbox} type="button">
+                      <button
+                        className={`button-loading-dot${isBusy ? ' is-loading' : ''}`}
+                        disabled={isBusy}
+                        onClick={openLatestInbox}
+                        type="button"
+                      >
                         {t('mail.latestInbox')}
                       </button>
                     )}
                     {isSearchLikeMode ? (
-                      <button disabled={isBusy} onClick={() => refreshMails()} type="button">
+                      <button
+                        className={`button-loading-dot${isBusy ? ' is-loading' : ''}`}
+                        disabled={isBusy}
+                        onClick={() => refreshMails()}
+                        type="button"
+                      >
                         {t('mail.refresh')}
                       </button>
                     ) : (
                       <button
                         disabled={isBusy || isGmailImporting}
-                        className={isGmailImporting ? 'mail-gmail-import-button is-loading' : 'mail-gmail-import-button'}
+                        className={`mail-gmail-import-button${
+                          isGmailImporting ? ' is-loading' : ''
+                        }${
+                          autoImportUnloadedDates.has(selectedDate)
+                            ? ' has-unloaded-mail'
+                            : ''
+                        }`}
                         onClick={() => {
                           void importSelectedDateFromGmail()
                         }}
@@ -774,7 +943,9 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
                     </div>
                     {nextCursor !== null && (
                       <button
-                        className="mail-load-more"
+                        className={`mail-load-more button-loading-dot${
+                          isBusy ? ' is-loading' : ''
+                        }`}
                         disabled={isBusy}
                         onClick={handleLoadMore}
                         type="button"
@@ -831,11 +1002,14 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
                   }
                   const count = mailDateCounts.get(date) ?? 0
                   const hasMail = count > 0
+                  const hasUnloadedMail = autoImportUnloadedDates.has(date)
                   return (
                     <button
                       aria-current={date === selectedDate ? 'date' : undefined}
                       aria-label={hasMail ? t('mail.calendar.openDate', { date, count }) : date}
-                      className={hasMail ? 'mail-calendar-day' : 'mail-calendar-day mail-calendar-day-empty'}
+                      className={`${hasMail ? 'mail-calendar-day' : 'mail-calendar-day mail-calendar-day-empty'}${
+                        hasUnloadedMail ? ' has-unloaded-mail' : ''
+                      }`}
                       disabled={!hasMail || isBusy}
                       key={date}
                       onClick={() => jumpToMailDate(date)}
@@ -892,10 +1066,19 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
                   <option value={50}>50</option>
                 </select>
                 <div className="mail-search-actions">
-                  <button disabled={isBusy} type="submit">
+                  <button
+                    className={`button-loading-dot${isBusy ? ' is-loading' : ''}`}
+                    disabled={isBusy}
+                    type="submit"
+                  >
                     {t('mail.search.submit')}
                   </button>
-                  <button disabled={isBusy || !isSearchMode} onClick={clearSearch} type="button">
+                  <button
+                    className={`button-loading-dot${isBusy ? ' is-loading' : ''}`}
+                    disabled={isBusy || !isSearchMode}
+                    onClick={clearSearch}
+                    type="button"
+                  >
                     {t('mail.search.clear')}
                   </button>
                 </div>

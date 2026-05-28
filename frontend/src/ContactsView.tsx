@@ -293,7 +293,15 @@ function ContactsView({
       setSelectedTagFilter(null)
       setStatusFilter(
         isMailingListContact(linkedContact)
-          ? 'mailing_list'
+          ? linkedContact.status === 'active'
+            ? 'mailing_list'
+            : linkedContact.status === 'archived'
+              ? 'archived'
+              : linkedContact.status === 'skipped'
+                ? 'skipped'
+                : linkedContact.status === 'spam'
+                  ? 'spam'
+                  : 'all'
           : linkedContact.status === 'active'
             ? 'active'
             : 'all',
@@ -1158,7 +1166,9 @@ function ContactsView({
                       aria-label={t('contacts.createFor', {
                         email: item.email_address,
                       })}
-                      className="pending-create-button"
+                      className={`pending-create-button button-loading-dot${
+                        busyEmailAddress === item.email_address ? ' is-loading' : ''
+                      }`}
                       disabled={busyEmailAddress === item.email_address}
                       onClick={() =>
                         handleCreatePendingContact(
@@ -1292,7 +1302,11 @@ function ContactsView({
                       <option value="spam">{t('common.spam')}</option>
                     </select>
                   </label>
-                  <button disabled={isSubmitting} type="submit">
+                  <button
+                    className={`button-loading-dot${isSubmitting ? ' is-loading' : ''}`}
+                    disabled={isSubmitting}
+                    type="submit"
+                  >
                     {t('contacts.create')}
                   </button>
                 </form>
@@ -1335,6 +1349,7 @@ function ContactsView({
                     </datalist>
                   </label>
                   <button
+                    className={`button-loading-dot${isSubmitting ? ' is-loading' : ''}`}
                     disabled={
                       isSubmitting ||
                       mergeSourceContact === undefined ||
@@ -1897,6 +1912,9 @@ function ContactsView({
                                             aria-label={t('contacts.email.setPrimaryFor', {
                                               email: emailAddress.email_address,
                                             })}
+                                            className={`button-loading-dot${
+                                              isSubmitting ? ' is-loading' : ''
+                                            }`}
                                             disabled={isSubmitting}
                                             onClick={() =>
                                               handleSetPrimaryEmailAddress(emailAddress.id)
@@ -1913,6 +1931,9 @@ function ContactsView({
                                             aria-label={t('contacts.email.activateFor', {
                                               email: emailAddress.email_address,
                                             })}
+                                            className={`button-loading-dot${
+                                              isSubmitting ? ' is-loading' : ''
+                                            }`}
                                             disabled={isSubmitting}
                                             onClick={() =>
                                               handleActivateEmailAddress(emailAddress.id)
@@ -1937,6 +1958,9 @@ function ContactsView({
                                               : 'contacts.email.removeFor',
                                             { email: emailAddress.email_address },
                                           )}
+                                          className={`button-loading-dot${
+                                            isSubmitting ? ' is-loading' : ''
+                                          }`}
                                           disabled={isSubmitting}
                                           onClick={() =>
                                             handleDeleteEmailAddress(emailAddress.id)
@@ -1979,6 +2003,9 @@ function ContactsView({
                                               ))}
                                             </select>
                                             <button
+                                              className={`button-loading-dot${
+                                                isSubmitting ? ' is-loading' : ''
+                                              }`}
                                               disabled={
                                                 isSubmitting ||
                                                 (moveTargetContactIds[emailAddress.id] ?? '') ===
@@ -2032,7 +2059,13 @@ function ContactsView({
                                         </button>
                                       </div>
                                     </label>
-                                    <button disabled={isSubmitting} type="submit">
+                                    <button
+                                      className={`button-loading-dot${
+                                        isSubmitting ? ' is-loading' : ''
+                                      }`}
+                                      disabled={isSubmitting}
+                                      type="submit"
+                                    >
                                       {t('contacts.email.add')}
                                     </button>
                                   </form>
@@ -2049,6 +2082,9 @@ function ContactsView({
                                     {t('contacts.avatar.update')}
                                   </button>
                                   <button
+                                    className={`button-loading-dot${
+                                      isSubmitting ? ' is-loading' : ''
+                                    }`}
                                     disabled={isSubmitting}
                                     form="contact-detail-edit-form"
                                     type="submit"
@@ -2056,6 +2092,9 @@ function ContactsView({
                                     {t('contacts.detail.save')}
                                   </button>
                                   <button
+                                    className={`button-loading-dot${
+                                      isSubmitting ? ' is-loading' : ''
+                                    }`}
                                     disabled={isSubmitting || !canDeleteSelectedContact}
                                     onClick={handleDeleteContact}
                                     title={

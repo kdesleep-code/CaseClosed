@@ -34,6 +34,62 @@ def test_jobs_list_reports_phase_2_jobs(client, database_path: Path) -> None:
     assert response.json()["data"]["items"][0]["error_message"] == (
         "Gmail request failed."
     )
+    assert response.json()["data"]["items"][0]["related_mail"] is None
+
+
+def test_jobs_list_reports_related_mail_from_payload(
+    client,
+    database_path: Path,
+) -> None:
+    client.post(
+        "/api/v1/contacts",
+        json={
+            "display_name": "Job Mail Sender",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "job.mail.sender@example.com", "is_primary": True}
+            ],
+        },
+    )
+    ingest_response = client.post(
+        "/api/v1/mails/mock-ingest",
+        json={
+            "gmail_message_id": "gmail_job_related_1",
+            "gmail_thread_id": "thread_job_related",
+            "subject": "Related job mail",
+            "from_address": "job.mail.sender@example.com",
+            "received_at": "2026-05-28T09:10:00+09:00",
+            "body_text": "This message has a failed job.",
+        },
+    )
+    message_id = ingest_response.json()["data"]["message_id"]
+    job_id = ingest_response.json()["data"]["queued_job_id"]
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE jobs
+            SET status = 'failed', error_type = 'WorkerError', error_message = 'boom'
+            WHERE id = ?
+            """,
+            (job_id,),
+        )
+        connection.commit()
+
+    response = client.get(f"{JOBS_URL}?status=failed")
+
+    assert response.status_code == 200
+    job = response.json()["data"]["items"][0]
+    assert job["id"] == job_id
+    assert job["related_mail"]["context_type"] == "message"
+    assert job["related_mail"]["message_id"] == message_id
+    assert job["related_mail"]["thread_id"].startswith("gmail_thread_")
+    assert job["related_mail"]["gmail_message_id"] == "gmail_job_related_1"
+    assert job["related_mail"]["gmail_thread_id"] == "thread_job_related"
+    assert job["related_mail"]["subject"] == "Related job mail"
+    assert job["related_mail"]["received_at"] == "2026-05-28T09:10:00+09:00"
+    assert job["related_mail"]["from_address"] == "job.mail.sender@example.com"
+    assert job["related_mail"]["mail_url"] == f"/mail/{message_id}"
 
 
 def test_failed_job_can_be_manually_retried(client, database_path: Path) -> None:

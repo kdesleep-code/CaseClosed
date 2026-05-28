@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { t } from './i18n'
 import type { MessageKey } from './i18n'
@@ -54,18 +54,54 @@ function recipientsFor(addresses: string[], recipients?: MailRecipient[]) {
 }
 
 function senderRecipient(message: MailThreadMessage): MailRecipient {
+  const shouldUseReplyTo =
+    message.from_contact?.kind === 'mailing_list' &&
+    message.from_contact.sender_resolution_mode === 'reply_to' &&
+    message.reply_to_address !== null &&
+    message.reply_to_address.trim() !== ''
+
+  if (shouldUseReplyTo) {
+    return {
+      email_address: message.reply_to_address ?? message.from_address,
+      contact:
+        message.sender_contact !== null &&
+        message.sender_contact !== undefined &&
+        message.sender_contact.id !== message.from_contact?.id
+          ? message.sender_contact
+          : null,
+    }
+  }
+
   return {
     email_address: message.from_address,
     contact: message.from_contact ?? message.sender_contact ?? null,
   }
 }
 
-function isSentMessage(message: MailThreadMessage) {
-  return (message.gmail_labels ?? []).some((label) => label.toLowerCase() === 'sent')
+function fromRecipient(message: MailThreadMessage): MailRecipient {
+  return {
+    email_address: message.from_address,
+    contact: message.from_contact ?? null,
+  }
 }
 
-function isIncompleteIncomingMessage(message: MailThreadMessage) {
-  return !isSentMessage(message) && message.processed_status !== 'processed'
+function isSentMessage(message: MailThreadMessage) {
+  return (
+    message.effective_importance === 'sent' ||
+    (message.gmail_labels ?? []).some((label) => label.toLowerCase() === 'sent')
+  )
+}
+
+function isIncompleteActionRequiredIncomingMessage(message: MailThreadMessage) {
+  return (
+    !isSentMessage(message) &&
+    isActionRequiredImportance(message.effective_importance) &&
+    message.processed_status !== 'processed'
+  )
+}
+
+function isActionRequiredImportance(importance: string) {
+  return ['high', 'middle', 'pending', 'unclassified'].includes(importance)
 }
 
 function latestReceivedMailDate(threadMessages: MailThreadMessage[]) {
@@ -199,7 +235,7 @@ function sanitizedMailHtml(rawHtml: string) {
   return document.body.innerHTML
 }
 
-function mailHtmlDocument(rawHtml: string) {
+function mailHtmlDocument(rawHtml: string, frameId: string) {
   return `<!doctype html>
 <html>
 <head>
@@ -220,88 +256,115 @@ function mailHtmlDocument(rawHtml: string) {
     a { color: #7a2f24; }
   </style>
 </head>
-<body>${sanitizedMailHtml(rawHtml)}</body>
+<body><div id="caseclosed-mail-html-content">${sanitizedMailHtml(rawHtml)}</div><style>
+html, body {
+  height: auto !important;
+  min-height: 0 !important;
+  overflow: visible !important;
+}
+#caseclosed-mail-html-content {
+  box-sizing: border-box;
+  display: flow-root;
+  width: 100%;
+}
+</style>
+<script>
+(() => {
+  const frameId = ${JSON.stringify(frameId)};
+  function measure() {
+    const body = document.body;
+    const content = document.getElementById('caseclosed-mail-html-content');
+    if (!body || !content) {
+      return;
+    }
+    const contentRect = content.getBoundingClientRect();
+    let measuredTop = contentRect.top;
+    let measuredBottom = contentRect.bottom;
+    for (const element of content.querySelectorAll('*')) {
+      const rect = element.getBoundingClientRect();
+      measuredTop = Math.min(measuredTop, rect.top);
+      measuredBottom = Math.max(
+        measuredBottom,
+        rect.bottom,
+        rect.top + element.scrollHeight,
+        rect.top + element.offsetHeight,
+      );
+    }
+    const bodyStyle = window.getComputedStyle(body);
+    const paddingTop = Number.parseFloat(bodyStyle.paddingTop) || 0;
+    const paddingBottom = Number.parseFloat(bodyStyle.paddingBottom) || 0;
+    const contentHeight = Math.max(
+      contentRect.height,
+      content.scrollHeight,
+      content.offsetHeight,
+      measuredBottom - measuredTop,
+    );
+    const height = Math.ceil(Math.max(
+      180,
+      contentHeight + paddingTop + paddingBottom,
+    )) + 2;
+    window.parent.postMessage(
+      { type: 'caseclosed-mail-html-height', frameId, height },
+      '*',
+    );
+  }
+  window.addEventListener('load', measure);
+  window.addEventListener('resize', measure);
+  if ('ResizeObserver' in window) {
+    const observer = new ResizeObserver(measure);
+    observer.observe(document.documentElement);
+    observer.observe(document.body);
+    observer.observe(content);
+  }
+  for (const image of document.images) {
+    image.addEventListener('load', measure);
+    image.addEventListener('error', measure);
+  }
+  requestAnimationFrame(measure);
+  [100, 300, 800, 1600, 3200].forEach((delay) => setTimeout(measure, delay));
+})();
+</script></body>
 </html>`
 }
 
 function HtmlMailBody({ html }: { html: string }) {
-  const iframeRef = useRef<HTMLIFrameElement | null>(null)
-  const resizeObserverRef = useRef<ResizeObserver | null>(null)
-  const imageCleanupRef = useRef<(() => void) | null>(null)
-  const resizeTimerIdsRef = useRef<number[]>([])
-  const srcDoc = useMemo(() => mailHtmlDocument(html), [html])
+  const frameId = useId()
+  const [height, setHeight] = useState(180)
+  const srcDoc = useMemo(() => mailHtmlDocument(html, frameId), [frameId, html])
 
-  function cleanupResizeWatchers() {
-    resizeObserverRef.current?.disconnect()
-    resizeObserverRef.current = null
-    imageCleanupRef.current?.()
-    imageCleanupRef.current = null
-    for (const timerId of resizeTimerIdsRef.current) {
-      window.clearTimeout(timerId)
-    }
-    resizeTimerIdsRef.current = []
-  }
+  useEffect(() => {
+    setHeight(180)
+  }, [srcDoc])
 
-  function resizeIframe() {
-    const iframe = iframeRef.current
-    const body = iframe?.contentDocument?.body
-    const documentElement = iframe?.contentDocument?.documentElement
-    if (iframe === null || body == null || documentElement == null) {
-      return
-    }
-    iframe.style.height = `${Math.max(
-      180,
-      body.scrollHeight,
-      body.offsetHeight,
-      documentElement.scrollHeight,
-      documentElement.offsetHeight,
-      documentElement.clientHeight,
-    )}px`
-  }
-
-  function watchIframeSize() {
-    cleanupResizeWatchers()
-    resizeIframe()
-
-    const iframe = iframeRef.current
-    const document = iframe?.contentDocument
-    if (document == null || document.body == null || document.documentElement == null) {
-      return
-    }
-
-    const observer = new ResizeObserver(() => resizeIframe())
-    observer.observe(document.body)
-    observer.observe(document.documentElement)
-    resizeObserverRef.current = observer
-
-    const images = [...document.images]
-    for (const image of images) {
-      image.addEventListener('load', resizeIframe)
-      image.addEventListener('error', resizeIframe)
-    }
-    imageCleanupRef.current = () => {
-      for (const image of images) {
-        image.removeEventListener('load', resizeIframe)
-        image.removeEventListener('error', resizeIframe)
+  useEffect(() => {
+    function handleMessage(event: MessageEvent) {
+      const data = event.data as {
+        type?: unknown
+        frameId?: unknown
+        height?: unknown
       }
+      if (
+        data.type !== 'caseclosed-mail-html-height' ||
+        data.frameId !== frameId ||
+        typeof data.height !== 'number' ||
+        !Number.isFinite(data.height)
+      ) {
+        return
+      }
+      setHeight(Math.max(180, Math.min(30000, Math.ceil(data.height))))
     }
 
-    window.requestAnimationFrame(resizeIframe)
-    resizeTimerIdsRef.current = [100, 300, 800, 1600].map((milliseconds) =>
-      window.setTimeout(resizeIframe, milliseconds),
-    )
-  }
-
-  useEffect(() => cleanupResizeWatchers, [srcDoc])
+    window.addEventListener('message', handleMessage)
+    return () => window.removeEventListener('message', handleMessage)
+  }, [frameId])
 
   return (
     <iframe
       className="mail-thread-html-body"
-      onLoad={watchIframeSize}
-      ref={iframeRef}
-      sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+      sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
       scrolling="no"
       srcDoc={srcDoc}
+      style={{ height: `${height}px` }}
       title={t('mail.thread.htmlBody')}
     />
   )
@@ -313,18 +376,31 @@ type SplitBody = {
 }
 
 function looksLikeQuotedReplyIntro(line: string) {
-  return /^On .+ wrote:$/i.test(line.trim())
+  const trimmed = line.trim()
+  const japaneseGmailReplyIntro =
+    /\d{4}\u5e74\d{1,2}\u6708\d{1,2}\u65e5(?:\([^)]+\))?\s+\d{1,2}:\d{2}\s+[^<\n]+<[^<>@\s]+@[^<>@\s]+>:/
+  const slashDateGmailReplyIntro =
+    /\d{4}\/\d{1,2}\/\d{1,2}(?:\([^)]+\))?\s+\d{1,2}:\d{2}\s+[^<\n]+<[^<>@\s]+@[^<>@\s]+>:/
+  return (
+    /^On .+ wrote:$/i.test(trimmed) ||
+    japaneseGmailReplyIntro.test(trimmed) ||
+    slashDateGmailReplyIntro.test(trimmed)
+  )
 }
 
 function looksLikeOriginalMessageDivider(line: string) {
   const trimmed = line.trim()
   return /^[-_]{2,}\s*Original Message\s*[-_]{2,}$/i.test(trimmed)
     || /^[-_]{2,}\s*Forwarded message\s*[-_]{2,}$/i.test(trimmed)
+    || /^差出人\s*:\s*.+<[^<>@\s]+@[^<>@\s]+>$/i.test(trimmed)
+    || /^From\s*:\s*.+<[^<>@\s]+@[^<>@\s]+>$/i.test(trimmed)
+    || /^送信日時\s*:\s*.+$/i.test(trimmed)
+    || /^Sent\s*:\s*.+$/i.test(trimmed)
 }
 
 function splitQuotedReply(text: string): SplitBody {
   const lines = text.split('\n')
-  const quoteStartIndex = lines.findIndex((line, index) => {
+  const quoteStartIndex = lines.findIndex((line) => {
     const trimmed = line.trimStart()
     if (trimmed.startsWith('>')) {
       return true
@@ -332,10 +408,7 @@ function splitQuotedReply(text: string): SplitBody {
     if (looksLikeOriginalMessageDivider(line)) {
       return true
     }
-    return (
-      looksLikeQuotedReplyIntro(line) &&
-      lines.slice(index + 1).some((nextLine) => nextLine.trimStart().startsWith('>'))
-    )
+    return looksLikeQuotedReplyIntro(line)
   })
 
   if (quoteStartIndex <= 0) {
@@ -351,12 +424,18 @@ function splitQuotedReply(text: string): SplitBody {
 }
 
 function MailBodyContent({ html, text }: { html?: string | null; text: string }) {
-  if (html !== undefined && html !== null && html.trim() !== '') {
+  const body = text || t('mail.thread.noBody')
+  const splitBody = splitQuotedReply(body)
+  if (
+    splitBody.quotedText === null &&
+    html !== undefined &&
+    html !== null &&
+    html.trim() !== '' &&
+    htmlRepresentsPlainText(html, text)
+  ) {
     return <HtmlMailBody html={html} />
   }
 
-  const body = text || t('mail.thread.noBody')
-  const splitBody = splitQuotedReply(body)
   if (splitBody.quotedText === null) {
     return (
       <pre className="mail-thread-body">
@@ -378,6 +457,42 @@ function MailBodyContent({ html, text }: { html?: string | null; text: string })
       </details>
     </>
   )
+}
+
+function htmlRepresentsPlainText(html: string, text: string) {
+  const plainLines = meaningfulBodyLines(text)
+  if (plainLines.length < 4) {
+    return true
+  }
+
+  const htmlText = normalizedInlineText(
+    new DOMParser().parseFromString(sanitizedMailHtml(html), 'text/html').body
+      .textContent ?? '',
+  )
+  if (htmlText === '') {
+    return true
+  }
+
+  const leadingLines = plainLines.slice(0, 8)
+  const missingLeadingLines = leadingLines.filter(
+    (line) => !htmlText.includes(normalizedInlineText(line)),
+  )
+  const laterRepresented = plainLines
+    .slice(8, 24)
+    .some((line) => htmlText.includes(normalizedInlineText(line)))
+
+  return !(missingLeadingLines.length >= 3 && laterRepresented)
+}
+
+function meaningfulBodyLines(text: string) {
+  return text
+    .split(/\r\n|\r|\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length >= 3 && line.length <= 220)
+}
+
+function normalizedInlineText(text: string) {
+  return text.replace(/\s+/g, ' ').trim()
 }
 
 function composeReplyBody(message: MailThreadMessage) {
@@ -734,7 +849,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
       pendingInboxNavigationRef.current?.cleanup()
       pendingInboxNavigationRef.current = null
       navigateTo(destination)
-    }, 1000)
+    }, 1500)
     pendingInboxNavigationRef.current = { cleanup, timeoutId }
   }
 
@@ -795,9 +910,6 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
     const hasSummary = detail?.summary?.items?.some(
       (summary) => summary.message_id === message.id,
     ) === true
-    const isLastIncompleteIncomingMessage =
-      detail?.thread_messages.filter(isIncompleteIncomingMessage).length === 1 &&
-      isIncompleteIncomingMessage(message)
     return [
       {
         id: 'done',
@@ -818,9 +930,20 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
               if (isProcessed) {
                 await unprocessMail(message.id)
               } else {
+                const hadActionRequiredIncomingMessage =
+                  detail?.thread_messages.some(
+                    isIncompleteActionRequiredIncomingMessage,
+                  ) === true
                 const nextDetail = await processMail(message.id)
-                if (isLastIncompleteIncomingMessage && detail !== null) {
-                  const inboxDate = latestReceivedMailDate(detail.thread_messages)
+                const hasRemainingActionRequiredIncomingMessage =
+                  nextDetail.thread_messages.some(
+                    isIncompleteActionRequiredIncomingMessage,
+                  )
+                if (
+                  hadActionRequiredIncomingMessage &&
+                  !hasRemainingActionRequiredIncomingMessage
+                ) {
+                  const inboxDate = latestReceivedMailDate(nextDetail.thread_messages)
                   scheduleInboxNavigation(inboxDate)
                   return nextDetail
                 }
@@ -1088,7 +1211,11 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                           <div className="mail-thread-message-actions" aria-label="Scheduled mail actions">
                             {scheduledActionsFor(sendRequest).map((action) => (
                               <button
-                                className={action.className}
+                                className={`${action.className ?? ''} button-loading-dot${
+                                  busyAction === `${sendRequest.id}-${action.id}`
+                                    ? ' is-loading'
+                                    : ''
+                                }`.trim()}
                                 disabled={action.disabled}
                                 key={action.id}
                                 onClick={action.onClick}
@@ -1144,6 +1271,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
             const isTarget = message.id === messageId
             const isSent = isSentMessage(message)
             const sender = senderRecipient(message)
+            const fromSender = fromRecipient(message)
             const messageImportance =
               message.effective_importance ?? detail.auto_state.effective_importance
             const messageSummary = summaryItems.find(
@@ -1189,9 +1317,14 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                         : incomingActionsFor(message).map((action) => (
                             <button
                               className={`${action.className ?? ''} ${
+                                busyAction === `${message.id}-done` &&
+                                action.id === 'done'
+                                  ? 'button-loading-dot is-loading'
+                                  : ''
+                              } ${
                                 action.id === 'mail.thread.action.summary' &&
                                 busyAction === `${message.id}-summary`
-                                  ? 'mail-thread-action-loading'
+                                  ? 'mail-thread-action-loading button-loading-dot is-loading'
                                   : ''
                               }`.trim()}
                               disabled={action.disabled}
@@ -1274,7 +1407,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                     <dl className="mail-thread-meta mail-thread-head">
                       <div>
                         <dt>{t('mail.from')}</dt>
-                        <dd><RecipientList recipients={[sender]} /></dd>
+                        <dd><RecipientList recipients={[fromSender]} /></dd>
                       </div>
                       <div>
                         <dt>To</dt>

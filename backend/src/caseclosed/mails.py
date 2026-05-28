@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 from datetime import timedelta
 from uuid import uuid4
 
@@ -46,6 +47,7 @@ from caseclosed.services.llm_provider import (
     FUNCTION_TYPE_NEW_MAIL_DRAFT_GENERATION,
 )
 from caseclosed.services.llm_provider import FUNCTION_TYPE_REPLY_DRAFT_GENERATION
+from caseclosed.services.llm_provider import LlmProviderResponse
 from caseclosed.services.llm_provider import build_mail_draft_generation_provider
 from caseclosed.services.llm_provider import list_llm_model_profiles
 from caseclosed.services.llm_provider import llm_function_config_data
@@ -55,6 +57,9 @@ from caseclosed.services.mail_summary import SUMMARY_TARGET_IMPORTANCE
 from caseclosed.services.mail_summary import enqueue_mail_summary_job
 
 router = APIRouter(prefix="/api/v1/mails", tags=["mails"])
+
+LANGUAGE_ENGLISH = "english"
+LANGUAGE_JAPANESE = "japanese"
 
 
 class MockMailIngestRequest(BaseModel):
@@ -414,8 +419,10 @@ def contact_tags(session: DatabaseSession, contact_id: str) -> list[str]:
 def contact_summary(
     contact: Contact,
     session: DatabaseSession | None = None,
+    *,
+    include_sender_resolution_mode: bool = False,
 ) -> dict[str, object]:
-    return {
+    data = {
         "id": contact.id,
         "display_name": contact.display_name,
         "avatar_url": contact.avatar_url,
@@ -423,6 +430,9 @@ def contact_summary(
         "status": contact.status,
         "tags": contact_tags(session, contact.id) if session is not None else [],
     }
+    if include_sender_resolution_mode:
+        data["sender_resolution_mode"] = contact.sender_resolution_mode
+    return data
 
 
 def contact_for_address(
@@ -440,6 +450,23 @@ def contact_for_address(
         )
         .limit(1)
     ).scalar_one_or_none()
+
+
+def display_sender_contact_for_message(
+    session: DatabaseSession,
+    message: GmailMessage,
+    from_contact: Contact | None,
+) -> Contact | None:
+    if (
+        from_contact is not None
+        and from_contact.kind == "mailing_list"
+        and from_contact.sender_resolution_mode == "reply_to"
+        and message.reply_to_address is not None
+        and message.reply_to_address.strip() != ""
+    ):
+        reply_to_contact = contact_for_address(session, message.reply_to_address)
+        return reply_to_contact
+    return from_contact
 
 
 def recipient_contact_memos(
@@ -465,6 +492,176 @@ def recipient_contact_memos(
             }
         )
     return items
+
+
+def recipient_contact_context(
+    session: DatabaseSession,
+    *,
+    to_addresses: list[str],
+    cc_addresses: list[str],
+) -> dict[str, object]:
+    return {
+        "to": recipient_contact_memos(session, to_addresses),
+        "cc": recipient_contact_memos(session, cc_addresses),
+    }
+
+
+def detect_draft_language(text: str | None) -> str | None:
+    if text is None:
+        return None
+    compacted = text.strip()
+    if compacted == "":
+        return None
+    japanese_count = len(re.findall(r"[\u3040-\u30ff\u3400-\u9fff]", compacted))
+    latin_word_count = len(re.findall(r"\b[A-Za-z][A-Za-z'-]{2,}\b", compacted))
+    latin_letter_count = len(re.findall(r"[A-Za-z]", compacted))
+    if japanese_count >= 8 and japanese_count >= latin_word_count:
+        return LANGUAGE_JAPANESE
+    if latin_word_count >= 12 and latin_letter_count >= japanese_count * 3:
+        return LANGUAGE_ENGLISH
+    if latin_word_count >= 5 and japanese_count == 0:
+        return LANGUAGE_ENGLISH
+    return None
+
+
+def explicit_language_instruction(text: str | None) -> str | None:
+    if text is None or text.strip() == "":
+        return None
+    lowered = text.lower()
+    asks_english = (
+        "in english" in lowered
+        or "reply in english" in lowered
+        or "write in english" in lowered
+        or "英語" in text
+        or "英文" in text
+    )
+    asks_japanese = (
+        "in japanese" in lowered
+        or "reply in japanese" in lowered
+        or "write in japanese" in lowered
+        or "日本語" in text
+        or "和文" in text
+    )
+    if asks_english and not asks_japanese:
+        return LANGUAGE_ENGLISH
+    if asks_japanese and not asks_english:
+        return LANGUAGE_JAPANESE
+    return None
+
+
+def reply_source_text(message: GmailMessage | None) -> str:
+    if message is None:
+        return ""
+    return "\n".join(
+        part
+        for part in [
+            message.subject or "",
+            message.snippet or "",
+            message.body_text or "",
+        ]
+        if part.strip() != ""
+    )
+
+
+def expected_reply_language(
+    *,
+    reply_to_message: GmailMessage | None,
+    instruction: str | None,
+    standard_prompt: str | None,
+) -> str | None:
+    explicit_language = explicit_language_instruction(
+        "\n".join([instruction or "", standard_prompt or ""]),
+    )
+    if explicit_language is not None:
+        return explicit_language
+    return detect_draft_language(reply_source_text(reply_to_message))
+
+
+def language_label(language: str | None) -> str:
+    if language == LANGUAGE_ENGLISH:
+        return "English"
+    if language == LANGUAGE_JAPANESE:
+        return "Japanese"
+    return "Unspecified"
+
+
+def language_policy_text(language: str | None, *, is_reply: bool) -> str:
+    if not is_reply:
+        return (
+            "No reply source language is available. Follow the user's explicit "
+            "instruction and recipient context; when unclear, write polite Japanese."
+        )
+    if language == LANGUAGE_ENGLISH:
+        return (
+            "This is a reply to an English email. Generate the reply body in English. "
+            "This overrides the app's default Japanese preference unless the user "
+            "explicitly requests another language."
+        )
+    if language == LANGUAGE_JAPANESE:
+        return (
+            "This is a reply to a Japanese email. Generate the reply body in Japanese. "
+            "This overrides the app's default Japanese preference only if the user "
+            "explicitly requests another language."
+        )
+    return (
+        "This is a reply, but the source language was not clear. Infer the reply "
+        "language from the source email and user instruction."
+    )
+
+
+def draft_language_mismatch(expected_language: str | None, body_text: str) -> bool:
+    actual_language = detect_draft_language(body_text)
+    return (
+        expected_language in {LANGUAGE_ENGLISH, LANGUAGE_JAPANESE}
+        and actual_language in {LANGUAGE_ENGLISH, LANGUAGE_JAPANESE}
+        and actual_language != expected_language
+    )
+
+
+def retry_language_instruction(expected_language: str) -> str:
+    return (
+        f"The previous draft was not written in {language_label(expected_language)}. "
+        f"Regenerate the subject and body in {language_label(expected_language)}. "
+        "Keep the content faithful to the same compose context."
+    )
+
+
+def combine_draft_provider_responses(
+    first_response: LlmProviderResponse,
+    retry_response: LlmProviderResponse,
+) -> LlmProviderResponse:
+    return LlmProviderResponse(
+        output=retry_response.output,
+        output_preview=retry_response.output_preview,
+        prompt_tokens=add_optional_ints(
+            first_response.prompt_tokens,
+            retry_response.prompt_tokens,
+        ),
+        completion_tokens=add_optional_ints(
+            first_response.completion_tokens,
+            retry_response.completion_tokens,
+        ),
+        total_tokens=add_optional_ints(
+            first_response.total_tokens,
+            retry_response.total_tokens,
+        ),
+        estimated_cost=add_optional_floats(
+            first_response.estimated_cost,
+            retry_response.estimated_cost,
+        ),
+    )
+
+
+def add_optional_ints(first: int | None, second: int | None) -> int | None:
+    if first is None and second is None:
+        return None
+    return (first or 0) + (second or 0)
+
+
+def add_optional_floats(first: float | None, second: float | None) -> float | None:
+    if first is None and second is None:
+        return None
+    return (first or 0.0) + (second or 0.0)
 
 
 def recipient_data(
@@ -497,6 +694,11 @@ def message_data(
     cc_addresses = json_list(message.cc_addresses_json)
     bcc_addresses = json_list(message.bcc_addresses_json)
     from_contact = contact_for_address(session, message.from_address) if session else None
+    display_sender_contact = (
+        display_sender_contact_for_message(session, message, from_contact)
+        if session is not None
+        else from_contact
+    )
     data = {
         "id": message.id,
         "gmail_message_id": message.gmail_message_id,
@@ -507,10 +709,22 @@ def message_data(
         "from_address": message.from_address,
         "from_name": message.from_name,
         "from_contact": (
-            contact_summary(from_contact, session) if from_contact is not None else None
+            contact_summary(
+                from_contact,
+                session,
+                include_sender_resolution_mode=True,
+            )
+            if from_contact is not None
+            else None
         ),
         "sender_contact": (
-            contact_summary(from_contact, session) if from_contact is not None else None
+            contact_summary(
+                display_sender_contact,
+                session,
+                include_sender_resolution_mode=True,
+            )
+            if display_sender_contact is not None
+            else None
         ),
         "sender_address": message.sender_address,
         "reply_to_address": message.reply_to_address,
@@ -1135,7 +1349,11 @@ def list_item_data(
         "llm_block_reason": auto_state.llm_block_reason,
         "llm_blocked_at": auto_state.llm_blocked_at,
         "sender_contact": (
-            contact_summary(contact_row, session)
+            contact_summary(
+                contact_row,
+                session,
+                include_sender_resolution_mode=True,
+            )
             if contact_row is not None
             else None
         ),
@@ -1285,11 +1503,21 @@ def generate_mail_draft(
         if reply_to_message is not None
         else FUNCTION_TYPE_NEW_MAIL_DRAFT_GENERATION
     )
+    expected_language = expected_reply_language(
+        reply_to_message=reply_to_message,
+        instruction=payload.instruction,
+        standard_prompt=payload.standard_prompt,
+    )
     related_case_summaries = payload.related_case_summaries or []
     provider = build_mail_draft_generation_provider(function_type)
     input_payload = {
         "instruction": payload.instruction or "",
         "standard_prompt": payload.standard_prompt or "",
+        "reply_language": language_label(expected_language),
+        "language_policy": language_policy_text(
+            expected_language,
+            is_reply=reply_to_message is not None,
+        ),
         "to_addresses": to_addresses,
         "cc_addresses": cc_addresses,
         "bcc_addresses": bcc_addresses,
@@ -1298,6 +1526,11 @@ def generate_mail_draft(
         "current_body": payload.body_text or "",
         "reply_to_message_id": payload.reply_to_message_id,
         "reply_to_subject": reply_to_message.subject if reply_to_message is not None else "",
+        "recipient_contact_context": recipient_contact_context(
+            session,
+            to_addresses=to_addresses,
+            cc_addresses=cc_addresses,
+        ),
         "recipient_contact_memos": recipient_contact_memos(
             session,
             all_recipient_addresses,
@@ -1310,6 +1543,25 @@ def generate_mail_draft(
         input_payload=input_payload,
     )
     output = provider_response.output
+    retry_count = 0
+    if draft_language_mismatch(expected_language, str(output.get("body") or "")):
+        retry_count = 1
+        retry_input_payload = {
+            **input_payload,
+            "language_retry_instruction": retry_language_instruction(expected_language or ""),
+        }
+        retry_response = provider.complete_json(
+            function_type=function_type,
+            input_payload=retry_input_payload,
+        )
+        retry_output = retry_response.output
+        if not draft_language_mismatch(expected_language, str(retry_output.get("body") or "")):
+            input_payload = retry_input_payload
+            provider_response = combine_draft_provider_responses(
+                provider_response,
+                retry_response,
+            )
+            output = retry_output
     llm_run = LlmRun(
         id=new_id("llm_run"),
         function_type=function_type,
@@ -1325,6 +1577,8 @@ def generate_mail_draft(
                 "bcc_addresses": bcc_addresses,
                 "has_instruction": bool((payload.instruction or "").strip()),
                 "has_standard_prompt": bool((payload.standard_prompt or "").strip()),
+                "reply_language": language_label(expected_language),
+                "language_retry_count": retry_count,
                 "related_case_summary_count": len(related_case_summaries),
             },
             ensure_ascii=True,
@@ -1336,9 +1590,8 @@ def generate_mail_draft(
                 "standard_prompt_length": len(payload.standard_prompt or ""),
                 "auto_body_text_length": len(payload.auto_body_text or ""),
                 "current_body_length": len(payload.body_text or ""),
-                "recipient_contact_memo_count": len(
-                    input_payload["recipient_contact_memos"]
-                ),
+                "detected_reply_language": language_label(expected_language),
+                "recipient_contact_memo_count": len(input_payload["recipient_contact_memos"]),
             },
             ensure_ascii=True,
             sort_keys=True,
@@ -1349,7 +1602,7 @@ def generate_mail_draft(
         status="succeeded",
         error_type=None,
         error_message=None,
-        retry_count=0,
+        retry_count=retry_count,
         max_retry_count=3,
         prompt_tokens=provider_response.prompt_tokens,
         completion_tokens=provider_response.completion_tokens,
@@ -1913,6 +2166,55 @@ def list_mail_dates(
                 {"date": received_date, "count": date_counts[received_date]}
                 for received_date in sorted(date_counts)
             ],
+        },
+    }
+
+
+@router.get("/day-stats")
+def get_mail_day_stats(
+    date: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    if len(date) != 10:
+        raise json_error(422, "VALIDATION_ERROR", "Date must be formatted as YYYY-MM-DD.")
+    start = f"{date}T00:00:00+09:00"
+    end = f"{date}T23:59:59+09:00"
+    rows = session.execute(
+        select(GmailMessage, MailUserState, MailAutoState)
+        .join(MailUserState, MailUserState.message_id == GmailMessage.id)
+        .join(MailAutoState, MailAutoState.message_id == GmailMessage.id)
+        .where(GmailMessage.received_at >= start, GmailMessage.received_at <= end)
+    ).all()
+    rows = [
+        row
+        for row in rows
+        if "DRAFT" not in {label.upper() for label in json_list(row[0].gmail_labels_json)}
+    ]
+    total_count = len(rows)
+    sent_count = 0
+    received_count = 0
+    for message, user_state, auto_state in rows:
+        if message_is_sent(message):
+            sent_count += 1
+            continue
+        effective_importance = user_state.user_importance or auto_state.effective_importance
+        if effective_importance not in {"skip", "unclassified"}:
+            received_count += 1
+
+    send_only_count = sum(
+        1
+        for send_request in send_only_requests(session)
+        if date <= send_request_visible_at(send_request)[:10] <= date
+    )
+    total_count += send_only_count
+    sent_count += send_only_count
+    return {
+        "ok": True,
+        "data": {
+            "date": date,
+            "total_count": total_count,
+            "received_count": received_count,
+            "sent_count": sent_count,
         },
     }
 

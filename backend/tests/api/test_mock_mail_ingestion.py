@@ -463,6 +463,49 @@ def test_spam_person_contact_routes_mail_to_skip_without_jobs(
     assert jobs == []
 
 
+def test_spam_reply_to_contact_routes_mail_to_skip_without_from_pending(
+    client,
+    database_path: Path,
+) -> None:
+    client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Spam Reply Target",
+            "status": "spam",
+            "email_addresses": [
+                {"email_address": "spam.reply@example.com", "is_primary": True}
+            ],
+        },
+    )
+
+    response = client.post(
+        MOCK_MAILS_URL,
+        json={
+            "gmail_message_id": "gmail_spam_reply_to",
+            "gmail_thread_id": "thread_spam_reply_to",
+            "subject": "Suspicious reply-to mail",
+            "from_address": "unknown.sender@example.com",
+            "reply_to_address": "spam.reply@example.com",
+            "received_at": "2026-05-24T09:05:30+09:00",
+        },
+    )
+
+    assert response.status_code == 200
+    with sqlite3.connect(database_path) as connection:
+        auto_state = connection.execute(
+            """
+            SELECT pending_reason, effective_importance, pending_from_address_id
+            FROM mail_auto_state
+            WHERE message_id = ?
+            """,
+            (response.json()["data"]["message_id"],),
+        ).fetchone()
+        jobs = connection.execute("SELECT job_type FROM jobs").fetchall()
+
+    assert auto_state == (None, "skip", None)
+    assert jobs == []
+
+
 def test_skipped_mailing_list_routes_mail_to_skip_without_reply_to_resolution(
     client,
     database_path: Path,

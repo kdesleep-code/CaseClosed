@@ -26,6 +26,7 @@ from caseclosed.email_addressing import normalize_email_address
 from caseclosed.services.mail_ingestion import (
     apply_contact_mail_importance_rule,
     apply_fixed_importance_rule_to_existing_contact_mail,
+    apply_spam_status_to_existing_contact_mail,
 )
 from caseclosed.services.background_worker import kick_job_drain
 
@@ -883,6 +884,12 @@ def create_contact(
     set_contact_tags(session, contact.id, payload.tags, now)
     for email_address in payload.email_addresses:
         link_email_address(session, contact, email_address, now=now, source="manual")
+    if contact.status == "spam":
+        apply_spam_status_to_existing_contact_mail(
+            session,
+            contact=contact,
+            now=now,
+        )
     if payload.source_suggestion_id is not None:
         mark_source_suggestion_adopted(
             session,
@@ -1012,6 +1019,12 @@ def update_contact(
             contact=contact,
             now=now,
         )
+    if contact.status == "spam" and previous_status != "spam":
+        apply_spam_status_to_existing_contact_mail(
+            session,
+            contact=contact,
+            now=now,
+        )
     session.commit()
     kick_job_drain(reason="contact_updated")
     return {"ok": True, "data": contact_data(contact, session)}
@@ -1055,6 +1068,12 @@ def add_contact_email_address(
 
     now = jst_iso()
     link_email_address(session, contact, payload, now=now, source="manual")
+    if contact.status == "spam":
+        apply_spam_status_to_existing_contact_mail(
+            session,
+            contact=contact,
+            now=now,
+        )
     contact.version += 1
     contact.updated_at = now
     session.commit()

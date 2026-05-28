@@ -535,6 +535,29 @@
   resize: vertical;
 }
 
+.gmail-auto-import-form {
+  grid-template-columns: minmax(0, 1fr) minmax(130px, 0.45fr) minmax(130px, 0.45fr) auto;
+  margin-top: 12px;
+}
+
+.mail-mock-form.gmail-auto-import-form label:nth-of-type(3) {
+  grid-column: auto;
+}
+
+.mail-mock-form .checkbox-label {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.mail-mock-form .checkbox-label input {
+  width: auto;
+}
+
+.gmail-auto-import-status {
+  margin-top: 10px;
+}
+
 .mail-actions {
   display: flex;
   flex-wrap: wrap;
@@ -844,6 +867,7 @@
 }
 
 .mail-calendar-day {
+  position: relative;
   border: 1px solid var(--tag-border);
   border-radius: var(--radius-ui);
   padding: 0;
@@ -894,6 +918,20 @@
 
 .mail-gmail-import-button {
   position: relative;
+}
+
+.mail-calendar-day.has-unloaded-mail::before,
+.mail-gmail-import-button.has-unloaded-mail::before {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 8px;
+  height: 8px;
+  border: 2px solid var(--surface-panel);
+  border-radius: 50%;
+  background: #c62828;
+  box-shadow: 0 0 0 2px rgba(198, 40, 40, 0.14);
+  content: '';
 }
 
 .mail-gmail-import-button.is-loading::after {
@@ -2381,6 +2419,26 @@
   cursor: default;
 }
 
+.button-loading-dot,
+.compose-generation-button {
+  position: relative;
+}
+
+.button-loading-dot.is-loading::after,
+.compose-generation-button.is-loading::after {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--surface-panel);
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(145, 78, 43, 0.16);
+  content: '';
+  animation: mail-import-pulse 0.78s ease-in-out infinite;
+}
+
 .compose-draft-list-wrap {
   border-top: 1px solid rgba(145, 78, 43, 0.14);
   padding-top: 10px;
@@ -2474,6 +2532,7 @@
 
 .compose-llm-generation-card textarea {
   min-height: 150px;
+  overflow: hidden;
   resize: vertical;
 }
 
@@ -2611,6 +2670,19 @@
   color: var(--text-strong);
   font-size: 2rem;
   letter-spacing: 0;
+}
+
+.mail-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 14px;
+}
+
+.mail-title-row span {
+  color: var(--text-soft);
+  font-size: 0.84rem;
+  font-weight: 650;
 }
 
 .maintenance-header a,
@@ -4291,6 +4363,15 @@
   background: rgba(255, 248, 239, 0.42);
   font-size: 0.88rem;
   line-height: 1.45;
+}
+
+.maintenance-related-mail {
+  margin-top: 0.35rem;
+}
+
+.maintenance-related-mail a {
+  color: var(--accent-strong);
+  font-weight: 700;
 }
 
 .maintenance-table-wrap tbody tr:has(+ .maintenance-detail-row) td {

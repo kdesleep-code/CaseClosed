@@ -322,6 +322,17 @@ def resolve_sender(
         else None
     )
 
+    if from_contact is not None and from_contact.status in {"skipped", "spam"}:
+        return sender_resolution_for_resolved_contact(from_contact)
+
+    reply_to_spam_resolution = sender_resolution_for_reply_to_spam_contact(
+        session,
+        mail_input,
+        now,
+    )
+    if reply_to_spam_resolution is not None:
+        return reply_to_spam_resolution
+
     if unresolved_email_address(from_email_address, from_contact):
         return SenderResolution(
             pending_address=from_email_address,
@@ -332,9 +343,6 @@ def resolve_sender(
             llm_instruction=None,
             resolved_contact=None,
         )
-
-    if from_contact is not None and from_contact.status in {"skipped", "spam"}:
-        return sender_resolution_for_resolved_contact(from_contact)
 
     if from_contact is not None and from_contact.kind == "mailing_list":
         if from_contact.sender_resolution_mode == "reply_to":
@@ -371,6 +379,28 @@ def resolve_sender(
             return sender_resolution_for_resolved_contact(reply_to_contact)
 
     return sender_resolution_for_resolved_contact(from_contact)
+
+
+def sender_resolution_for_reply_to_spam_contact(
+    session: DatabaseSession,
+    mail_input: MockMailInput,
+    now: str,
+) -> SenderResolution | None:
+    if mail_input.reply_to_address is None or mail_input.reply_to_address.strip() == "":
+        return None
+    reply_to_email_address = upsert_observed_email_address(
+        session,
+        mail_input.reply_to_address,
+        now,
+    )
+    reply_to_contact = (
+        session.get(Contact, reply_to_email_address.contact_id)
+        if reply_to_email_address.contact_id is not None
+        else None
+    )
+    if reply_to_contact is not None and reply_to_contact.status == "spam":
+        return sender_resolution_for_resolved_contact(reply_to_contact)
+    return None
 
 
 def sender_resolution_for_resolved_contact(contact: Contact | None) -> SenderResolution:
@@ -570,6 +600,59 @@ def apply_fixed_importance_rule_to_existing_contact_mail(
         "preserved": preserved,
         "queued": queued,
     }
+
+
+def apply_spam_status_to_existing_contact_mail(
+    session: DatabaseSession,
+    *,
+    contact: Contact,
+    now: str,
+) -> dict[str, int]:
+    if contact.status != "spam":
+        return {"matched": 0, "updated": 0, "preserved": 0}
+
+    normalized_addresses = [
+        row.normalized_email_address
+        for row in session.scalars(
+            select(ContactEmailAddress).where(
+                ContactEmailAddress.contact_id == contact.id,
+                ContactEmailAddress.deleted_at.is_(None),
+            )
+        ).all()
+    ]
+    if not normalized_addresses:
+        return {"matched": 0, "updated": 0, "preserved": 0}
+
+    rows = session.execute(
+        select(GmailMessage, MailAutoState)
+        .join(MailAutoState, MailAutoState.message_id == GmailMessage.id)
+        .where(
+            (GmailMessage.from_address.in_(normalized_addresses))
+            | (GmailMessage.reply_to_address.in_(normalized_addresses))
+        )
+    ).all()
+
+    updated = 0
+    preserved = 0
+    for message, auto_state in rows:
+        if message_is_sent(message):
+            preserved += 1
+            continue
+        if (
+            auto_state.effective_importance == "skip"
+            and auto_state.pending_reason is None
+            and auto_state.pending_from_address_id is None
+        ):
+            preserved += 1
+            continue
+        auto_state.effective_importance = "skip"
+        auto_state.pending_reason = None
+        auto_state.pending_from_address_id = None
+        auto_state.updated_at = now
+        auto_state.version += 1
+        updated += 1
+
+    return {"matched": len(rows), "updated": updated, "preserved": preserved}
 
 
 def upsert_observed_email_address(

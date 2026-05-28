@@ -54,6 +54,7 @@ export type MailListItem = {
     avatar_url: string | null
     kind: string
     status?: string
+    sender_resolution_mode?: 'self' | 'reply_to'
     tags?: string[]
   } | null
   case_links?: Array<{
@@ -69,6 +70,7 @@ export type MailContactSummary = {
   avatar_url: string | null
   kind: string
   status?: string
+  sender_resolution_mode?: 'self' | 'reply_to'
   tags?: string[]
 }
 
@@ -302,6 +304,19 @@ export type GoogleGmailStatus = {
   has_refresh_token: boolean
   token_expires_at: string | null
   mail_loading_enabled: boolean
+  auto_import: GoogleGmailAutoImportSettings
+}
+
+export type GoogleGmailAutoImportSettings = {
+  enabled: boolean
+  interval_minutes: number
+  max_messages_per_run: number
+  last_run_at: string | null
+  last_success_at: string | null
+  last_error: string | null
+  last_imported_count: number
+  unloaded_dates: string[]
+  updated_at: string | null
 }
 
 export type GoogleGmailImportResult = {
@@ -358,6 +373,13 @@ export type MailListPage = {
 export type MailDateSummary = {
   date: string
   count: number
+}
+
+export type MailDayStats = {
+  date: string
+  total_count: number
+  received_count: number
+  sent_count: number
 }
 
 export class Phase4ApiError extends Error {
@@ -453,6 +475,11 @@ export async function listMailDates(
     `/api/v1/mails/dates?${params.toString()}`,
   )
   return data.items
+}
+
+export function getMailDayStats(date: string): Promise<MailDayStats> {
+  const params = new URLSearchParams({ date })
+  return request(`/api/v1/mails/day-stats?${params.toString()}`)
 }
 
 export function getMailDetail(messageId: string): Promise<MailDetail> {
@@ -634,6 +661,18 @@ export function importUnloadedGoogleGmailByDate(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ date }),
+  })
+}
+
+export function updateGoogleGmailAutoImportSettings(payload: {
+  enabled: boolean
+  interval_minutes: number
+  max_messages_per_run: number
+}): Promise<GoogleGmailAutoImportSettings> {
+  return request('/api/v1/google/gmail/auto-import-settings', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
   })
 }
 

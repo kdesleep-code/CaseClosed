@@ -1059,6 +1059,112 @@ describe('Phase 4 mail screen', () => {
     window.history.pushState({}, '', '/')
   })
 
+  it('collapses Japanese Gmail quoted reply sections in sent mail bodies', async () => {
+    const sentBody = [
+      '下記確認しました。',
+      '1時半ごろにこちらからお電話する形でよろしいですか？',
+      '',
+      'よろしくお願い申し上げます。',
+      '',
+      '堀江',
+      '',
+      '2026年5月28日(木) 10:27 SHUYAN HAN <yuimachineheart@gmail.com>:',
+      '堀江さん',
+      '',
+      '下記よろしくお願いします．',
+      '',
+      '> -----Original Message-----',
+      '> From: horie@bipl-sdnn.org <horie@bipl-sdnn.org>',
+    ].join('\n')
+    const sentMail = {
+      id: 'mail_sent_japanese_quote',
+      gmail_message_id: 'gmail_sent_japanese_quote',
+      gmail_thread_id: 'thread_japanese_quote',
+      thread_id: 'thread_japanese_quote',
+      received_at: '2026-05-28T12:45:00+09:00',
+      received_date: '2026-05-28',
+      subject: 'Japanese quote',
+      from_address: 'me@example.com',
+      from_name: 'Me',
+      sender_address: null,
+      reply_to_address: null,
+      list_id: null,
+      processed_status: 'processed',
+      read_status: 'read',
+      read_at: '2026-05-28T12:45:00+09:00',
+      user_importance: null,
+      effective_importance: 'sent',
+      importance_rank: 6,
+      external_importance: null,
+      suggested_importance: null,
+      llm_run_id: null,
+      pending_reason: null,
+      to_addresses: ['kitagawa@cs.tsukuba.ac.jp'],
+      cc_addresses: [],
+      bcc_addresses: [],
+      message_id_header: '<sent-japanese-quote@example.com>',
+      in_reply_to_header: '<source@example.com>',
+      references_header: null,
+      snippet: null,
+      gmail_link: null,
+      external_starred: false,
+      gmail_labels: ['SENT'],
+      body_text: sentBody,
+      body_html: `<div>${sentBody.replaceAll('\n', '<br>')}</div>`,
+      created_at: '2026-05-28T12:45:00+09:00',
+      updated_at: '2026-05-28T12:45:00+09:00',
+      version: 1,
+    }
+    const detailPayload = {
+      message: sentMail,
+      thread_messages: [sentMail],
+      scheduled_send_requests: [],
+      user_state: {
+        user_importance: null,
+        processed_status: 'processed',
+        processed_at: '2026-05-28T12:45:00+09:00',
+        read_status: 'read',
+        read_at: '2026-05-28T12:45:00+09:00',
+        version: 1,
+      },
+      auto_state: {
+        external_importance: null,
+        suggested_importance: null,
+        llm_run_id: null,
+        effective_importance: 'sent',
+        pending_reason: null,
+      },
+      summary: null,
+      available_actions: [],
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        const path = input.toString()
+        if (path === '/api/v1/auth/session') {
+          return activeSessionResponse()
+        }
+        if (path === '/api/v1/mails/mail_sent_japanese_quote') {
+          return apiResponse(200, { ok: true, data: detailPayload })
+        }
+        if (path === '/api/v1/mails/mail_sent_japanese_quote/read' && init?.method === 'POST') {
+          return apiResponse(200, { ok: true, data: detailPayload })
+        }
+        throw new Error(`Unexpected request: ${path} ${init?.method ?? 'GET'}`)
+      }),
+    )
+    window.history.pushState({}, '', '/mail/mail_sent_japanese_quote')
+
+    render(<App />)
+
+    expect(await screen.findByText(/1時半ごろにこちらから/)).toBeInTheDocument()
+    const quotedSummary = screen.getByText('Quoted reply')
+    expect(quotedSummary.closest('details')).not.toHaveAttribute('open')
+    await userEvent.click(quotedSummary)
+    expect(quotedSummary.closest('details')).toHaveAttribute('open')
+    expect(await screen.findByText(/堀江さん/)).toBeInTheDocument()
+  })
+
   it('blocks the mail list when pending contacts remain', async () => {
     const fetchMock = vi.fn((input: string | URL | Request) => {
       const path = input.toString()
@@ -1152,6 +1258,17 @@ describe('Phase 2 maintenance screen', () => {
                   error_message: 'Review sample failure.',
                   created_at: '2026-05-23T09:00:00+09:00',
                   updated_at: '2026-05-23T09:02:00+09:00',
+                  related_mail: {
+                    context_type: 'message',
+                    message_id: 'mail_failed_source',
+                    thread_id: 'thread_failed_source',
+                    gmail_message_id: 'gmail_failed_source',
+                    gmail_thread_id: 'gmail_thread_failed_source',
+                    subject: 'Failed summary source',
+                    received_at: '2026-05-23T08:55:00+09:00',
+                    from_address: 'sender@example.com',
+                    mail_url: '/mail/mail_failed_source',
+                  },
                 },
                 {
                   id: 'job_succeeded',
@@ -1164,6 +1281,7 @@ describe('Phase 2 maintenance screen', () => {
                   error_message: null,
                   created_at: '2026-05-23T09:00:00+09:00',
                   updated_at: '2026-05-23T09:02:00+09:00',
+                  related_mail: null,
                 },
               ],
             },
@@ -1240,6 +1358,11 @@ describe('Phase 2 maintenance screen', () => {
         'The job failed. Reason: ReviewFailure - Review sample failure.',
       ),
     ).toBeInTheDocument()
+    expect(
+      screen.getByRole('link', {
+        name: /Related mail: 2026-05-23T08:55:00\+09:00 \/ sender@example.com \/ Failed summary source/,
+      }),
+    ).toHaveAttribute('href', '/mail/mail_failed_source')
     expect(screen.getByRole('button', { name: 'Retry job_failed' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Retry job_failed' })).toHaveAttribute(
       'title',
@@ -1314,6 +1437,7 @@ describe('Phase 2 maintenance screen', () => {
                       max_retries: 3,
                       created_at: '2026-05-23T09:00:00+09:00',
                       updated_at: '2026-05-23T09:02:00+09:00',
+                      related_mail: null,
                     },
                   ],
                 }
@@ -1326,6 +1450,7 @@ describe('Phase 2 maintenance screen', () => {
                   max_retries: 3,
                   created_at: '2026-05-23T09:00:00+09:00',
                   updated_at: '2026-05-23T09:05:00+09:00',
+                  related_mail: null,
                 },
         })
       }
@@ -1669,6 +1794,7 @@ describe('Phase 2 maintenance screen', () => {
                 max_retries: 3,
                 created_at: '2026-05-23T09:00:00+09:00',
                 updated_at: '2026-05-23T09:02:00+09:00',
+                related_mail: null,
               })),
             },
           })

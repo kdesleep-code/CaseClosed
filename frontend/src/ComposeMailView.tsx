@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import type { DragEvent, FormEvent } from 'react'
 import { t } from './i18n'
 import { AppLink, navigateTo } from './navigation'
+import { listContacts } from './phase3Api'
+import type { Contact } from './phase3Api'
 import {
   deleteMailDraft,
   generateMailDraft,
@@ -34,6 +36,15 @@ type ComposeSignature = {
   name: string
   content: string
   system?: boolean
+}
+
+type ComposeRecipientSuggestion = {
+  key: string
+  value: string
+  label: string
+  statusRank: number
+  displayName: string
+  emailAddress: string
 }
 
 const noneSignature: ComposeSignature = {
@@ -128,6 +139,56 @@ function splitAddressList(value: string) {
     .filter((address) => address !== '')
 }
 
+function contactStatusRank(status: string) {
+  if (status === 'active') {
+    return 0
+  }
+  if (status === 'archived') {
+    return 1
+  }
+  if (status === 'skipped') {
+    return 2
+  }
+  return 99
+}
+
+function recipientSuggestionsFromContacts(
+  contacts: Contact[],
+): ComposeRecipientSuggestion[] {
+  const suggestions: ComposeRecipientSuggestion[] = []
+  const seen = new Set<string>()
+  for (const contact of contacts) {
+    const statusRank = contactStatusRank(contact.status)
+    if (statusRank === 99) {
+      continue
+    }
+    for (const emailAddress of contact.email_addresses) {
+      if ((emailAddress.status ?? 'active') !== 'active') {
+        continue
+      }
+      const normalizedEmail = emailAddress.normalized_email_address.toLowerCase()
+      if (seen.has(normalizedEmail)) {
+        continue
+      }
+      seen.add(normalizedEmail)
+      suggestions.push({
+        key: `${contact.id}:${emailAddress.id}`,
+        value: `${contact.display_name} <${emailAddress.email_address}>`,
+        label: `${contact.status} / ${contact.kind ?? 'person'}`,
+        statusRank,
+        displayName: contact.display_name,
+        emailAddress: emailAddress.email_address,
+      })
+    }
+  }
+  return suggestions.sort(
+    (left, right) =>
+      left.statusRank - right.statusRank ||
+      left.displayName.localeCompare(right.displayName) ||
+      left.emailAddress.localeCompare(right.emailAddress),
+  )
+}
+
 function describeError(error: unknown) {
   return error instanceof Error ? error.message : t('mail.compose.sendFailed')
 }
@@ -166,6 +227,9 @@ export default function ComposeMailView() {
   const [signatures, setSignatures] = useState<ComposeSignature[]>(() =>
     loadStoredSignatures(),
   )
+  const [recipientSuggestions, setRecipientSuggestions] = useState<
+    ComposeRecipientSuggestion[]
+  >([])
   const [selectedSignatureId, setSelectedSignatureId] = useState(() =>
     loadSelectedSignatureId(loadStoredSignatures()),
   )
@@ -194,6 +258,7 @@ export default function ComposeMailView() {
   const [showAutoBody, setShowAutoBody] = useState(false)
   const [llmGenerationInstruction, setLlmGenerationInstruction] = useState('')
   const bodyRef = useRef<HTMLTextAreaElement | null>(null)
+  const llmInstructionRef = useRef<HTMLTextAreaElement | null>(null)
 
   useEffect(() => {
     const selectedSignature =
@@ -203,13 +268,38 @@ export default function ComposeMailView() {
   }, [selectedSignatureId, signatures])
 
   useEffect(() => {
-    const textarea = bodyRef.current
+    let canceled = false
+    void listContacts()
+      .then((contacts) => {
+        if (!canceled) {
+          setRecipientSuggestions(recipientSuggestionsFromContacts(contacts))
+        }
+      })
+      .catch(() => {
+        if (!canceled) {
+          setRecipientSuggestions([])
+        }
+      })
+    return () => {
+      canceled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    resizeTextAreaToContent(bodyRef.current)
+  }, [form.body])
+
+  useEffect(() => {
+    resizeTextAreaToContent(llmInstructionRef.current)
+  }, [llmGenerationInstruction])
+
+  function resizeTextAreaToContent(textarea: HTMLTextAreaElement | null) {
     if (textarea === null) {
       return
     }
     textarea.style.height = 'auto'
     textarea.style.height = `${textarea.scrollHeight}px`
-  }, [form.body])
+  }
 
   function updateField(field: keyof ComposeState, value: string) {
     setForm((current) => ({ ...current, [field]: value }))
@@ -537,11 +627,21 @@ export default function ComposeMailView() {
         <div className="compose-layout">
           <section className="mail-panel compose-main-panel">
             <form className="compose-form" onSubmit={handleSubmit}>
+              <datalist id="compose-recipient-suggestions">
+                {recipientSuggestions.map((suggestion) => (
+                  <option
+                    key={suggestion.key}
+                    label={suggestion.label}
+                    value={suggestion.value}
+                  />
+                ))}
+              </datalist>
               <div className="compose-to-row">
                 <label className="compose-field compose-field-line">
                   <span>{t('mail.compose.to')}</span>
                   <input
                     autoComplete="email"
+                    list="compose-recipient-suggestions"
                     onChange={(event) => updateField('to', event.target.value)}
                     type="text"
                     value={form.to}
@@ -565,6 +665,7 @@ export default function ComposeMailView() {
                     <span>{t('mail.compose.cc')}</span>
                     <input
                       autoComplete="email"
+                      list="compose-recipient-suggestions"
                       onChange={(event) => updateField('cc', event.target.value)}
                       type="text"
                       value={form.cc}
@@ -574,6 +675,7 @@ export default function ComposeMailView() {
                     <span>{t('mail.compose.bcc')}</span>
                     <input
                       autoComplete="email"
+                      list="compose-recipient-suggestions"
                       onChange={(event) => updateField('bcc', event.target.value)}
                       type="text"
                       value={form.bcc}
@@ -660,7 +762,9 @@ export default function ComposeMailView() {
                     </label>
                   )}
                   <button
-                    className="compose-schedule-button"
+                    className={`compose-schedule-button button-loading-dot${
+                      isSending ? ' is-loading' : ''
+                    }`}
                     disabled={
                       isSending ||
                       form.to.trim() === '' ||
@@ -673,7 +777,9 @@ export default function ComposeMailView() {
                     {t('mail.compose.scheduleSend')}
                   </button>
                   <button
-                    className="compose-send-button"
+                    className={`compose-send-button button-loading-dot${
+                      isSending ? ' is-loading' : ''
+                    }`}
                     disabled={isSending || form.to.trim() === '' || composedBodyText().trim() === ''}
                     type="submit"
                   >
@@ -699,7 +805,9 @@ export default function ComposeMailView() {
               </div>
               <div className="compose-tool-actions">
                 <button
-                  className="compose-tool-button"
+                  className={`compose-tool-button button-loading-dot${
+                    isDraftBusy ? ' is-loading' : ''
+                  }`}
                   disabled={isDraftBusy}
                   onClick={handleSaveDraft}
                   type="button"
@@ -707,7 +815,9 @@ export default function ComposeMailView() {
                   {t('mail.compose.draft.save')}
                 </button>
                 <button
-                  className="compose-tool-button"
+                  className={`compose-tool-button button-loading-dot${
+                    isDraftBusy ? ' is-loading' : ''
+                  }`}
                   disabled={isDraftBusy}
                   onClick={handleLoadDrafts}
                   type="button"
@@ -724,7 +834,9 @@ export default function ComposeMailView() {
                       {drafts.map((draft) => (
                         <li key={draft.key}>
                           <button
-                            className="compose-draft-load-button"
+                            className={`compose-draft-load-button button-loading-dot${
+                              isDraftBusy ? ' is-loading' : ''
+                            }`}
                             onClick={() => {
                               void applyDraft(draft)
                             }}
@@ -735,7 +847,9 @@ export default function ComposeMailView() {
                           </button>
                           <button
                             aria-label={t('mail.compose.draft.delete')}
-                            className="compose-draft-delete-button"
+                            className={`compose-draft-delete-button button-loading-dot${
+                              isDraftBusy ? ' is-loading' : ''
+                            }`}
                             disabled={isDraftBusy}
                             onClick={() => {
                               void handleDeleteDraft(draft.key)
@@ -772,11 +886,14 @@ export default function ComposeMailView() {
                 <span>{t('mail.compose.llmGeneration.instruction')}</span>
                 <textarea
                   onChange={(event) => setLlmGenerationInstruction(event.target.value)}
+                  ref={llmInstructionRef}
                   value={llmGenerationInstruction}
                 />
               </label>
               <button
-                className="compose-tool-button"
+                className={`compose-tool-button compose-generation-button button-loading-dot${
+                  isLlmGenerating ? ' is-loading' : ''
+                }`}
                 disabled={isLlmGenerating}
                 onClick={() => {
                   void handleGenerateDraft()

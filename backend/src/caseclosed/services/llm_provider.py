@@ -26,6 +26,17 @@ class LlmProviderResponse:
     estimated_cost: float | None = None
 
 
+@dataclass(frozen=True)
+class ParsedOpenAIJsonResponse:
+    output: dict[str, object]
+    output_text: str
+    response_payload: dict[str, object]
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    total_tokens: int | None
+    repaired: bool = False
+
+
 class LlmProvider(Protocol):
     provider_name: str
     model_name: str
@@ -147,25 +158,22 @@ class OpenAIMailImportanceProvider:
                 },
             },
         }
-        response_payload = post_openai_response(
+        parsed_response = parse_openai_json_response(
             payload,
             api_key=self.api_key,
             timeout_seconds=self.timeout_seconds,
         )
-        output_text = extract_response_output_text(response_payload)
-        try:
-            output = json.loads(output_text)
-        except json.JSONDecodeError as error:
-            raise OpenAIProviderError("OpenAI response was not valid JSON.") from error
-
-        importance = normalize_openai_importance(output.get("importance"))
-        output["importance"] = importance
+        output = parsed_response.output
+        if not isinstance(output, dict):
+            raise OpenAIProviderError("OpenAI response JSON was not an object.")
+        importance = normalize_openai_importance(parsed_response.output.get("importance"))
+        parsed_response.output["importance"] = importance
         return LlmProviderResponse(
-            output=output,
+            output=parsed_response.output,
             output_preview=importance,
-            prompt_tokens=read_usage_int(response_payload, "input_tokens"),
-            completion_tokens=read_usage_int(response_payload, "output_tokens"),
-            total_tokens=read_usage_int(response_payload, "total_tokens"),
+            prompt_tokens=parsed_response.prompt_tokens,
+            completion_tokens=parsed_response.completion_tokens,
+            total_tokens=parsed_response.total_tokens,
             estimated_cost=None,
         )
 
@@ -498,6 +506,104 @@ def extract_response_output_text(response_payload: dict[str, object]) -> str:
     if output_text == "":
         raise OpenAIProviderError("OpenAI response output text was empty.")
     return output_text
+
+
+def parse_openai_json_response(
+    payload: dict[str, object],
+    *,
+    api_key: str,
+    timeout_seconds: float,
+) -> ParsedOpenAIJsonResponse:
+    response_payload = post_openai_response(
+        payload,
+        api_key=api_key,
+        timeout_seconds=timeout_seconds,
+    )
+    output_text = extract_response_output_text(response_payload)
+    try:
+        output = json.loads(output_text)
+    except json.JSONDecodeError:
+        repair_payload = build_json_repair_payload(payload, output_text)
+        repair_response_payload = post_openai_response(
+            repair_payload,
+            api_key=api_key,
+            timeout_seconds=timeout_seconds,
+        )
+        repaired_output_text = extract_response_output_text(repair_response_payload)
+        try:
+            repaired_output = json.loads(repaired_output_text)
+        except json.JSONDecodeError as error:
+            raise OpenAIProviderError(
+                "OpenAI response was not valid JSON after repair."
+            ) from error
+        return ParsedOpenAIJsonResponse(
+            output=repaired_output,
+            output_text=repaired_output_text,
+            response_payload=repair_response_payload,
+            prompt_tokens=sum_usage_int(
+                response_payload,
+                repair_response_payload,
+                "input_tokens",
+            ),
+            completion_tokens=sum_usage_int(
+                response_payload,
+                repair_response_payload,
+                "output_tokens",
+            ),
+            total_tokens=sum_usage_int(
+                response_payload,
+                repair_response_payload,
+                "total_tokens",
+            ),
+            repaired=True,
+        )
+
+    return ParsedOpenAIJsonResponse(
+        output=output,
+        output_text=output_text,
+        response_payload=response_payload,
+        prompt_tokens=read_usage_int(response_payload, "input_tokens"),
+        completion_tokens=read_usage_int(response_payload, "output_tokens"),
+        total_tokens=read_usage_int(response_payload, "total_tokens"),
+        repaired=False,
+    )
+
+
+def build_json_repair_payload(
+    original_payload: dict[str, object],
+    invalid_output_text: str,
+) -> dict[str, object]:
+    repair_payload = dict(original_payload)
+    repair_payload["instructions"] = (
+        "Repair the previous assistant output into valid JSON matching the exact "
+        "provided schema. Return only the JSON object. Do not add markdown, code "
+        "fences, comments, or explanatory text. Preserve the original meaning as "
+        "much as possible. If a required field is missing, fill it with a concise "
+        "safe value of the correct type."
+    )
+    repair_payload["input"] = "\n".join(
+        [
+            "The previous assistant output was not valid JSON.",
+            "Convert it into valid JSON matching the schema.",
+            "",
+            "Previous invalid output:",
+            truncated_text(invalid_output_text, 20000),
+        ]
+    )
+    repair_payload["max_output_tokens"] = original_payload.get("max_output_tokens", 1600)
+    return repair_payload
+
+
+def sum_usage_int(
+    first_payload: dict[str, object],
+    second_payload: dict[str, object],
+    key: str,
+) -> int | None:
+    first_value = read_usage_int(first_payload, key)
+    second_value = read_usage_int(second_payload, key)
+    if first_value is None and second_value is None:
+        return None
+    return (first_value or 0) + (second_value or 0)
 
 
 def normalize_openai_importance(value: object) -> str:
@@ -890,17 +996,12 @@ def openai_structured_response(
     api_key: str,
     timeout_seconds: float,
 ) -> LlmProviderResponse:
-    response_payload = post_openai_response(
+    parsed_response = parse_openai_json_response(
         payload,
         api_key=api_key,
         timeout_seconds=timeout_seconds,
     )
-    output_text = extract_response_output_text(response_payload)
-    try:
-        output = json.loads(output_text)
-    except json.JSONDecodeError as error:
-        raise OpenAIProviderError("OpenAI response was not valid JSON.") from error
-
+    output = parsed_response.output
     if not isinstance(output, dict):
         raise OpenAIProviderError("OpenAI response JSON was not an object.")
     summary = str(output.get("summary") or "").strip()
@@ -910,9 +1011,9 @@ def openai_structured_response(
     return LlmProviderResponse(
         output=output,
         output_preview=summary,
-        prompt_tokens=read_usage_int(response_payload, "input_tokens"),
-        completion_tokens=read_usage_int(response_payload, "output_tokens"),
-        total_tokens=read_usage_int(response_payload, "total_tokens"),
+        prompt_tokens=parsed_response.prompt_tokens,
+        completion_tokens=parsed_response.completion_tokens,
+        total_tokens=parsed_response.total_tokens,
         estimated_cost=None,
     )
 
@@ -987,17 +1088,12 @@ def openai_contact_ai_memo_response(
     api_key: str,
     timeout_seconds: float,
 ) -> LlmProviderResponse:
-    response_payload = post_openai_response(
+    parsed_response = parse_openai_json_response(
         payload,
         api_key=api_key,
         timeout_seconds=timeout_seconds,
     )
-    output_text = extract_response_output_text(response_payload)
-    try:
-        output = json.loads(output_text)
-    except json.JSONDecodeError as error:
-        raise OpenAIProviderError("OpenAI response was not valid JSON.") from error
-
+    output = parsed_response.output
     if not isinstance(output, dict):
         raise OpenAIProviderError("OpenAI response JSON was not an object.")
     ai_memo = str(output.get("ai_memo") or "").strip()
@@ -1007,9 +1103,9 @@ def openai_contact_ai_memo_response(
     return LlmProviderResponse(
         output=output,
         output_preview=ai_memo[:200],
-        prompt_tokens=read_usage_int(response_payload, "input_tokens"),
-        completion_tokens=read_usage_int(response_payload, "output_tokens"),
-        total_tokens=read_usage_int(response_payload, "total_tokens"),
+        prompt_tokens=parsed_response.prompt_tokens,
+        completion_tokens=parsed_response.completion_tokens,
+        total_tokens=parsed_response.total_tokens,
         estimated_cost=None,
     )
 
@@ -1049,17 +1145,12 @@ def openai_mail_draft_generation_response(
     api_key: str,
     timeout_seconds: float,
 ) -> LlmProviderResponse:
-    response_payload = post_openai_response(
+    parsed_response = parse_openai_json_response(
         payload,
         api_key=api_key,
         timeout_seconds=timeout_seconds,
     )
-    output_text = extract_response_output_text(response_payload)
-    try:
-        output = json.loads(output_text)
-    except json.JSONDecodeError as error:
-        raise OpenAIProviderError("OpenAI response was not valid JSON.") from error
-
+    output = parsed_response.output
     if not isinstance(output, dict):
         raise OpenAIProviderError("OpenAI response JSON was not an object.")
     subject = str(output.get("subject") or "").strip()
@@ -1073,9 +1164,9 @@ def openai_mail_draft_generation_response(
     return LlmProviderResponse(
         output=output,
         output_preview=body[:200],
-        prompt_tokens=read_usage_int(response_payload, "input_tokens"),
-        completion_tokens=read_usage_int(response_payload, "output_tokens"),
-        total_tokens=read_usage_int(response_payload, "total_tokens"),
+        prompt_tokens=parsed_response.prompt_tokens,
+        completion_tokens=parsed_response.completion_tokens,
+        total_tokens=parsed_response.total_tokens,
         estimated_cost=None,
     )
 
@@ -1116,8 +1207,12 @@ def mail_thread_summary_instructions() -> str:
         "You summarize an email thread for a Japanese personal work-support app. "
         "Return only JSON matching the provided schema. "
         "Write summary, translation, next_action, and key_points in Japanese. "
+        "Write the summary as bullet points. "
         "Summarize the whole thread chronologically, including current status, "
         "open questions, deadlines, requests, and decisions. "
+        "If summary_scope is partial, summarize only that chunk. "
+        "If summary_scope is final_from_partial_summaries, integrate the provided "
+        "partial summaries into one coherent thread summary. "
         "If the thread is already Japanese, set translation to null."
     )
 
@@ -1132,8 +1227,11 @@ def mail_draft_generation_instructions(function_type: str) -> str:
         "Use the current draft body as source material when useful, but improve it "
         "rather than merely echoing it. Do not invent facts, promises, attachments, "
         "or schedules that are not supported by the context. "
-        "Write in the language implied by the instruction and recipient context; "
-        "when unclear, write polite Japanese business email. "
+        "For reply emails, use the provided reply_language and language_policy. "
+        "Reply in the same language as the source email unless the user explicitly "
+        "requests another language. For new emails, write in the language implied "
+        "by the instruction and recipient context; when unclear, write polite "
+        "Japanese business email. "
         "Do not include a signature unless the user explicitly asks for one."
     )
     if function_type == FUNCTION_TYPE_REPLY_DRAFT_GENERATION:
@@ -1162,17 +1260,24 @@ def mail_draft_generation_input_text(input_payload: dict[str, object]) -> str:
             f"Cc: {input_payload.get('cc_addresses') or []}",
             f"Bcc: {input_payload.get('bcc_addresses') or []}",
             f"Current subject: {input_payload.get('current_subject') or ''}",
+            f"Reply language: {input_payload.get('reply_language') or 'Unspecified'}",
+            f"Language policy: {input_payload.get('language_policy') or ''}",
+            (
+                "Language retry instruction: "
+                f"{input_payload.get('language_retry_instruction') or ''}"
+            ),
             (
                 "Reply auto body: "
                 f"{truncated_text(input_payload.get('auto_body_text'), 12000)}"
             ),
             (
-                "Recipient contact user memos JSON: "
-                f"{truncated_text(input_payload.get('recipient_contact_memos'), 8000)}"
+                "Recipient contact context JSON, grouped by recipient role "
+                "(to/cc) with contact names, kind, status, email, and user memos: "
+                f"{truncated_text(json_text(input_payload.get('recipient_contact_context')), 8000)}"
             ),
             (
                 "Related case summaries JSON: "
-                f"{truncated_text(input_payload.get('related_case_summaries'), 8000)}"
+                f"{truncated_text(json_text(input_payload.get('related_case_summaries')), 8000)}"
             ),
             f"Current body: {truncated_text(input_payload.get('current_body'), 16000)}",
         ]
@@ -1215,11 +1320,17 @@ def mail_summary_input_text(input_payload: dict[str, object]) -> str:
 
 def mail_thread_summary_input_text(input_payload: dict[str, object]) -> str:
     messages = input_payload.get("messages")
+    partial_summaries = input_payload.get("partial_summaries")
     lines = [
         f"Thread ID: {input_payload.get('thread_id') or ''}",
         f"Gmail thread ID: {input_payload.get('gmail_thread_id') or ''}",
         f"Subject: {input_payload.get('subject') or ''}",
+        f"Summary scope: {input_payload.get('summary_scope') or 'full'}",
     ]
+    if input_payload.get("chunk_index") is not None:
+        lines.append(
+            f"Chunk: {input_payload.get('chunk_index')} / {input_payload.get('chunk_count')}"
+        )
     if isinstance(messages, list):
         for index, message in enumerate(messages, start=1):
             if not isinstance(message, dict):
@@ -1238,6 +1349,21 @@ def mail_thread_summary_input_text(input_payload: dict[str, object]) -> str:
                     f"Body text: {truncated_text(message.get('body_text'), 12000)}",
                 ]
             )
+    if isinstance(partial_summaries, list):
+        lines.append("\nPartial summaries to integrate:")
+        for index, summary in enumerate(partial_summaries, start=1):
+            if not isinstance(summary, dict):
+                continue
+            lines.extend(
+                [
+                    f"\nPartial summary {index}",
+                    f"Chunk index: {summary.get('chunk_index') or ''}",
+                    f"Summary: {truncated_text(summary.get('summary'), 4000)}",
+                    f"Next action: {truncated_text(summary.get('next_action'), 1000)}",
+                    f"Key points JSON: {truncated_text(json_text(summary.get('key_points') or []), 3000)}",
+                    f"Needs action: {summary.get('needs_action')}",
+                ]
+            )
     return "\n".join(lines)
 
 
@@ -1254,6 +1380,10 @@ def truncated_text(value: object, limit: int) -> str:
     if len(text) <= limit:
         return text
     return f"{text[:limit]}\n[truncated {len(text) - limit} characters]"
+
+
+def json_text(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
 def compact_text(value: str, limit: int) -> str:

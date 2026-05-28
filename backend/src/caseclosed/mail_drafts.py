@@ -4,6 +4,7 @@ import json
 import base64
 import mimetypes
 import sqlite3
+from datetime import timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -12,9 +13,11 @@ from pydantic import BaseModel
 
 from caseclosed.auth import json_error
 from caseclosed.db.runtime import jst_iso
+from caseclosed.db.runtime import jst_now
 from caseclosed.settings import get_mail_drafts_database_path
 
 router = APIRouter(prefix="/api/v1/mail-drafts", tags=["mail-drafts"])
+MAIL_DRAFT_RETENTION_DAYS = 30
 
 
 class MailDraftAttachmentRefPayload(BaseModel):
@@ -81,6 +84,7 @@ def bootstrap_mail_drafts_database() -> None:
             """
         )
         connection.commit()
+    cleanup_expired_mail_drafts()
 
 
 def new_draft_key() -> str:
@@ -137,6 +141,7 @@ def row_data(row: sqlite3.Row) -> dict[str, object]:
 
 
 def delete_mail_drafts_for_reply_target(reply_to_message_id: str | None) -> int:
+    cleanup_expired_mail_drafts()
     with draft_connection() as connection:
         if reply_to_message_id is None:
             cursor = connection.execute(
@@ -147,6 +152,20 @@ def delete_mail_drafts_for_reply_target(reply_to_message_id: str | None) -> int:
                 "DELETE FROM mail_drafts WHERE reply_to_message_id = ?",
                 (reply_to_message_id,),
             )
+        connection.commit()
+        return int(cursor.rowcount)
+
+
+def cleanup_expired_mail_drafts(
+    *,
+    retention_days: int = MAIL_DRAFT_RETENTION_DAYS,
+) -> int:
+    cutoff = (jst_now() - timedelta(days=retention_days)).isoformat()
+    with draft_connection() as connection:
+        cursor = connection.execute(
+            "DELETE FROM mail_drafts WHERE created_at < ?",
+            (cutoff,),
+        )
         connection.commit()
         return int(cursor.rowcount)
 
@@ -171,6 +190,7 @@ def resolved_attachment_data(ref: MailDraftAttachmentRefPayload) -> dict[str, ob
 
 @router.post("")
 def create_mail_draft(payload: MailDraftPayload) -> dict[str, object]:
+    cleanup_expired_mail_drafts()
     now = jst_iso()
     draft_key = new_draft_key()
     with draft_connection() as connection:
@@ -213,6 +233,7 @@ def create_mail_draft(payload: MailDraftPayload) -> dict[str, object]:
 
 @router.get("")
 def list_mail_drafts(reply_to_message_id: str | None = None) -> dict[str, object]:
+    cleanup_expired_mail_drafts()
     with draft_connection() as connection:
         if reply_to_message_id is None:
             rows = connection.execute(

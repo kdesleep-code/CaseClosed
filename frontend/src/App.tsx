@@ -720,7 +720,11 @@ function App() {
             {error !== null && <p role="alert">{error}</p>}
             {isLocked && <p className="lock-status">{t('login.locked')}</p>}
 
-            <button disabled={isSubmitting} type="submit">
+            <button
+              className={`button-loading-dot${isSubmitting ? ' is-loading' : ''}`}
+              disabled={isSubmitting}
+              type="submit"
+            >
               {t('login.submit')}
             </button>
           </form>

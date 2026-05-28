@@ -7,6 +7,7 @@ import sqlite3
 from conftest import insert_unresolved_contact_email
 
 CONTACTS_URL = "/api/v1/contacts"
+MOCK_MAILS_URL = "/api/v1/mails/mock-ingest"
 
 
 def test_contact_can_be_created_and_listed(client, database_path: Path) -> None:
@@ -300,6 +301,80 @@ def test_contact_status_changes_between_skipped_and_active(
     activate_response = client.post(f"{CONTACTS_URL}/{contact_id}/activate")
     assert activate_response.status_code == 200
     assert activate_response.json()["data"]["status"] == "active"
+
+
+def test_marking_contact_spam_updates_existing_from_and_reply_to_mail(
+    client,
+    database_path: Path,
+) -> None:
+    spam_target_response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Future Spam Target",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "future.spam@example.com", "is_primary": True}
+            ],
+        },
+    )
+    client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Known Sender",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "known.sender@example.com", "is_primary": True}
+            ],
+        },
+    )
+    from_response = client.post(
+        MOCK_MAILS_URL,
+        json={
+            "gmail_message_id": "gmail_existing_from_spam",
+            "gmail_thread_id": "thread_existing_from_spam",
+            "subject": "Existing from target",
+            "from_address": "future.spam@example.com",
+            "received_at": "2026-05-24T10:00:00+09:00",
+        },
+    )
+    reply_to_response = client.post(
+        MOCK_MAILS_URL,
+        json={
+            "gmail_message_id": "gmail_existing_reply_to_spam",
+            "gmail_thread_id": "thread_existing_reply_to_spam",
+            "subject": "Existing reply-to target",
+            "from_address": "known.sender@example.com",
+            "reply_to_address": "future.spam@example.com",
+            "received_at": "2026-05-24T10:05:00+09:00",
+        },
+    )
+
+    update_response = client.patch(
+        f"{CONTACTS_URL}/{spam_target_response.json()['data']['id']}",
+        json={"status": "spam"},
+    )
+
+    assert from_response.status_code == 200
+    assert reply_to_response.status_code == 200
+    assert update_response.status_code == 200
+    with sqlite3.connect(database_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT gm.gmail_message_id, mas.effective_importance, mas.pending_reason
+            FROM gmail_messages gm
+            JOIN mail_auto_state mas ON mas.message_id = gm.id
+            WHERE gm.gmail_message_id IN (
+                'gmail_existing_from_spam',
+                'gmail_existing_reply_to_spam'
+            )
+            ORDER BY gm.gmail_message_id
+            """
+        ).fetchall()
+
+    assert rows == [
+        ("gmail_existing_from_spam", "skip", None),
+        ("gmail_existing_reply_to_spam", "skip", None),
+    ]
 
 
 def test_unresolved_from_address_can_be_linked_to_existing_contact(

@@ -27,6 +27,7 @@ import {
   listLlmBlockFilters,
   listLlmBlockedMails,
   listMailSendRequests,
+  updateGoogleGmailAutoImportSettings,
   updateLlmBlockFilter,
   updateLlmModelAssignment,
 } from './phase4Api'
@@ -169,6 +170,30 @@ function jobStatusDetail(job: Job) {
   return `The job is in ${job.status} status.`
 }
 
+function jobRelatedMailDetail(job: Job) {
+  const mail = job.related_mail
+  if (mail === null) {
+    return null
+  }
+  const subject = mail.subject?.trim() || '(no subject)'
+  const receivedAt = mail.received_at ?? 'unknown date'
+  const fromAddress = mail.from_address ?? 'unknown sender'
+  const label =
+    mail.context_type === 'thread'
+      ? 'Related thread'
+      : mail.context_type === 'send_reply'
+        ? 'Reply target'
+        : mail.context_type === 'send_request'
+          ? 'Send request'
+          : 'Related mail'
+  const text = `${label}: ${receivedAt} / ${fromAddress} / ${subject}`
+
+  if (mail.mail_url === null) {
+    return <span>{text}</span>
+  }
+  return <a href={mail.mail_url}>{text}</a>
+}
+
 function externalOperationStatusDetail(operation: ExternalOperation) {
   if (operation.status === 'unknown') {
     return operation.unknown_reason === null
@@ -232,6 +257,9 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
   const [debugNotice, setDebugNotice] = useState<string | null>(initialDebugNotice)
   const [llmBlockQuery, setLlmBlockQuery] = useState('password')
   const [llmBlockReason, setLlmBlockReason] = useState('May contain password.')
+  const [gmailAutoImportEnabled, setGmailAutoImportEnabled] = useState(true)
+  const [gmailAutoImportInterval, setGmailAutoImportInterval] = useState('10')
+  const [gmailAutoImportMaxMessages, setGmailAutoImportMaxMessages] = useState('20')
   const [isDebugBusy, setIsDebugBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
@@ -354,6 +382,17 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
     }
   }, [activeTab, googleGmailStatus])
 
+  useEffect(() => {
+    if (googleGmailStatus === null) {
+      return
+    }
+    setGmailAutoImportEnabled(googleGmailStatus.auto_import.enabled)
+    setGmailAutoImportInterval(String(googleGmailStatus.auto_import.interval_minutes))
+    setGmailAutoImportMaxMessages(
+      String(googleGmailStatus.auto_import.max_messages_per_run),
+    )
+  }, [googleGmailStatus])
+
   async function handleRetry(job: Job) {
     setBusyId(job.id)
     setError(null)
@@ -451,6 +490,42 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
         listJobs().then(setJobs),
         listPendingMails().then(setPendingMails),
       ])
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsDebugBusy(false)
+    }
+  }
+
+  async function handleGoogleGmailAutoImportSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setError(null)
+    setDebugNotice(null)
+    setIsDebugBusy(true)
+    try {
+      const intervalMinutes = Math.max(
+        1,
+        Math.min(24 * 60, Number.parseInt(gmailAutoImportInterval, 10) || 10),
+      )
+      const maxMessagesPerRun = Math.max(
+        1,
+        Math.min(500, Number.parseInt(gmailAutoImportMaxMessages, 10) || 20),
+      )
+      const settings = await updateGoogleGmailAutoImportSettings({
+        enabled: gmailAutoImportEnabled,
+        interval_minutes: intervalMinutes,
+        max_messages_per_run: maxMessagesPerRun,
+      })
+      setGoogleGmailStatus((current) =>
+        current === null
+          ? current
+          : {
+              ...current,
+              mail_loading_enabled: settings.enabled,
+              auto_import: settings,
+            },
+      )
+      setDebugNotice(t('maintenance.debug.googleGmailAutoImportSaved'))
     } catch (requestError) {
       setError(describeError(requestError))
     } finally {
@@ -713,6 +788,9 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                                     aria-label={t('maintenance.jobs.retryFor', {
                                       id: job.id,
                                     })}
+                                    className={`button-loading-dot${
+                                      busyId === job.id ? ' is-loading' : ''
+                                    }`}
                                     disabled={busyId === job.id}
                                     onClick={() => handleRetry(job)}
                                     title={t('maintenance.jobs.retryTitle')}
@@ -728,7 +806,14 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                               </td>
                             </tr>
                             <tr className="maintenance-detail-row">
-                              <td colSpan={5}>{jobStatusDetail(job)}</td>
+                              <td colSpan={5}>
+                                <div>{jobStatusDetail(job)}</div>
+                                {job.related_mail !== null && (
+                                  <div className="maintenance-related-mail">
+                                    {jobRelatedMailDetail(job)}
+                                  </div>
+                                )}
+                              </td>
                             </tr>
                           </Fragment>
                         ))}
@@ -783,6 +868,9 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                                         'maintenance.external.markSucceeded',
                                         { id: operation.id },
                                       )}
+                                      className={`button-loading-dot${
+                                        busyId === operation.id ? ' is-loading' : ''
+                                      }`}
                                       disabled={busyId === operation.id}
                                       onClick={() =>
                                         handleResolve(operation, 'mark_succeeded')
@@ -799,6 +887,9 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                                         'maintenance.external.markFailed',
                                         { id: operation.id },
                                       )}
+                                      className={`button-loading-dot${
+                                        busyId === operation.id ? ' is-loading' : ''
+                                      }`}
                                       disabled={busyId === operation.id}
                                       onClick={() =>
                                         handleResolve(operation, 'mark_failed')
@@ -812,6 +903,9 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                                       aria-label={t('maintenance.external.cancelFor', {
                                         id: operation.id,
                                       })}
+                                      className={`button-loading-dot${
+                                        busyId === operation.id ? ' is-loading' : ''
+                                      }`}
                                       disabled={busyId === operation.id}
                                       onClick={() =>
                                         handleResolve(operation, 'mark_canceled')
@@ -943,6 +1037,7 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                       {t('maintenance.debug.googleGmail')}
                     </h3>
                     <button
+                      className={`button-loading-dot${isDebugBusy ? ' is-loading' : ''}`}
                       disabled={isDebugBusy}
                       onClick={() => {
                         void refreshGoogleGmailStatus()
@@ -1001,6 +1096,7 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                         )}
                         <div className="mail-actions mail-debug-actions">
                           <button
+                            className={`button-loading-dot${isDebugBusy ? ' is-loading' : ''}`}
                             disabled={isDebugBusy || !googleGmailStatus.configured}
                             onClick={handleGoogleGmailConnect}
                             type="button"
@@ -1008,6 +1104,7 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                             {t('maintenance.debug.googleGmailConnect')}
                           </button>
                           <button
+                            className={`button-loading-dot${isDebugBusy ? ' is-loading' : ''}`}
                             disabled={isDebugBusy || !googleGmailStatus.connected}
                             onClick={handleGoogleGmailDisconnect}
                             type="button"
@@ -1015,6 +1112,7 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                             {t('maintenance.debug.googleGmailDisconnect')}
                           </button>
                           <button
+                            className={`button-loading-dot${isDebugBusy ? ' is-loading' : ''}`}
                             disabled={isDebugBusy || !googleGmailStatus.connected}
                             onClick={handleGoogleGmailImportLatest}
                             type="button"
@@ -1022,6 +1120,79 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                             {t('maintenance.debug.googleGmailImportLatest')}
                           </button>
                         </div>
+                        <form
+                          className="mail-mock-form gmail-auto-import-form"
+                          onSubmit={handleGoogleGmailAutoImportSettings}
+                        >
+                          <label className="checkbox-label">
+                            <input
+                              checked={gmailAutoImportEnabled}
+                              onChange={(event) =>
+                                setGmailAutoImportEnabled(event.target.checked)
+                              }
+                              type="checkbox"
+                            />
+                            <span>{t('maintenance.debug.googleGmailAutoImport')}</span>
+                          </label>
+                          <label>
+                            <span>
+                              {t('maintenance.debug.googleGmailAutoImportInterval')}
+                            </span>
+                            <input
+                              min={1}
+                              onChange={(event) =>
+                                setGmailAutoImportInterval(event.target.value)
+                              }
+                              type="number"
+                              value={gmailAutoImportInterval}
+                            />
+                          </label>
+                          <label>
+                            <span>
+                              {t('maintenance.debug.googleGmailAutoImportMaxMessages')}
+                            </span>
+                            <input
+                              min={1}
+                              max={500}
+                              onChange={(event) =>
+                                setGmailAutoImportMaxMessages(event.target.value)
+                              }
+                              type="number"
+                              value={gmailAutoImportMaxMessages}
+                            />
+                          </label>
+                          <button
+                            className={`button-loading-dot${
+                              isDebugBusy ? ' is-loading' : ''
+                            }`}
+                            disabled={isDebugBusy}
+                            type="submit"
+                          >
+                            {t('common.save')}
+                          </button>
+                        </form>
+                        <dl className="gmail-auto-import-status">
+                          <div>
+                            <dt>{t('maintenance.debug.googleGmailAutoImportLastRun')}</dt>
+                            <dd>
+                              {googleGmailStatus.auto_import.last_run_at ??
+                                t('common.none')}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt>
+                              {t('maintenance.debug.googleGmailAutoImportLastImported')}
+                            </dt>
+                            <dd>{googleGmailStatus.auto_import.last_imported_count}</dd>
+                          </div>
+                          <div>
+                            <dt>{t('maintenance.debug.googleGmailAutoImportLastError')}</dt>
+                            <dd>
+                              {googleGmailStatus.auto_import.last_error ??
+                                t('common.none')}
+                            </dd>
+                          </div>
+                        </dl>
                       </>
                     )}
                   </div>
@@ -1036,6 +1207,7 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                       {t('maintenance.debug.llmModels')}
                     </h3>
                     <button
+                      className={`button-loading-dot${isDebugBusy ? ' is-loading' : ''}`}
                       disabled={isDebugBusy}
                       onClick={() => {
                         void getLlmModelConfig().then(setLlmModelConfig)
@@ -1124,6 +1296,7 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                       {t('maintenance.debug.llmBlock')}
                     </h3>
                     <button
+                      className={`button-loading-dot${isDebugBusy ? ' is-loading' : ''}`}
                       disabled={isDebugBusy}
                       onClick={() => {
                         void refreshLlmBlockedMails()
@@ -1150,7 +1323,11 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                         value={llmBlockReason}
                       />
                     </label>
-                    <button disabled={isDebugBusy} type="submit">
+                    <button
+                      className={`button-loading-dot${isDebugBusy ? ' is-loading' : ''}`}
+                      disabled={isDebugBusy}
+                      type="submit"
+                    >
                       {t('maintenance.debug.applyLlmBlock')}
                     </button>
                   </form>
@@ -1186,6 +1363,7 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                             </td>
                             <td>
                               <button
+                                className={`button-loading-dot${isDebugBusy ? ' is-loading' : ''}`}
                                 disabled={isDebugBusy}
                                 onClick={() => handleToggleLlmBlockFilter(blockFilter)}
                                 type="button"
@@ -1251,6 +1429,7 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                       {t('maintenance.debug.sendRequests')}
                     </h3>
                     <button
+                      className={`button-loading-dot${isDebugBusy ? ' is-loading' : ''}`}
                       disabled={isDebugBusy}
                       onClick={() => {
                         void refreshSendRequests()

@@ -468,6 +468,189 @@ def test_high_or_middle_mail_queues_and_stores_mock_summary(
     )
 
 
+def test_thread_summary_cuts_quoted_reply_sections_before_llm_input() -> None:
+    service = importlib.import_module("caseclosed.services.mail_thread_summary")
+
+    body = "\n".join(
+        [
+            "ハンさん,",
+            "",
+            "下記、受け取りました。",
+            "",
+            "2026年5月28日(木) 10:27 SHUYAN HAN <yuimachineheart@gmail.com>:",
+            "堀江先生",
+            "お世話になっております、Tcredoをお送りします。",
+        ]
+    )
+
+    assert service.strip_quoted_reply_sections(body) == "\n".join(
+        ["ハンさん,", "", "下記、受け取りました。"]
+    )
+
+
+def test_thread_summary_splits_long_input_and_integrates_partial_summaries() -> None:
+    service = importlib.import_module("caseclosed.services.mail_thread_summary")
+
+    class CapturingThreadSummaryProvider:
+        provider_name = "test"
+        model_name = "thread-summary-test"
+
+        def __init__(self) -> None:
+            self.payloads = []
+
+        def complete_json(self, *, function_type, input_payload):
+            assert function_type == "mail_thread_summary"
+            self.payloads.append(input_payload)
+            scope = input_payload.get("summary_scope")
+            if scope == "final_from_partial_summaries":
+                output = {
+                    "schema_version": "1.0",
+                    "summary": "統合要約",
+                    "translation": None,
+                    "needs_action": True,
+                    "next_action": "確認する。",
+                    "key_points": ["統合"],
+                    "reply_needed": False,
+                    "confidence": 0.8,
+                    "reasoning_summary": "Integrated partial summaries.",
+                    "warnings": [],
+                }
+            else:
+                output = {
+                    "schema_version": "1.0",
+                    "summary": f"部分要約 {len(self.payloads)}",
+                    "translation": None,
+                    "needs_action": True,
+                    "next_action": "部分確認。",
+                    "key_points": ["部分"],
+                    "reply_needed": False,
+                    "confidence": 0.7,
+                    "reasoning_summary": "Partial summary.",
+                    "warnings": [],
+                }
+            return LlmProviderResponse(
+                output=output,
+                output_preview=str(output["summary"]),
+                prompt_tokens=10,
+                completion_tokens=5,
+                total_tokens=15,
+                estimated_cost=0.1,
+            )
+
+    provider = CapturingThreadSummaryProvider()
+    messages = [
+        {
+            "message_id": f"mail_{index}",
+            "gmail_message_id": f"gmail_{index}",
+            "received_at": "2026-05-28T10:00:00+09:00",
+            "subject": "Long thread",
+            "from_address": "sender@example.com",
+            "to_addresses_json": "[]",
+            "cc_addresses_json": "[]",
+            "snippet": "Long",
+            "body_text": "x" * 10000,
+            "importance": "middle",
+        }
+        for index in range(5)
+    ]
+
+    response, chunk_count = service.complete_thread_summary(
+        provider,
+        thread_id="thread_1",
+        gmail_thread_id="gmail_thread_1",
+        subject="Long thread",
+        messages=messages,
+    )
+
+    assert chunk_count > 1
+    assert response.output["summary"] == "統合要約"
+    assert response.prompt_tokens == len(provider.payloads) * 10
+    assert provider.payloads[-1]["summary_scope"] == "final_from_partial_summaries"
+    assert provider.payloads[-1]["messages"] == []
+    assert len(provider.payloads[-1]["partial_summaries"]) == chunk_count
+
+
+def test_openai_json_response_repairs_invalid_json_once(monkeypatch) -> None:
+    provider_module = importlib.import_module("caseclosed.services.llm_provider")
+
+    class FakeOpenAIResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    responses = [
+        {
+            "output_text": '{"summary": "壊れたJSON",',
+            "usage": {
+                "input_tokens": 11,
+                "output_tokens": 7,
+                "total_tokens": 18,
+            },
+        },
+        {
+            "output_text": json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "summary": "修復済み",
+                    "translation": None,
+                    "needs_action": False,
+                    "next_action": None,
+                    "key_points": [],
+                    "reply_needed": False,
+                    "confidence": 0.5,
+                    "reasoning_summary": "Repaired invalid JSON.",
+                    "warnings": [],
+                }
+            ),
+            "usage": {
+                "input_tokens": 13,
+                "output_tokens": 5,
+                "total_tokens": 18,
+            },
+        },
+    ]
+    captured_payloads = []
+
+    def fake_urlopen(request, timeout):
+        captured_payloads.append(json.loads(request.data.decode("utf-8")))
+        return FakeOpenAIResponse(responses.pop(0))
+
+    monkeypatch.setattr(provider_module, "urlopen", fake_urlopen)
+
+    parsed = provider_module.parse_openai_json_response(
+        {
+            "model": "gpt-json-repair-test",
+            "instructions": "Return JSON.",
+            "input": "Summarize this.",
+            "max_output_tokens": 500,
+            "text": {
+                "format": provider_module.mail_summary_response_format(
+                    "mail_thread_summary"
+                )
+            },
+        },
+        api_key="test-key",
+        timeout_seconds=10,
+    )
+
+    assert parsed.output["summary"] == "修復済み"
+    assert parsed.prompt_tokens == 24
+    assert parsed.completion_tokens == 12
+    assert parsed.total_tokens == 36
+    assert parsed.repaired is True
+    assert len(captured_payloads) == 2
+    assert "Repair the previous assistant output" in captured_payloads[1]["instructions"]
+    assert "壊れたJSON" in captured_payloads[1]["input"]
+
+
 def test_openai_mail_summary_provider_is_used_when_profile_is_configured(
     client,
     database_path: Path,
@@ -727,6 +910,7 @@ def test_openai_mail_thread_summary_provider_is_used_when_profile_is_configured(
     sent_payload = json.loads(captured_requests[0][0].data.decode("utf-8"))
     assert sent_payload["model"] == "gpt-thread-test"
     assert sent_payload["text"]["format"]["name"] == "mail_thread_summary"
+    assert "Write the summary as bullet points." in sent_payload["instructions"]
     assert "Please review this whole thread today." in sent_payload["input"]
     assert thread_summary_row[0:3] == (
         "スレッド全体のレビュー依頼。",

@@ -956,13 +956,104 @@ def test_send_mail_requires_recipient_and_existing_reply_target(client) -> None:
     assert missing_reply_target_response.json()["error"]["code"] == "NOT_FOUND"
 
 
-def test_mail_detail_keeps_mailing_list_as_from_contact(client) -> None:
+def test_generate_reply_draft_retries_when_language_does_not_match_source(
+    client,
+    database_path,
+    monkeypatch,
+) -> None:
+    import importlib
+
+    mails_module = importlib.import_module("caseclosed.mails")
+
+    class LanguageRetryProvider:
+        provider_name = "test"
+        model_name = "language-retry-test"
+
+        def __init__(self) -> None:
+            self.calls = []
+
+        def complete_json(self, *, function_type, input_payload):
+            self.calls.append(dict(input_payload))
+            body = (
+                "承知しました。明日までに確認します。"
+                if len(self.calls) == 1
+                else "Thank you for the agenda. I will review it by tomorrow."
+            )
+            output = {
+                "schema_version": "1.0",
+                "subject": "Re: Agenda review",
+                "body": body,
+                "reasoning_summary": "Generated test draft.",
+                "warnings": [],
+            }
+            return mails_module.LlmProviderResponse(
+                output=output,
+                output_preview=body,
+                prompt_tokens=10,
+                completion_tokens=5,
+                total_tokens=15,
+                estimated_cost=0.1,
+            )
+
+    provider = LanguageRetryProvider()
+    monkeypatch.setattr(
+        mails_module,
+        "build_mail_draft_generation_provider",
+        lambda _function_type: provider,
+    )
+    reply_to_message_id = ingest_mail(
+        client,
+        gmail_message_id="gmail_language_retry_source",
+        gmail_thread_id="thread_language_retry_source",
+        from_address="sender@example.com",
+        subject="Agenda review",
+        body_text=(
+            "Please review the attached agenda and let me know if you can join "
+            "tomorrow. We need your confirmation by Friday morning."
+        ),
+        received_at="2026-05-23T15:00:00+09:00",
+    )
+
+    response = client.post(
+        f"{MAILS_URL}/generate-draft",
+        json={
+            "to_addresses": ["sender@example.com"],
+            "cc_addresses": [],
+            "bcc_addresses": [],
+            "subject": "Re: Agenda review",
+            "body_text": "",
+            "auto_body_text": "On May 23, sender@example.com wrote: ...",
+            "reply_to_message_id": reply_to_message_id,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["body_text"].startswith("Thank you")
+    assert len(provider.calls) == 2
+    assert provider.calls[0]["reply_language"] == "English"
+    assert "reply to an English email" in provider.calls[0]["language_policy"]
+    assert "Regenerate" in provider.calls[1]["language_retry_instruction"]
+    assert "English" in provider.calls[1]["language_retry_instruction"]
+    with sqlite3.connect(database_path) as connection:
+        llm_run_row = connection.execute(
+            """
+            SELECT retry_count, prompt_tokens, completion_tokens, total_tokens
+            FROM llm_runs
+            WHERE function_type = 'reply_draft_generation'
+            """
+        ).fetchone()
+    assert llm_run_row == (1, 20, 10, 30)
+
+
+def test_mail_detail_keeps_mailing_list_as_from_contact_and_uses_reply_to_sender(
+    client,
+) -> None:
     client.post(
         CONTACTS_URL,
         json={
             "display_name": "Committee List",
             "avatar_url": "https://example.com/list.png",
-            "status": "active",
+            "status": "archived",
             "kind": "mailing_list",
             "sender_resolution_mode": "reply_to",
             "email_addresses": [
@@ -996,14 +1087,68 @@ def test_mail_detail_keeps_mailing_list_as_from_contact(client) -> None:
     )
     message_id = response.json()["data"]["message_id"]
 
+    list_response = client.get(f"{MAILS_URL}?limit=20")
     detail_response = client.get(f"{MAILS_URL}/{message_id}")
+
+    assert list_response.status_code == 200
+    list_item = next(
+        item
+        for item in list_response.json()["data"]["items"]
+        if item["id"] == message_id
+    )
+    assert list_item["sender_contact"]["display_name"] == "Committee List"
+    assert list_item["sender_contact"]["kind"] == "mailing_list"
+    assert list_item["sender_contact"]["status"] == "archived"
 
     assert detail_response.status_code == 200
     message = detail_response.json()["data"]["message"]
     assert message["from_contact"]["display_name"] == "Committee List"
     assert message["from_contact"]["kind"] == "mailing_list"
     assert message["from_contact"]["avatar_url"] == "https://example.com/list.png"
-    assert message["sender_contact"]["display_name"] == "Committee List"
+    assert message["sender_contact"]["display_name"] == "List Writer"
+    assert message["sender_contact"]["kind"] == "person"
+    assert message["sender_contact"]["avatar_url"] == "https://example.com/writer.png"
+
+
+def test_mail_detail_uses_unresolved_reply_to_address_for_mailing_list_sender(
+    client,
+) -> None:
+    client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Archive Committee List",
+            "status": "archived",
+            "kind": "mailing_list",
+            "sender_resolution_mode": "reply_to",
+            "email_addresses": [
+                {"email_address": "archive-committee@example.com", "is_primary": True}
+            ],
+        },
+    )
+    response = client.post(
+        MOCK_MAILS_URL,
+        json={
+            "gmail_message_id": "gmail_mailing_list_unresolved_reply_to",
+            "gmail_thread_id": "thread_mailing_list_unresolved_reply_to",
+            "message_id_header": "<mailing-list-unresolved-reply-to@example.com>",
+            "subject": "Mailing list unresolved reply-to",
+            "from_address": "archive-committee@example.com",
+            "reply_to_address": "unregistered-writer@example.com",
+            "received_at": "2026-05-23T14:10:00+09:00",
+            "body_text": "List mail.",
+        },
+    )
+    message_id = response.json()["data"]["message_id"]
+
+    detail_response = client.get(f"{MAILS_URL}/{message_id}")
+
+    assert detail_response.status_code == 200
+    message = detail_response.json()["data"]["message"]
+    assert message["from_contact"]["display_name"] == "Archive Committee List"
+    assert message["from_contact"]["kind"] == "mailing_list"
+    assert message["from_contact"]["sender_resolution_mode"] == "reply_to"
+    assert message["reply_to_address"] == "unregistered-writer@example.com"
+    assert message["sender_contact"] is None
 
 
 def test_mail_list_filters_by_importance_processed_and_query(client) -> None:

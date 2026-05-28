@@ -103,11 +103,20 @@ def test_google_gmail_import_latest_unloaded_uses_existing_ingestion_flow(
     def fake_gmail_api_get_json(path, access_token, params=None):
         assert access_token == "test-access-token"
         if path == "/users/me/messages":
+            assert params["q"] == "-in:drafts"
             return {
                 "messages": [
                     {"id": "gmail_existing"},
+                    {"id": "gmail_draft"},
                     {"id": "gmail_real_new"},
                 ],
+            }
+        if path == "/users/me/messages/gmail_draft":
+            return {
+                "id": "gmail_draft",
+                "threadId": "thread_draft",
+                "labelIds": ["DRAFT"],
+                "payload": {"headers": []},
             }
         if path == "/users/me/messages/gmail_real_new":
             return {
@@ -295,7 +304,7 @@ def test_google_gmail_import_unloaded_by_date_imports_matching_received_and_sent
     assert data["skipped_out_of_date"] == 1
     assert data["items"][0]["mail"]["gmail_message_id"] == "gmail_matching_day"
     assert data["items"][1]["mail"]["gmail_message_id"] == "gmail_sent_day"
-    assert requested_queries == ["after:2026/05/25 before:2026/05/28"]
+    assert requested_queries == ["after:2026/05/25 before:2026/05/28 -in:drafts"]
 
     with sqlite3.connect(database_path) as connection:
         imported_rows = connection.execute(
@@ -326,6 +335,51 @@ def test_google_gmail_import_unloaded_by_date_imports_matching_received_and_sent
         ("gmail_sent_day", "Sent day import"),
     ]
     assert sent_auto_row == ("processed", "read", "sent")
+
+
+def test_mail_day_stats_reports_loaded_received_and_sent_counts(client) -> None:
+    client.post(
+        "/api/v1/mails/mock-ingest",
+        json={
+            "gmail_message_id": "gmail_stats_received",
+            "gmail_thread_id": "thread_stats_received",
+            "from_address": "stats.received@example.com",
+            "received_at": "2026-05-26T08:00:00+09:00",
+            "subject": "Stats received",
+        },
+    )
+    client.post(
+        "/api/v1/mails/mock-ingest",
+        json={
+            "gmail_message_id": "gmail_stats_sent",
+            "gmail_thread_id": "thread_stats_sent",
+            "from_address": "me@example.com",
+            "received_at": "2026-05-26T09:00:00+09:00",
+            "subject": "Stats sent",
+            "gmail_labels": ["SENT"],
+        },
+    )
+    client.post(
+        "/api/v1/mails/mock-ingest",
+        json={
+            "gmail_message_id": "gmail_stats_draft",
+            "gmail_thread_id": "thread_stats_draft",
+            "from_address": "me@example.com",
+            "received_at": "2026-05-26T10:00:00+09:00",
+            "subject": "Stats draft",
+            "gmail_labels": ["DRAFT"],
+        },
+    )
+
+    response = client.get("/api/v1/mails/day-stats?date=2026-05-26")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "date": "2026-05-26",
+        "total_count": 2,
+        "received_count": 1,
+        "sent_count": 1,
+    }
 
 
 def test_google_gmail_received_at_clamps_future_internal_date(monkeypatch) -> None:
