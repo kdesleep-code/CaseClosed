@@ -56,12 +56,18 @@ export type UnresolvedFromAddress = {
   } | null
 }
 
+export type ContactCustomTab = {
+  id: string
+  label: string
+  expression: string
+}
+
 export type ContactCreatePayload = {
   display_name: string
   avatar_url?: string | null
   user_memo: string
   ai_memo?: string | null
-  status: 'active' | 'skipped'
+  status: 'active' | 'archived' | 'skipped' | 'spam'
   kind: 'person' | 'mailing_list'
   sender_resolution_mode: 'self' | 'reply_to'
   mailing_list_recipient_expression?: string | null
@@ -81,7 +87,7 @@ export type ContactUpdatePayload = {
   avatar_url: string | null
   user_memo: string
   ai_memo?: string | null
-  status: 'active' | 'skipped' | 'archived'
+  status: 'active' | 'skipped' | 'spam' | 'archived'
   kind: 'person' | 'mailing_list'
   sender_resolution_mode: 'self' | 'reply_to'
   mailing_list_recipient_expression?: string | null
@@ -178,6 +184,27 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export async function listContacts(): Promise<Contact[]> {
   const data = await request<ListResponse<Contact>>('/api/v1/contacts')
+  return data.items
+}
+
+export async function listContactCustomTabs(): Promise<ContactCustomTab[]> {
+  const data = await request<ListResponse<ContactCustomTab>>(
+    '/api/v1/contacts/custom-tabs',
+  )
+  return data.items
+}
+
+export async function saveContactCustomTabs(
+  items: ContactCustomTab[],
+): Promise<ContactCustomTab[]> {
+  const data = await request<ListResponse<ContactCustomTab>>(
+    '/api/v1/contacts/custom-tabs',
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items }),
+    },
+  )
   return data.items
 }
 

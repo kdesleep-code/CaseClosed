@@ -93,6 +93,12 @@ def handle_mail_summary(
                 "skipped": True,
                 "reason": "llm_blocked",
             }
+        if auto_state.effective_importance == "pinned":
+            return {
+                "message_id": message.id,
+                "skipped": True,
+                "reason": "pinned",
+            }
         if not force and not should_summarize(message, auto_state):
             return {
                 "message_id": message.id,

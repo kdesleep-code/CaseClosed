@@ -2,7 +2,16 @@ import { useEffect, useRef, useState } from 'react'
 import type { DragEvent, FormEvent } from 'react'
 import { t } from './i18n'
 import { AppLink, navigateTo } from './navigation'
-import { sendMail } from './phase4Api'
+import {
+  deleteMailDraft,
+  generateMailDraft,
+  listMailDrafts,
+  resolveMailDraftAttachments,
+  saveMailDraft,
+  sendMail,
+} from './phase4Api'
+import type { MailDraft, MailDraftAttachmentRef } from './phase4Api'
+import settingsGearIconUrl from './assets/settings-gear.svg'
 
 type ComposeState = {
   to: string
@@ -20,6 +29,25 @@ type ComposeAttachment = {
   name: string
 }
 
+type ComposeSignature = {
+  id: string
+  name: string
+  content: string
+  system?: boolean
+}
+
+const noneSignature: ComposeSignature = {
+  id: 'none',
+  name: t('mail.compose.signature.none'),
+  content: '',
+  system: true,
+}
+
+const signaturesStorageKey = 'caseclosed.compose.signatures'
+const selectedSignatureStorageKey = 'caseclosed.compose.selectedSignatureId'
+const llmGenerationStandardPromptStorageKey =
+  'caseclosed.compose.llmGeneration.standardPrompt'
+
 function initialStateFromQuery(): ComposeState {
   const params = new URLSearchParams(window.location.search)
   return {
@@ -30,6 +58,62 @@ function initialStateFromQuery(): ComposeState {
     body: params.get('manual_body') ?? '',
     autoBody: params.get('auto_body') ?? params.get('body') ?? '',
   }
+}
+
+function newSignatureId() {
+  return `signature_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+}
+
+function isStoredSignature(value: unknown): value is ComposeSignature {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as Partial<ComposeSignature>).id === 'string' &&
+    typeof (value as Partial<ComposeSignature>).name === 'string' &&
+    typeof (value as Partial<ComposeSignature>).content === 'string'
+  )
+}
+
+function loadStoredSignatures(): ComposeSignature[] {
+  try {
+    const stored = window.localStorage.getItem(signaturesStorageKey)
+    const parsed: unknown = stored === null ? [] : JSON.parse(stored)
+    const customSignatures = Array.isArray(parsed)
+      ? parsed
+          .filter(isStoredSignature)
+          .filter((signature) => signature.id !== noneSignature.id)
+          .map((signature) => ({
+            id: signature.id,
+            name: signature.name,
+            content: signature.content,
+          }))
+      : []
+    return [noneSignature, ...customSignatures]
+  } catch {
+    return [noneSignature]
+  }
+}
+
+function saveStoredSignatures(signatures: ComposeSignature[]) {
+  window.localStorage.setItem(
+    signaturesStorageKey,
+    JSON.stringify(signatures.filter((signature) => !signature.system)),
+  )
+}
+
+function loadSelectedSignatureId(signatures: ComposeSignature[]) {
+  const stored = window.localStorage.getItem(selectedSignatureStorageKey)
+  return signatures.some((signature) => signature.id === stored)
+    ? stored ?? noneSignature.id
+    : noneSignature.id
+}
+
+function loadLlmGenerationStandardPrompt() {
+  return window.localStorage.getItem(llmGenerationStandardPromptStorageKey) ?? ''
+}
+
+function signatureText(content: string) {
+  return content.trimEnd()
 }
 
 function replyToMessageIdFromQuery() {
@@ -48,8 +132,54 @@ function describeError(error: unknown) {
   return error instanceof Error ? error.message : t('mail.compose.sendFailed')
 }
 
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(reader.error ?? new Error(t('mail.compose.sendFailed')))
+    reader.onload = () => {
+      const result = reader.result
+      if (typeof result !== 'string') {
+        reject(new Error(t('mail.compose.sendFailed')))
+        return
+      }
+      resolve(result.split(',', 2)[1] ?? '')
+    }
+    reader.readAsDataURL(file)
+  })
+}
+
+function fileFromBase64(
+  filename: string,
+  contentType: string,
+  dataBase64: string,
+): File {
+  const binary = window.atob(dataBase64)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index)
+  }
+  return new File([bytes], filename, { type: contentType })
+}
+
 export default function ComposeMailView() {
   const [form, setForm] = useState<ComposeState>(() => initialStateFromQuery())
+  const [signatures, setSignatures] = useState<ComposeSignature[]>(() =>
+    loadStoredSignatures(),
+  )
+  const [selectedSignatureId, setSelectedSignatureId] = useState(() =>
+    loadSelectedSignatureId(loadStoredSignatures()),
+  )
+  const [showSignatureSettings, setShowSignatureSettings] = useState(false)
+  const [showLlmGenerationSettings, setShowLlmGenerationSettings] = useState(false)
+  const [showDraftList, setShowDraftList] = useState(false)
+  const [drafts, setDrafts] = useState<MailDraft[]>([])
+  const [isDraftBusy, setIsDraftBusy] = useState(false)
+  const [isLlmGenerating, setIsLlmGenerating] = useState(false)
+  const [signatureName, setSignatureName] = useState('')
+  const [signatureContent, setSignatureContent] = useState('')
+  const [llmGenerationStandardPrompt, setLlmGenerationStandardPrompt] = useState(
+    () => loadLlmGenerationStandardPrompt(),
+  )
   const [replyToMessageId] = useState<string | null>(() => replyToMessageIdFromQuery())
   const [showCcBcc, setShowCcBcc] = useState(() => {
     const params = new URLSearchParams(window.location.search)
@@ -62,7 +192,15 @@ export default function ComposeMailView() {
   const [showSchedule, setShowSchedule] = useState(false)
   const [scheduledAt, setScheduledAt] = useState('')
   const [showAutoBody, setShowAutoBody] = useState(false)
+  const [llmGenerationInstruction, setLlmGenerationInstruction] = useState('')
   const bodyRef = useRef<HTMLTextAreaElement | null>(null)
+
+  useEffect(() => {
+    const selectedSignature =
+      signatures.find((signature) => signature.id === selectedSignatureId) ??
+      noneSignature
+    window.localStorage.setItem(selectedSignatureStorageKey, selectedSignature.id)
+  }, [selectedSignatureId, signatures])
 
   useEffect(() => {
     const textarea = bodyRef.current
@@ -80,13 +218,21 @@ export default function ComposeMailView() {
   function composedBodyText() {
     const manualBody = form.body.trimEnd()
     const autoBody = form.autoBody.trim()
-    if (manualBody === '') {
-      return autoBody
+    const selectedSignature =
+      signatures.find((signature) => signature.id === selectedSignatureId) ??
+      noneSignature
+    const selectedSignatureText = signatureText(selectedSignature.content)
+    const bodyParts = []
+    if (manualBody !== '') {
+      bodyParts.push(manualBody)
     }
-    if (autoBody === '') {
-      return manualBody
+    if (autoBody !== '') {
+      bodyParts.push(autoBody)
     }
-    return `${manualBody}\n\n${autoBody}`
+    if (selectedSignatureText !== '') {
+      bodyParts.push(selectedSignatureText)
+    }
+    return bodyParts.join('\n\n')
   }
 
   function defaultScheduleLocal() {
@@ -98,12 +244,34 @@ export default function ComposeMailView() {
     return value === '' ? null : `${value}:00+09:00`
   }
 
+  function isoToLocalDateTime(value: string | null) {
+    return value === null ? '' : value.slice(0, 16)
+  }
+
+  function attachmentRefs(): MailDraftAttachmentRef[] {
+    return attachments.map((attachment) => {
+      const fileWithPath = attachment.file as File & { webkitRelativePath?: string }
+      return {
+        name: attachment.name,
+        path: fileWithPath.webkitRelativePath || attachment.name,
+      }
+    })
+  }
+
   async function submitMail(scheduledAtIso: string | null = null) {
     setFeedback(null)
     setError(null)
     setIsSending(true)
 
     try {
+      const encodedAttachments = await Promise.all(
+        attachments.map(async (attachment) => ({
+          filename: attachment.name,
+          content_type: attachment.file.type || 'application/octet-stream',
+          data_base64: await fileToBase64(attachment.file),
+          size: attachment.file.size,
+        })),
+      )
       const sendRequest = await sendMail({
         to_addresses: splitAddressList(form.to),
         cc_addresses: splitAddressList(form.cc),
@@ -111,6 +279,7 @@ export default function ComposeMailView() {
         subject: form.subject,
         body_text: composedBodyText(),
         attachment_names: attachments.map((attachment) => attachment.name),
+        attachments: encodedAttachments,
         reply_to_message_id: replyToMessageId,
         scheduled_at: scheduledAtIso,
       })
@@ -168,6 +337,187 @@ export default function ComposeMailView() {
     setAttachments((current) =>
       current.filter((attachment) => attachment.id !== idToRemove),
     )
+  }
+
+  async function handleSaveDraft() {
+    setFeedback(null)
+    setError(null)
+    setIsDraftBusy(true)
+    try {
+      const draft = await saveMailDraft({
+        reply_to_message_id: replyToMessageId,
+        to_addresses: splitAddressList(form.to),
+        cc_addresses: splitAddressList(form.cc),
+        bcc_addresses: splitAddressList(form.bcc),
+        subject: form.subject,
+        body_text: form.body,
+        auto_body_text: form.autoBody,
+        selected_signature_id: selectedSignatureId,
+        attachment_refs: attachmentRefs(),
+        scheduled_at: localDateTimeToJstIso(scheduledAt),
+      })
+      setDrafts((current) => [draft, ...current.filter((item) => item.key !== draft.key)])
+      setFeedback(t('mail.compose.draft.saved'))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsDraftBusy(false)
+    }
+  }
+
+  async function handleLoadDrafts() {
+    setFeedback(null)
+    setError(null)
+    setIsDraftBusy(true)
+    try {
+      const items = await listMailDrafts(replyToMessageId)
+      setDrafts(items)
+      setShowDraftList(true)
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsDraftBusy(false)
+    }
+  }
+
+  async function applyDraft(draft: MailDraft) {
+    setError(null)
+    setFeedback(null)
+    setIsDraftBusy(true)
+    setForm({
+      to: draft.to_addresses.join(', '),
+      cc: draft.cc_addresses.join(', '),
+      bcc: draft.bcc_addresses.join(', '),
+      subject: draft.subject ?? '',
+      body: draft.body_text,
+      autoBody: draft.auto_body_text,
+    })
+    if (
+      draft.selected_signature_id !== null &&
+      signatures.some((signature) => signature.id === draft.selected_signature_id)
+    ) {
+      setSelectedSignatureId(draft.selected_signature_id)
+    }
+    setScheduledAt(isoToLocalDateTime(draft.scheduled_at))
+    setShowSchedule(draft.scheduled_at !== null)
+    setShowDraftList(false)
+    try {
+      if (draft.attachment_refs.length === 0) {
+        setAttachments([])
+        setFeedback(t('mail.compose.draft.loaded'))
+        return
+      }
+      const resolved = await resolveMailDraftAttachments(draft.attachment_refs)
+      setAttachments(
+        resolved.items.map((item, index) => {
+          const file = fileFromBase64(item.filename, item.content_type, item.data_base64)
+          return {
+            id: `${item.path}:${item.size}:${Date.now()}:${index}`,
+            key: `${item.path}:${item.size}`,
+            file,
+            name: item.filename,
+          }
+        }),
+      )
+      if (resolved.missing.length > 0) {
+        setError(
+          t('mail.compose.draft.missingAttachments', {
+            names: resolved.missing.map((item) => item.name).join(', '),
+          }),
+        )
+      } else {
+        setFeedback(t('mail.compose.draft.loaded'))
+      }
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsDraftBusy(false)
+    }
+  }
+
+  async function handleDeleteDraft(draftKey: string) {
+    setIsDraftBusy(true)
+    try {
+      await deleteMailDraft(draftKey)
+      setDrafts((current) => current.filter((draft) => draft.key !== draftKey))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsDraftBusy(false)
+    }
+  }
+
+  function addSignature() {
+    const name = signatureName.trim()
+    if (name === '') {
+      return
+    }
+    const nextSignatures = [
+      ...signatures,
+      {
+        id: newSignatureId(),
+        name,
+        content: signatureContent.trimEnd(),
+      },
+    ]
+    setSignatures(nextSignatures)
+    saveStoredSignatures(nextSignatures)
+    setSignatureName('')
+    setSignatureContent('')
+  }
+
+  function deleteSignature(signatureId: string) {
+    const signature = signatures.find((item) => item.id === signatureId)
+    if (signature === undefined || signature.system) {
+      return
+    }
+    const nextSignatures = signatures.filter((item) => item.id !== signatureId)
+    setSignatures(nextSignatures)
+    saveStoredSignatures(nextSignatures)
+    if (selectedSignatureId === signatureId) {
+      setSelectedSignatureId(noneSignature.id)
+    }
+  }
+
+  function saveLlmGenerationStandardPrompt() {
+    const prompt = llmGenerationStandardPrompt.trimEnd()
+    setLlmGenerationStandardPrompt(prompt)
+    window.localStorage.setItem(llmGenerationStandardPromptStorageKey, prompt)
+    setFeedback(t('mail.compose.llmGeneration.standardPromptSaved'))
+    setError(null)
+  }
+
+  async function handleGenerateDraft() {
+    setFeedback(null)
+    setError(null)
+    setIsLlmGenerating(true)
+    const standardPrompt = llmGenerationStandardPrompt
+    try {
+      const generated = await generateMailDraft({
+        instruction: llmGenerationInstruction,
+        standard_prompt: standardPrompt,
+        to_addresses: splitAddressList(form.to),
+        cc_addresses: splitAddressList(form.cc),
+        bcc_addresses: splitAddressList(form.bcc),
+        subject: form.subject,
+        auto_body_text: replyToMessageId === null ? '' : form.autoBody,
+        body_text: form.body,
+        reply_to_message_id: replyToMessageId,
+        related_case_summaries: [],
+      })
+      setForm((current) => ({
+        ...current,
+        subject:
+          current.subject.trim() === '' ? generated.subject : current.subject,
+        body: generated.body_text,
+      }))
+      setLlmGenerationInstruction('')
+      setFeedback(t('mail.compose.llmGeneration.generated'))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsLlmGenerating(false)
+    }
   }
 
   return (
@@ -342,7 +692,199 @@ export default function ComposeMailView() {
             </form>
           </section>
 
-          <aside aria-label={t('mail.compose.tools')} className="mail-panel compose-tools-panel" />
+          <aside aria-label={t('mail.compose.tools')} className="mail-panel compose-tools-panel">
+            <section className="compose-tool-card compose-draft-card">
+              <div className="compose-tool-heading-row">
+                <span>{t('mail.compose.draft.heading')}</span>
+              </div>
+              <div className="compose-tool-actions">
+                <button
+                  className="compose-tool-button"
+                  disabled={isDraftBusy}
+                  onClick={handleSaveDraft}
+                  type="button"
+                >
+                  {t('mail.compose.draft.save')}
+                </button>
+                <button
+                  className="compose-tool-button"
+                  disabled={isDraftBusy}
+                  onClick={handleLoadDrafts}
+                  type="button"
+                >
+                  {t('mail.compose.draft.load')}
+                </button>
+              </div>
+              {showDraftList && (
+                <div className="compose-draft-list-wrap">
+                  {drafts.length === 0 ? (
+                    <p>{t('mail.compose.draft.empty')}</p>
+                  ) : (
+                    <ul className="compose-draft-list">
+                      {drafts.map((draft) => (
+                        <li key={draft.key}>
+                          <button
+                            className="compose-draft-load-button"
+                            onClick={() => {
+                              void applyDraft(draft)
+                            }}
+                            type="button"
+                          >
+                            <span>{draft.name}</span>
+                            <small>{draft.updated_at.replace('T', ' ').slice(0, 16)}</small>
+                          </button>
+                          <button
+                            aria-label={t('mail.compose.draft.delete')}
+                            className="compose-draft-delete-button"
+                            disabled={isDraftBusy}
+                            onClick={() => {
+                              void handleDeleteDraft(draft.key)
+                            }}
+                            type="button"
+                          >
+                            x
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </section>
+
+            <section className="compose-tool-card compose-llm-generation-card">
+              <div className="compose-tool-heading-row">
+                <span>{t('mail.compose.llmGeneration.heading')}</span>
+                <button
+                  aria-expanded={showLlmGenerationSettings}
+                  aria-label={t('mail.compose.llmGeneration.settings')}
+                  className="compose-icon-button"
+                  onClick={() =>
+                    setShowLlmGenerationSettings((current) => !current)
+                  }
+                  title={t('mail.compose.llmGeneration.settings')}
+                  type="button"
+                >
+                  <img alt="" aria-hidden="true" src={settingsGearIconUrl} />
+                </button>
+              </div>
+              <label className="compose-field">
+                <span>{t('mail.compose.llmGeneration.instruction')}</span>
+                <textarea
+                  onChange={(event) => setLlmGenerationInstruction(event.target.value)}
+                  value={llmGenerationInstruction}
+                />
+              </label>
+              <button
+                className="compose-tool-button"
+                disabled={isLlmGenerating}
+                onClick={() => {
+                  void handleGenerateDraft()
+                }}
+                type="button"
+              >
+                {isLlmGenerating
+                  ? t('mail.compose.llmGeneration.generating')
+                  : t('mail.compose.llmGeneration.generate')}
+              </button>
+
+              {showLlmGenerationSettings && (
+                <div className="compose-tool-settings">
+                  <h2>{t('mail.compose.llmGeneration.settingsHeading')}</h2>
+                  <label className="compose-field">
+                    <span>{t('mail.compose.llmGeneration.standardPrompt')}</span>
+                    <textarea
+                      onChange={(event) =>
+                        setLlmGenerationStandardPrompt(event.target.value)
+                      }
+                      value={llmGenerationStandardPrompt}
+                    />
+                  </label>
+                  <button
+                    className="compose-tool-button"
+                    onClick={saveLlmGenerationStandardPrompt}
+                    type="button"
+                  >
+                    {t('mail.compose.llmGeneration.saveStandardPrompt')}
+                  </button>
+                </div>
+              )}
+            </section>
+
+            <section className="compose-tool-card compose-signature-card">
+              <label className="compose-field">
+                <span className="compose-signature-label-row">
+                  <span>{t('mail.compose.signature.select')}</span>
+                  <button
+                    aria-expanded={showSignatureSettings}
+                    aria-label={t('mail.compose.signature.settings')}
+                    className="compose-icon-button compose-signature-settings-button"
+                    onClick={(event) => {
+                      event.preventDefault()
+                      setShowSignatureSettings((current) => !current)
+                    }}
+                    title={t('mail.compose.signature.settings')}
+                    type="button"
+                  >
+                    <img alt="" aria-hidden="true" src={settingsGearIconUrl} />
+                  </button>
+                </span>
+                <select
+                  onChange={(event) => setSelectedSignatureId(event.target.value)}
+                  value={selectedSignatureId}
+                >
+                  {signatures.map((signature) => (
+                    <option key={signature.id} value={signature.id}>
+                      {signature.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              {showSignatureSettings && (
+                <div className="compose-signature-settings">
+                  <h2>{t('mail.compose.signature.heading')}</h2>
+                  <label className="compose-field">
+                    <span>{t('mail.compose.signature.name')}</span>
+                    <input
+                      onChange={(event) => setSignatureName(event.target.value)}
+                      type="text"
+                      value={signatureName}
+                    />
+                  </label>
+                  <label className="compose-field">
+                    <span>{t('mail.compose.signature.content')}</span>
+                    <textarea
+                      onChange={(event) => setSignatureContent(event.target.value)}
+                      value={signatureContent}
+                    />
+                  </label>
+                  <button
+                    className="compose-tool-button"
+                    disabled={signatureName.trim() === ''}
+                    onClick={addSignature}
+                    type="button"
+                  >
+                    {t('mail.compose.signature.add')}
+                  </button>
+                  <ul className="compose-signature-list">
+                    {signatures.map((signature) => (
+                      <li key={signature.id}>
+                        <span>{signature.name}</span>
+                        <button
+                          disabled={signature.system === true}
+                          onClick={() => deleteSignature(signature.id)}
+                          type="button"
+                        >
+                          {t('mail.compose.signature.delete')}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </section>
+          </aside>
         </div>
       </div>
     </main>

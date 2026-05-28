@@ -53,6 +53,7 @@ export type MailListItem = {
     display_name: string
     avatar_url: string | null
     kind: string
+    status?: string
     tags?: string[]
   } | null
   case_links?: Array<{
@@ -67,6 +68,7 @@ export type MailContactSummary = {
   display_name: string
   avatar_url: string | null
   kind: string
+  status?: string
   tags?: string[]
 }
 
@@ -143,16 +145,6 @@ export type MailDetail = {
   available_actions: string[]
 }
 
-export type MockMailPayload = {
-  gmail_message_id: string
-  gmail_thread_id: string
-  message_id_header: string
-  subject: string
-  from_address: string
-  received_at: string
-  body_text: string
-}
-
 export type MailSendPayload = {
   to_addresses: string[]
   cc_addresses?: string[]
@@ -160,6 +152,12 @@ export type MailSendPayload = {
   subject?: string
   body_text: string
   attachment_names?: string[]
+  attachments?: Array<{
+    filename: string
+    content_type: string
+    data_base64: string
+    size: number
+  }>
   reply_to_message_id?: string | null
   scheduled_at?: string | null
 }
@@ -179,6 +177,69 @@ export type MailSendRequest = {
   created_at: string
   updated_at: string
   version: number
+}
+
+export type MailDraftGenerationPayload = {
+  instruction?: string | null
+  standard_prompt?: string | null
+  to_addresses?: string[]
+  cc_addresses?: string[]
+  bcc_addresses?: string[]
+  subject?: string | null
+  auto_body_text?: string | null
+  body_text?: string | null
+  reply_to_message_id?: string | null
+  related_case_summaries?: Array<Record<string, unknown>>
+}
+
+export type MailDraftGenerationResult = {
+  subject: string
+  body_text: string
+  llm_run_id: string
+}
+
+export type MailDraftAttachmentRef = {
+  name: string
+  path: string
+}
+
+export type ResolvedMailDraftAttachment = {
+  filename: string
+  path: string
+  content_type: string
+  data_base64: string
+  size: number
+}
+
+export type MailDraft = {
+  key: string
+  name: string
+  reply_to_message_id: string | null
+  to_addresses: string[]
+  cc_addresses: string[]
+  bcc_addresses: string[]
+  subject: string | null
+  body_text: string
+  auto_body_text: string
+  selected_signature_id: string | null
+  attachment_refs: MailDraftAttachmentRef[]
+  scheduled_at: string | null
+  created_at: string
+  updated_at: string
+  version: number
+}
+
+export type MailDraftPayload = {
+  reply_to_message_id?: string | null
+  to_addresses: string[]
+  cc_addresses?: string[]
+  bcc_addresses?: string[]
+  subject?: string | null
+  body_text: string
+  auto_body_text?: string
+  selected_signature_id?: string | null
+  attachment_refs?: MailDraftAttachmentRef[]
+  scheduled_at?: string | null
 }
 
 export type ScheduledSendRequest = MailSendRequest
@@ -230,11 +291,55 @@ export type LlmModelConfig = {
   functions: LlmFunctionConfig[]
 }
 
+export type GoogleGmailStatus = {
+  configured: boolean
+  connected: boolean
+  connected_at: string | null
+  last_error: string | null
+  scopes: string[]
+  send_enabled?: boolean
+  redirect_uri: string
+  has_refresh_token: boolean
+  token_expires_at: string | null
+  mail_loading_enabled: boolean
+}
+
+export type GoogleGmailImportResult = {
+  imported: boolean
+  reason?: string
+  subject?: string | null
+  from_address?: string | null
+  received_at?: string | null
+  mail: null | {
+    message_id: string
+    gmail_message_id: string
+    pending: boolean
+    pending_address: string | null
+    pending_reason: string | null
+    queued_job_id: string | null
+    queued_contact_ai_memo_job_id?: string | null
+  }
+}
+
+export type GoogleGmailImportByDateResult = {
+  date: string
+  imported_count: number
+  candidate_count: number
+  skipped_out_of_date: number
+  items: Array<{
+    subject: string | null
+    from_address: string
+    received_at: string
+    mail: NonNullable<GoogleGmailImportResult['mail']>
+  }>
+}
+
 export type MailListFilters = {
   tab?: 'all' | 'pending' | 'unprocessed' | 'processed' | 'skip'
   processed?: 'all' | 'processed' | 'unprocessed' | '0' | '1'
   importance?: 'all' | 'pinned' | 'high' | 'middle' | 'low' | 'skip' | 'pending' | 'unclassified'
   importance_any?: string
+  needs_action?: boolean | '0' | '1'
   contact_status?: 'all' | 'pending' | 'resolved'
   read?: 'all' | 'read' | 'unread'
   q?: string
@@ -291,12 +396,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     credentials: 'include',
     ...init,
   })
-  const payload = (await response.json()) as unknown
+  const responseText = await response.text()
+  let payload: unknown
+  try {
+    payload = responseText === '' ? null : JSON.parse(responseText)
+  } catch {
+    payload = null
+  }
 
   if (!response.ok || !isSuccessResponse<T>(payload)) {
     const error = hasApiError(payload)
       ? payload.error
-      : { code: 'PHASE_4_REQUEST_FAILED', message: 'Request failed.' }
+      : {
+          code: 'PHASE_4_REQUEST_FAILED',
+          message: responseText === '' ? 'Request failed.' : responseText,
+        }
     throw new Phase4ApiError(response.status, error)
   }
 
@@ -345,26 +459,62 @@ export function getMailDetail(messageId: string): Promise<MailDetail> {
   return request<MailDetail>(`/api/v1/mails/${encodeURIComponent(messageId)}`)
 }
 
-export function ingestMockMail(
-  payload: MockMailPayload,
-): Promise<{
-  message_id: string
-  pending: boolean
-  pending_address: string | null
-  queued_job_id: string | null
-}> {
-  return request('/api/v1/mails/mock-ingest', {
+export function sendMail(payload: MailSendPayload): Promise<MailSendRequest> {
+  return request('/api/v1/mails/send', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
 }
 
-export function sendMail(payload: MailSendPayload): Promise<MailSendRequest> {
-  return request('/api/v1/mails/send', {
+export function generateMailDraft(
+  payload: MailDraftGenerationPayload,
+): Promise<MailDraftGenerationResult> {
+  return request('/api/v1/mails/generate-draft', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
+  })
+}
+
+export async function saveMailDraft(payload: MailDraftPayload): Promise<MailDraft> {
+  return request('/api/v1/mail-drafts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function listMailDrafts(
+  replyToMessageId: string | null,
+): Promise<MailDraft[]> {
+  const params = new URLSearchParams()
+  if (replyToMessageId !== null) {
+    params.set('reply_to_message_id', replyToMessageId)
+  }
+  const query = params.toString()
+  const data = await request<ItemsResponse<MailDraft>>(
+    `/api/v1/mail-drafts${query === '' ? '' : `?${query}`}`,
+  )
+  return data.items
+}
+
+export function deleteMailDraft(draftKey: string): Promise<{ key: string }> {
+  return request(`/api/v1/mail-drafts/${encodeURIComponent(draftKey)}`, {
+    method: 'DELETE',
+  })
+}
+
+export function resolveMailDraftAttachments(
+  attachmentRefs: MailDraftAttachmentRef[],
+): Promise<{
+  items: ResolvedMailDraftAttachment[]
+  missing: MailDraftAttachmentRef[]
+}> {
+  return request('/api/v1/mail-drafts/attachments/resolve', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ attachment_refs: attachmentRefs }),
   })
 }
 
@@ -458,8 +608,33 @@ export function updateLlmModelAssignment(
   })
 }
 
-export function runNextJob(): Promise<{ job_id: string | null }> {
-  return request('/api/v1/jobs/run-next', { method: 'POST' })
+export function getGoogleGmailStatus(): Promise<GoogleGmailStatus> {
+  return request('/api/v1/google/gmail/status')
+}
+
+export function createGoogleGmailConnectUrl(): Promise<{
+  authorization_url: string
+  mail_loading_enabled: boolean
+}> {
+  return request('/api/v1/google/gmail/connect-url', { method: 'POST' })
+}
+
+export function disconnectGoogleGmail(): Promise<GoogleGmailStatus> {
+  return request('/api/v1/google/gmail/disconnect', { method: 'POST' })
+}
+
+export function importLatestUnloadedGoogleGmail(): Promise<GoogleGmailImportResult> {
+  return request('/api/v1/google/gmail/import-latest-unloaded', { method: 'POST' })
+}
+
+export function importUnloadedGoogleGmailByDate(
+  date: string,
+): Promise<GoogleGmailImportByDateResult> {
+  return request('/api/v1/google/gmail/import-unloaded-by-date', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ date }),
+  })
 }
 
 export function updateMailImportance(

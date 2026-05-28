@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
+  importUnloadedGoogleGmailByDate,
   listMailDates,
   listMailPage,
 } from './phase4Api'
@@ -12,6 +13,7 @@ import defaultContactAvatarUrl from './assets/default-contact-avatar.svg'
 import defaultMailingListAvatarUrl from './assets/default-mailing-list-avatar.svg'
 import unknownContactAvatarUrl from './assets/default-unknown-contact-avatar.svg'
 import llmBlockedIconUrl from './assets/llm-blocked.svg'
+import needsActionClearTanukiUrl from './assets/needs-action-clear-tanuki.png'
 
 export type MailTab = 'unprocessed' | 'processed' | 'skip'
 type SearchSort = 'newest' | 'importance'
@@ -36,7 +38,7 @@ const IMPORTANCE_LEGEND = [
   { key: 'high', labelKey: 'mail.importance.high' },
   { key: 'middle', labelKey: 'mail.importance.middle' },
   { key: 'low', labelKey: 'mail.importance.low' },
-  { key: 'skip', labelKey: 'mail.importance.skip' },
+  { key: 'sent', labelKey: 'mail.importance.sent' },
   { key: 'unclassified', labelKey: 'mail.importance.unclassified' },
 ] satisfies Array<{ key: string; labelKey: MessageKey }>
 
@@ -160,6 +162,10 @@ function llmBlockedTitle(mail: MailListItem) {
     : t('mail.llmBlockedWithReason', { reason: mail.llm_block_reason })
 }
 
+function isSpamMail(mail: MailListItem) {
+  return mail.sender_contact?.status === 'spam'
+}
+
 function groupLabelForMail(mail: MailListItem, sort: SearchSort) {
   if (sort === 'importance') {
     return mail.effective_importance
@@ -181,6 +187,25 @@ function shouldShowMailGroupLabel(
   )
 }
 
+function isMiddleOrHigherImportance(importance: string) {
+  return importance === 'pinned' || importance === 'high' || importance === 'middle'
+}
+
+function shouldShowImportanceThreshold(
+  mail: MailListItem,
+  index: number,
+  mailsToRender: MailListItem[],
+  sort: SearchSort,
+) {
+  if (sort !== 'importance' || index === 0) {
+    return false
+  }
+  return (
+    isMiddleOrHigherImportance(mailsToRender[index - 1].effective_importance) &&
+    !isMiddleOrHigherImportance(mail.effective_importance)
+  )
+}
+
 function compareVisibleMails(sort: SearchSort) {
   return (left: MailListItem, right: MailListItem) => {
     if (sort === 'importance') {
@@ -195,6 +220,26 @@ function compareVisibleMails(sort: SearchSort) {
 
 function isMailTab(value: string | null): value is MailTab {
   return value === 'unprocessed' || value === 'processed' || value === 'skip'
+}
+
+function mailListReturnHref(
+  isActionNeededMode: boolean,
+  activeTab: MailTab,
+  selectedDate: string,
+) {
+  if (isActionNeededMode) {
+    return '/mail/action-needed'
+  }
+  const params = new URLSearchParams({
+    tab: activeTab,
+    date: selectedDate,
+  })
+  return `/mail?${params.toString()}`
+}
+
+function mailDetailHref(mailId: string, returnTo: string) {
+  const params = new URLSearchParams({ return_to: returnTo })
+  return `/mail/${encodeURIComponent(mailId)}?${params.toString()}`
 }
 
 function initialQueryParams() {
@@ -234,6 +279,7 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isBusy, setIsBusy] = useState(false)
+  const [isGmailImporting, setIsGmailImporting] = useState(false)
 
   const isSearchMode = searchQuery.trim() !== ''
   const isActionNeededMode = initialData?.viewMode === 'action-needed'
@@ -257,6 +303,7 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
     [...sortedMailDates].reverse().find((date) => date < selectedDate) ?? null
   const nextMailDate = sortedMailDates.find((date) => date > selectedDate) ?? null
   const selectedMonthDays = calendarDays(calendarMonth)
+  const returnHref = mailListReturnHref(isActionNeededMode, activeTab, selectedDate)
 
   function listFilters(cursor?: string): MailListFilters {
     const filters: MailListFilters = {
@@ -265,8 +312,8 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
       tab: activeTab,
     }
     if (isActionNeededMode) {
-      filters.tab = 'unprocessed'
-      filters.importance_any = 'high,middle'
+      filters.tab = 'all'
+      filters.needs_action = true
     } else if (isSearchMode) {
       filters.q = searchQuery.trim()
       filters.tab = 'all'
@@ -292,6 +339,34 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
     setNextCursor(page.next_cursor)
   }
 
+  async function importSelectedDateFromGmail() {
+    setError(null)
+    setNotice(null)
+    setIsGmailImporting(true)
+    try {
+      const result = await importUnloadedGoogleGmailByDate(selectedDate)
+      const [page, dates] = await Promise.all([
+        listMailPage(listFilters()),
+        listMailDates(activeTab),
+      ])
+      setMails(page.items)
+      setNextCursor(page.next_cursor)
+      setMailDates(dates)
+      setNotice(
+        result.imported_count === 0
+          ? t('mail.gmailImport.none', { date: result.date })
+          : t('mail.gmailImport.done', {
+              count: result.imported_count,
+              date: result.date,
+            }),
+      )
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsGmailImporting(false)
+    }
+  }
+
   async function transitionMailList(nextTab: MailTab, nextDate: string) {
     setError(null)
     setNotice(null)
@@ -305,6 +380,38 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
       setActiveTab(nextTab)
       setSelectedDate(nextDate)
       setCalendarMonth(nextDate)
+      setSearchText('')
+      setSearchQuery('')
+      setMails(page.items)
+      setNextCursor(page.next_cursor)
+      setMailDates(dates)
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsBusy(false)
+    }
+  }
+
+  async function openLatestInbox() {
+    if (isActionNeededMode) {
+      navigateTo('/mail')
+      return
+    }
+
+    setError(null)
+    setNotice(null)
+    setIsBusy(true)
+    try {
+      const dates = await listMailDates('unprocessed')
+      const today = jstDateToday()
+      const latestDate = dates.some((item) => item.date === today)
+        ? today
+        : dates.at(-1)?.date ?? today
+      const page = await listMailPage(dayListFilters('unprocessed', latestDate))
+      didUsePreparedData.current = true
+      setActiveTab('unprocessed')
+      setSelectedDate(latestDate)
+      setCalendarMonth(latestDate)
       setSearchText('')
       setSearchQuery('')
       setMails(page.items)
@@ -531,17 +638,46 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
                   ) : (
                     <h2 id="mail-list-heading">{selectedDate}</h2>
                   )}
-                  <button disabled={isBusy} onClick={() => refreshMails()} type="button">
-                    {t('mail.refresh')}
-                  </button>
+                  <div className="mail-list-heading-actions">
+                    {isSearchLikeMode && (
+                      <button disabled={isBusy} onClick={openLatestInbox} type="button">
+                        {t('mail.latestInbox')}
+                      </button>
+                    )}
+                    {isSearchLikeMode ? (
+                      <button disabled={isBusy} onClick={() => refreshMails()} type="button">
+                        {t('mail.refresh')}
+                      </button>
+                    ) : (
+                      <button
+                        disabled={isBusy || isGmailImporting}
+                        className={isGmailImporting ? 'mail-gmail-import-button is-loading' : 'mail-gmail-import-button'}
+                        onClick={() => {
+                          void importSelectedDateFromGmail()
+                        }}
+                        type="button"
+                      >
+                        {t('mail.gmailImport.day')}
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 {visibleMails.length === 0 ? (
-                  <p className="mail-empty">{t('mail.empty')}</p>
+                  isActionNeededMode ? (
+                    <div className="mail-empty mail-empty-action-needed">
+                      <img alt={t('mail.actionNeeded.emptyAlt')} src={needsActionClearTanukiUrl} />
+                    </div>
+                  ) : (
+                    <p className="mail-empty">{t('mail.empty')}</p>
+                  )
                 ) : (
                   <div className="mail-date-groups">
                     <div className="mail-list" role="list">
-                      {visibleMails.map((mail, index) => (
+                      {visibleMails.map((mail, index) => {
+                        const spamMail = isSpamMail(mail)
+                        const detailHref = mailDetailHref(mail.id, returnHref)
+                        return (
                         <div className="mail-list-entry" key={mail.id}>
                           {isSearchLikeMode &&
                             shouldShowMailGroupLabel(
@@ -554,21 +690,40 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
                                 <span>{groupLabelForMail(mail, listSort)}</span>
                               </div>
                             )}
+                          {shouldShowImportanceThreshold(
+                            mail,
+                            index,
+                            visibleMails,
+                            listSort,
+                          ) && (
+                            <div
+                              aria-hidden="true"
+                              className="mail-importance-threshold"
+                            />
+                          )}
                           <article
                             className={`mail-list-item ${mailPriorityClass(mail.effective_importance)} mail-read-${mail.read_status ?? 'unread'} ${
                               mail.effective_importance === 'unclassified'
                                 ? 'mail-list-item-confirming'
                                 : ''
-                            }`}
-                            onClick={() => navigateTo(`/mail/${encodeURIComponent(mail.id)}`)}
-                            onKeyDown={(event) => {
-                              if (event.key === 'Enter' || event.key === ' ') {
-                                event.preventDefault()
-                                navigateTo(`/mail/${encodeURIComponent(mail.id)}`)
-                              }
-                            }}
-                            role="link"
-                            tabIndex={0}
+                            } ${spamMail ? 'mail-list-item-spam' : ''}`}
+                            onClick={
+                              spamMail
+                                ? undefined
+                                : () => navigateTo(detailHref)
+                            }
+                            onKeyDown={
+                              spamMail
+                                ? undefined
+                                : (event) => {
+                                    if (event.key === 'Enter' || event.key === ' ') {
+                                      event.preventDefault()
+                                      navigateTo(detailHref)
+                                    }
+                                  }
+                            }
+                            role={spamMail ? undefined : 'link'}
+                            tabIndex={spamMail ? undefined : 0}
                           >
                             <div className="mail-list-sender-media">
                               <span className="mail-list-time">{formatTime(mail.received_at)}</span>
@@ -589,6 +744,11 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
                               {mailSummary(mail) ?? ''}
                             </p>
                             <div className="mail-list-cases">
+                              {spamMail && (
+                                <span className="mail-spam-badge">
+                                  {t('mail.spam')}
+                                </span>
+                              )}
                               {mail.llm_blocked === true && (
                                 <span
                                   aria-label={llmBlockedTitle(mail)}
@@ -609,7 +769,8 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
                             </div>
                           </article>
                         </div>
-                      ))}
+                        )
+                      })}
                     </div>
                     {nextCursor !== null && (
                       <button

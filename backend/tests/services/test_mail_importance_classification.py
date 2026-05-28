@@ -263,7 +263,7 @@ def test_mock_mail_importance_classification_keeps_external_star_high(
     assert auto_row[3].startswith("llm_run_")
 
 
-def test_mail_importance_classification_promotes_llm_skip_to_pinned(
+def test_mail_importance_classification_keeps_llm_skip_as_skip(
     client,
     database_path: Path,
 ) -> None:
@@ -342,7 +342,7 @@ def test_mail_importance_classification_promotes_llm_skip_to_pinned(
     result = json.loads(job_row[1])
     assert job_row[0] == "succeeded"
     assert result["suggested_importance"] == "skip"
-    assert auto_row[0:2] == ("skip", "pinned")
+    assert auto_row[0:2] == ("skip", "skip")
     assert auto_row[2] == result["llm_run_id"]
 
 
@@ -588,6 +588,10 @@ def test_openai_mail_summary_provider_is_used_when_profile_is_configured(
     sent_payload = json.loads(captured_requests[0][0].data.decode("utf-8"))
     assert sent_payload["model"] == "gpt-summary-test"
     assert sent_payload["text"]["format"]["name"] == "mail_summary"
+    assert "homepage address" in sent_payload["instructions"]
+    assert "translation must be a faithful Japanese translation of the full email body" in (
+        sent_payload["instructions"]
+    )
     assert "Please summarize and translate this message today." in sent_payload["input"]
     assert summary_row[0:3] == (
         "本日中の要約依頼。",

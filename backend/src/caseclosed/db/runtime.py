@@ -16,6 +16,7 @@ from sqlalchemy.orm import sessionmaker
 from caseclosed.db.base import Base
 from caseclosed.db.models import AppSetting
 from caseclosed.db.models import Case
+from caseclosed.db.models import MailAutoState
 from caseclosed.settings import get_database_url
 
 JST = timezone(timedelta(hours=9), "JST")
@@ -67,6 +68,8 @@ def bootstrap_database() -> None:
     with SessionLocal() as session:
         seed_settings(session)
         seed_system_cases(session)
+        normalize_llm_blocked_mail_importance(session)
+        normalize_llm_skip_mail_importance(session)
         session.commit()
 
 
@@ -193,6 +196,7 @@ def ensure_runtime_schema() -> None:
                         subject TEXT,
                         body_text TEXT NOT NULL,
                         attachment_names_json TEXT,
+                        attachment_data_json TEXT,
                         reply_to_message_id TEXT REFERENCES gmail_messages(id),
                         sent_message_id TEXT REFERENCES gmail_messages(id),
                         scheduled_at TEXT,
@@ -212,6 +216,13 @@ def ensure_runtime_schema() -> None:
                     "ALTER TABLE mail_send_requests "
                     "ADD COLUMN sent_message_id TEXT REFERENCES gmail_messages(id)"
                 )
+            )
+        if (
+            "mail_send_requests" in table_names
+            and "attachment_data_json" not in mail_send_request_columns
+        ):
+            connection.execute(
+                text("ALTER TABLE mail_send_requests ADD COLUMN attachment_data_json TEXT")
             )
         if "gmail_messages" in table_names and "mail_llm_block_filters" not in table_names:
             connection.execute(
@@ -304,6 +315,36 @@ def seed_system_cases(session: Session) -> None:
                 version=1,
             )
         )
+
+
+def normalize_llm_blocked_mail_importance(session: Session) -> None:
+    blocked_states = session.scalars(
+        select(MailAutoState).where(
+            MailAutoState.llm_blocked == 1,
+            MailAutoState.pending_reason.is_(None),
+            MailAutoState.effective_importance != "pinned",
+        )
+    ).all()
+    now = jst_iso()
+    for auto_state in blocked_states:
+        auto_state.effective_importance = "pinned"
+        auto_state.updated_at = now
+        auto_state.version += 1
+
+
+def normalize_llm_skip_mail_importance(session: Session) -> None:
+    skipped_states = session.scalars(
+        select(MailAutoState).where(
+            MailAutoState.llm_blocked == 0,
+            MailAutoState.suggested_importance == "skip",
+            MailAutoState.effective_importance == "pinned",
+        )
+    ).all()
+    now = jst_iso()
+    for auto_state in skipped_states:
+        auto_state.effective_importance = "skip"
+        auto_state.updated_at = now
+        auto_state.version += 1
 
 
 def get_session() -> Iterator[Session]:

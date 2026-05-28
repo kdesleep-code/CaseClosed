@@ -19,16 +19,19 @@ import type {
 } from './phase2Api'
 import {
   applyMailLlmBlockFilter,
+  createGoogleGmailConnectUrl,
+  disconnectGoogleGmail,
+  getGoogleGmailStatus,
   getLlmModelConfig,
-  ingestMockMail,
+  importLatestUnloadedGoogleGmail,
   listLlmBlockFilters,
   listLlmBlockedMails,
   listMailSendRequests,
-  runNextJob,
   updateLlmBlockFilter,
   updateLlmModelAssignment,
 } from './phase4Api'
 import type {
+  GoogleGmailStatus,
   LlmBlockFilter,
   LlmBlockedMail,
   LlmModelConfig,
@@ -122,29 +125,6 @@ function describeError(error: unknown) {
   return error instanceof Error ? error.message : t('maintenance.requestFailed')
 }
 
-function jstInputNow() {
-  const now = new Date()
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Tokyo',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23',
-  })
-    .formatToParts(now)
-    .reduce<Record<string, string>>((values, part) => {
-      values[part.type] = part.value
-      return values
-    }, {})
-  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:00+09:00`
-}
-
-function uniqueSuffix() {
-  return Date.now().toString(36)
-}
-
 function countRequiredActions(
   jobs: Job[],
   operations: ExternalOperation[],
@@ -215,6 +195,23 @@ function externalOperationStatusDetail(operation: ExternalOperation) {
   return `The external operation is in ${operation.status} status.`
 }
 
+function initialMaintenanceTab(): MaintenanceTab {
+  return new URLSearchParams(window.location.search).has('google_gmail')
+    ? 'debug'
+    : 'usage'
+}
+
+function initialDebugNotice() {
+  const status = new URLSearchParams(window.location.search).get('google_gmail')
+  if (status === 'connected') {
+    return t('maintenance.debug.googleGmailConnectedNotice')
+  }
+  if (status === 'error') {
+    return t('maintenance.debug.googleGmailErrorNotice')
+  }
+  return null
+}
+
 function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData }) {
   const [status, setStatus] = useState<MaintenanceStatus | null>(
     initialData?.status ?? null,
@@ -228,22 +225,17 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
   )
   const [sendRequests, setSendRequests] = useState<MailSendRequest[] | null>(null)
   const [llmModelConfig, setLlmModelConfig] = useState<LlmModelConfig | null>(null)
+  const [googleGmailStatus, setGoogleGmailStatus] =
+    useState<GoogleGmailStatus | null>(null)
   const [llmBlockFilters, setLlmBlockFilters] = useState<LlmBlockFilter[] | null>(null)
   const [llmBlockedMails, setLlmBlockedMails] = useState<LlmBlockedMail[] | null>(null)
-  const [debugSubject, setDebugSubject] = useState('Review mock mail')
-  const [debugFromAddress, setDebugFromAddress] = useState(
-    'review.mock.sender@example.com',
-  )
-  const [debugBodyText, setDebugBodyText] = useState(
-    'This is a mock mail for review.',
-  )
-  const [debugNotice, setDebugNotice] = useState<string | null>(null)
+  const [debugNotice, setDebugNotice] = useState<string | null>(initialDebugNotice)
   const [llmBlockQuery, setLlmBlockQuery] = useState('password')
   const [llmBlockReason, setLlmBlockReason] = useState('May contain password.')
   const [isDebugBusy, setIsDebugBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
-  const [activeTab, setActiveTab] = useState<MaintenanceTab>('usage')
+  const [activeTab, setActiveTab] = useState<MaintenanceTab>(initialMaintenanceTab)
   const [activeUsageMetric, setActiveUsageMetric] =
     useState<UsageMetric>(usageMetrics[0])
   const [activeUsageHistoryRange, setActiveUsageHistoryRange] =
@@ -339,6 +331,29 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
     }
   }, [activeTab, llmBlockedMails, llmBlockFilters, llmModelConfig])
 
+  useEffect(() => {
+    if (activeTab !== 'debug' || googleGmailStatus !== null) {
+      return
+    }
+
+    let isMounted = true
+    getGoogleGmailStatus()
+      .then((nextStatus) => {
+        if (isMounted) {
+          setGoogleGmailStatus(nextStatus)
+        }
+      })
+      .catch((requestError) => {
+        if (isMounted) {
+          setError(describeError(requestError))
+        }
+      })
+
+    return () => {
+      isMounted = false
+    }
+  }, [activeTab, googleGmailStatus])
+
   async function handleRetry(job: Job) {
     setBusyId(job.id)
     setError(null)
@@ -381,19 +396,30 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
     setLlmBlockedMails(await listLlmBlockedMails())
   }
 
-  async function handleDebugRunNextJob() {
+  async function refreshGoogleGmailStatus() {
+    setGoogleGmailStatus(await getGoogleGmailStatus())
+  }
+
+  async function handleGoogleGmailConnect() {
     setError(null)
     setDebugNotice(null)
     setIsDebugBusy(true)
     try {
-      const result = await runNextJob()
-      setDebugNotice(
-        result.job_id === null
-          ? t('mail.job.none')
-          : t('mail.job.ran', { jobId: result.job_id }),
-      )
-      await refreshSendRequests()
-      await refreshLlmBlockedMails()
+      const result = await createGoogleGmailConnectUrl()
+      window.location.href = result.authorization_url
+    } catch (requestError) {
+      setError(describeError(requestError))
+      setIsDebugBusy(false)
+    }
+  }
+
+  async function handleGoogleGmailDisconnect() {
+    setError(null)
+    setDebugNotice(null)
+    setIsDebugBusy(true)
+    try {
+      setGoogleGmailStatus(await disconnectGoogleGmail())
+      setDebugNotice(t('maintenance.debug.googleGmailDisconnected'))
     } catch (requestError) {
       setError(describeError(requestError))
     } finally {
@@ -401,30 +427,30 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
     }
   }
 
-  async function handleDebugMockIngest(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
+  async function handleGoogleGmailImportLatest() {
     setError(null)
     setDebugNotice(null)
     setIsDebugBusy(true)
-    const suffix = uniqueSuffix()
-
     try {
-      const result = await ingestMockMail({
-        gmail_message_id: `mock_${suffix}`,
-        gmail_thread_id: `mock_thread_${suffix}`,
-        message_id_header: `<mock-${suffix}@caseclosed.local>`,
-        subject: debugSubject,
-        from_address: debugFromAddress,
-        received_at: jstInputNow(),
-        body_text: debugBodyText,
-      })
+      const result = await importLatestUnloadedGoogleGmail()
+      if (!result.imported || result.mail === null) {
+        setDebugNotice(t('maintenance.debug.googleGmailImportNone'))
+        return
+      }
       setDebugNotice(
-        result.pending
-          ? t('mail.mock.pending', {
-              email: result.pending_address ?? debugFromAddress,
-            })
-          : t('mail.mock.ingested'),
+        t('maintenance.debug.googleGmailImported', {
+          subject: result.subject ?? result.mail.gmail_message_id,
+          pending: result.mail.pending ? 'yes' : 'no',
+          jobId: result.mail.queued_job_id ?? '-',
+        }),
       )
+      await Promise.all([
+        refreshGoogleGmailStatus(),
+        refreshLlmBlockedMails(),
+        readMaintenanceStatus().then(setStatus),
+        listJobs().then(setJobs),
+        listPendingMails().then(setPendingMails),
+      ])
     } catch (requestError) {
       setError(describeError(requestError))
     } finally {
@@ -906,44 +932,99 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                       {t('mail.debug.heading')}
                     </h3>
                   </div>
-                  <div className="mail-actions mail-debug-actions">
+                </section>
+
+                <section
+                  aria-labelledby="maintenance-google-gmail-heading"
+                  className="maintenance-section"
+                >
+                  <div className="section-heading">
+                    <h3 id="maintenance-google-gmail-heading">
+                      {t('maintenance.debug.googleGmail')}
+                    </h3>
                     <button
                       disabled={isDebugBusy}
-                      onClick={handleDebugRunNextJob}
+                      onClick={() => {
+                        void refreshGoogleGmailStatus()
+                      }}
                       type="button"
                     >
-                      {t('mail.job.runNext')}
+                      {t('mail.refresh')}
                     </button>
                   </div>
-                  <form className="mail-mock-form" onSubmit={handleDebugMockIngest}>
-                    <label>
-                      <span>{t('mail.subject')}</span>
-                      <input
-                        onChange={(event) => setDebugSubject(event.target.value)}
-                        required
-                        value={debugSubject}
-                      />
-                    </label>
-                    <label>
-                      <span>{t('mail.from')}</span>
-                      <input
-                        onChange={(event) => setDebugFromAddress(event.target.value)}
-                        required
-                        type="email"
-                        value={debugFromAddress}
-                      />
-                    </label>
-                    <label>
-                      <span>{t('mail.body')}</span>
-                      <textarea
-                        onChange={(event) => setDebugBodyText(event.target.value)}
-                        value={debugBodyText}
-                      />
-                    </label>
-                    <button disabled={isDebugBusy} type="submit">
-                      {t('mail.mock.ingest')}
-                    </button>
-                  </form>
+
+                  <div className="google-gmail-panel">
+                    {googleGmailStatus === null ? (
+                      <p>{t('maintenance.debug.loading')}</p>
+                    ) : (
+                      <>
+                        <dl>
+                          <div>
+                            <dt>{t('common.status')}</dt>
+                            <dd>
+                              <span
+                                data-status={
+                                  googleGmailStatus.connected
+                                    ? 'succeeded'
+                                    : googleGmailStatus.configured
+                                      ? 'pending'
+                                      : 'failed'
+                                }
+                              >
+                                {googleGmailStatus.connected
+                                  ? t('maintenance.debug.googleGmailConnected')
+                                  : googleGmailStatus.configured
+                                    ? t('maintenance.debug.googleGmailReady')
+                                    : t('maintenance.debug.googleGmailNotConfigured')}
+                              </span>
+                            </dd>
+                          </div>
+                          <div>
+                            <dt>{t('maintenance.debug.googleGmailMailLoad')}</dt>
+                            <dd>{t('maintenance.debug.googleGmailMailLoadOff')}</dd>
+                          </div>
+                          <div>
+                            <dt>{t('maintenance.debug.googleGmailConnectedAt')}</dt>
+                            <dd>{googleGmailStatus.connected_at ?? t('common.none')}</dd>
+                          </div>
+                          <div>
+                            <dt>{t('maintenance.debug.googleGmailScopes')}</dt>
+                            <dd>{googleGmailStatus.scopes.join(', ')}</dd>
+                          </div>
+                          <div>
+                            <dt>{t('maintenance.debug.googleGmailRedirectUri')}</dt>
+                            <dd>{googleGmailStatus.redirect_uri}</dd>
+                          </div>
+                        </dl>
+                        {googleGmailStatus.last_error !== null && (
+                          <p role="alert">{googleGmailStatus.last_error}</p>
+                        )}
+                        <div className="mail-actions mail-debug-actions">
+                          <button
+                            disabled={isDebugBusy || !googleGmailStatus.configured}
+                            onClick={handleGoogleGmailConnect}
+                            type="button"
+                          >
+                            {t('maintenance.debug.googleGmailConnect')}
+                          </button>
+                          <button
+                            disabled={isDebugBusy || !googleGmailStatus.connected}
+                            onClick={handleGoogleGmailDisconnect}
+                            type="button"
+                          >
+                            {t('maintenance.debug.googleGmailDisconnect')}
+                          </button>
+                          <button
+                            disabled={isDebugBusy || !googleGmailStatus.connected}
+                            onClick={handleGoogleGmailImportLatest}
+                            type="button"
+                          >
+                            {t('maintenance.debug.googleGmailImportLatest')}
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
                 </section>
 
                 <section

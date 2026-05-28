@@ -94,6 +94,12 @@ def test_phase_4_migrations_add_mail_tables(
                 "PRAGMA table_info(mail_thread_summaries)"
             ).fetchall()
         }
+        send_request_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(mail_send_requests)"
+            ).fetchall()
+        }
 
     assert {
         "gmail_message_id",
@@ -141,3 +147,4 @@ def test_phase_4_migrations_add_mail_tables(
         "language",
         "llm_run_id",
     } <= thread_summary_columns
+    assert {"attachment_names_json", "attachment_data_json"} <= send_request_columns

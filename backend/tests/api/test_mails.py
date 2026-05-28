@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+from email import message_from_bytes
 import sqlite3
 import json
 
@@ -73,6 +75,99 @@ def create_known_sender_mail(client, *, subject: str, body_text: str = "") -> st
     return response.json()["data"]["message_id"]
 
 
+def connect_gmail_send(database_path) -> None:
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings (id, key, value_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "setting_google_gmail_oauth_connection",
+                "google_gmail_oauth_connection",
+                json.dumps(
+                    {
+                        "access_token": "gmail-send-access-token",
+                        "token_expires_at": "2099-05-26T23:00:00+09:00",
+                        "connected_at": "2026-05-26T08:00:00+09:00",
+                        "scopes": [
+                            "https://www.googleapis.com/auth/gmail.readonly",
+                            "https://www.googleapis.com/auth/gmail.send",
+                        ],
+                    }
+                ),
+                "2026-05-26T08:00:00+09:00",
+            ),
+        )
+        connection.commit()
+
+
+def patch_gmail_send_response(
+    monkeypatch,
+    *,
+    gmail_message_id: str,
+    gmail_thread_id: str,
+    subject: str,
+    body_text: str,
+    to_address: str,
+    cc_address: str | None = None,
+    in_reply_to: str | None = None,
+) -> list[bytes]:
+    sent_raw_messages: list[bytes] = []
+
+    def fake_gmail_api_send_raw_message(access_token, raw_message, *, thread_id=None):
+        assert access_token == "gmail-send-access-token"
+        sent_raw_messages.append(raw_message)
+        return {"id": gmail_message_id, "threadId": thread_id or gmail_thread_id}
+
+    def fake_gmail_api_get_json(path, access_token, params=None):
+        assert access_token == "gmail-send-access-token"
+        if path == "/users/me/profile":
+            return {"emailAddress": "me@example.com"}
+        if path == f"/users/me/messages/{gmail_message_id}":
+            headers = [
+                {"name": "From", "value": "me@example.com"},
+                {"name": "To", "value": to_address},
+                {"name": "Subject", "value": subject},
+                {"name": "Message-ID", "value": f"<{gmail_message_id}@example.com>"},
+            ]
+            if cc_address is not None:
+                headers.append({"name": "Cc", "value": cc_address})
+            if in_reply_to is not None:
+                headers.append({"name": "In-Reply-To", "value": in_reply_to})
+            return {
+                "id": gmail_message_id,
+                "threadId": gmail_thread_id,
+                "internalDate": "1779746400000",
+                "labelIds": ["SENT"],
+                "snippet": body_text,
+                "payload": {
+                    "mimeType": "text/plain",
+                    "headers": headers,
+                    "body": {
+                        "data": base64.urlsafe_b64encode(
+                            body_text.encode("utf-8")
+                        ).decode("ascii").rstrip("=")
+                    },
+                },
+            }
+        raise AssertionError(f"unexpected Gmail API path: {path}")
+
+    from caseclosed import google_integration
+
+    monkeypatch.setattr(
+        google_integration,
+        "gmail_api_send_raw_message",
+        fake_gmail_api_send_raw_message,
+    )
+    monkeypatch.setattr(
+        google_integration,
+        "gmail_api_get_json",
+        fake_gmail_api_get_json,
+    )
+    return sent_raw_messages
+
+
 def test_mail_detail_returns_message_state_and_available_actions(client) -> None:
     message_id = create_known_sender_mail(
         client,
@@ -99,6 +194,7 @@ def test_mail_detail_returns_message_state_and_available_actions(client) -> None
                 "display_name": "Known Recipient",
                 "avatar_url": "https://example.com/recipient.png",
                 "kind": "person",
+                "status": "active",
                 "tags": [],
             },
         }
@@ -144,6 +240,8 @@ def test_llm_block_filter_marks_matching_mail_and_worker_skips_llm(
     detail = detail_response.json()["data"]
     assert detail["auto_state"]["llm_blocked"] is True
     assert detail["auto_state"]["llm_block_reason"] == "May contain password."
+    assert detail["auto_state"]["effective_importance"] == "pinned"
+    assert detail["message"]["effective_importance"] == "pinned"
     assert detail["message"]["llm_blocked"] is True
 
     run_response = client.post("/api/v1/jobs/run-next")
@@ -161,6 +259,7 @@ def test_llm_block_filter_marks_matching_mail_and_worker_skips_llm(
     assert llm_run_count == (0,)
     assert job_row[0] == "succeeded"
     assert json.loads(job_row[1])["reason"] == "llm_blocked"
+    assert json.loads(job_row[1])["effective_importance"] == "pinned"
 
 
 def test_llm_block_filter_applies_to_newly_ingested_mail_before_llm_job(
@@ -197,6 +296,8 @@ def test_llm_block_filter_applies_to_newly_ingested_mail_before_llm_job(
     detail = detail_response.json()["data"]
     assert detail["auto_state"]["llm_blocked"] is True
     assert detail["auto_state"]["llm_block_reason"] == "Contains credential material."
+    assert detail["auto_state"]["effective_importance"] == "pinned"
+    assert detail["message"]["effective_importance"] == "pinned"
 
     with sqlite3.connect(database_path) as connection:
         jobs = connection.execute(
@@ -275,7 +376,14 @@ def test_send_mail_records_mock_send_request(client, database_path) -> None:
             "cc_addresses": ["team@example.com"],
             "subject": "Reply source",
             "body_text": "Thanks.\n\n> Original body.",
-            "attachment_names": ["agenda.pdf"],
+            "attachments": [
+                {
+                    "filename": "agenda.pdf",
+                    "content_type": "application/pdf",
+                    "data_base64": base64.b64encode(b"agenda").decode("ascii"),
+                    "size": 6,
+                }
+            ],
             "reply_to_message_id": message_id,
         },
     )
@@ -314,6 +422,21 @@ def test_send_mail_records_mock_send_request(client, database_path) -> None:
     assert json.loads(jobs[0][2])["send_request_id"] == data["id"]
 
 
+def test_send_mail_rejects_attachment_names_without_file_data(client) -> None:
+    response = client.post(
+        f"{MAILS_URL}/send",
+        json={
+            "to_addresses": ["reply@example.com"],
+            "subject": "Attachment names only",
+            "body_text": "Body.",
+            "attachment_names": ["name-only.pdf"],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
 def test_send_mail_requests_can_be_listed_for_debug(client) -> None:
     client.post(
         f"{MAILS_URL}/send",
@@ -343,7 +466,7 @@ def test_send_mail_requests_can_be_listed_for_debug(client) -> None:
     assert items[0]["cc_addresses"] == ["cc@example.com"]
 
 
-def test_mock_send_job_adds_sent_message_to_thread(client, database_path) -> None:
+def test_send_job_fails_without_gmail_connection(client, database_path) -> None:
     message_id = create_known_sender_mail(
         client,
         subject="Reply source",
@@ -372,13 +495,191 @@ def test_mock_send_job_adds_sent_message_to_thread(client, database_path) -> Non
         for message in detail["thread_messages"]
         if "SENT" in message["gmail_labels"]
     ]
+    assert sent_messages == []
+
+    with sqlite3.connect(database_path) as connection:
+        send_request_row = connection.execute(
+            "SELECT status, sent_message_id FROM mail_send_requests WHERE id = ?",
+            (send_request_id,),
+        ).fetchone()
+        job_row = connection.execute(
+            """
+            SELECT status, error_type, error_message
+            FROM jobs
+            WHERE job_type = 'mail_send_mock'
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+    assert send_request_row == ("failed_gmail", None)
+    assert job_row[0] == "failed"
+    assert job_row[1] == "RuntimeError"
+    assert "Gmail is not connected" in job_row[2]
+
+
+def test_send_only_sent_message_appears_in_done_list(
+    client,
+    database_path,
+    monkeypatch,
+) -> None:
+    connect_gmail_send(database_path)
+    patch_gmail_send_response(
+        monkeypatch,
+        gmail_message_id="gmail_sent_standalone",
+        gmail_thread_id="thread_sent_standalone",
+        subject="Standalone sent mail",
+        body_text="This mail starts a new thread.",
+        to_address="new.receiver@example.com",
+    )
+    send_response = client.post(
+        f"{MAILS_URL}/send",
+        json={
+            "to_addresses": ["new.receiver@example.com"],
+            "subject": "Standalone sent mail",
+            "body_text": "This mail starts a new thread.",
+        },
+    )
+    send_request_id = send_response.json()["data"]["id"]
+    send_now_response = client.post(f"{MAILS_URL}/send-requests/{send_request_id}/send-now")
+    run_response = client.post("/api/v1/jobs/run-next")
+
+    assert send_now_response.status_code == 200
+    assert run_response.status_code == 200
+
+    list_response = client.get(f"{MAILS_URL}?tab=processed&limit=20")
+    items = list_response.json()["data"]["items"]
+    sent_item = next(item for item in items if item["subject"] == "Standalone sent mail")
+
+    assert sent_item["processed_status"] == "processed"
+    assert sent_item["read_status"] == "read"
+    assert sent_item["effective_importance"] == "sent"
+
+    detail_response = client.get(f"{MAILS_URL}/{sent_item['id']}")
+    detail = detail_response.json()["data"]
+    assert detail["message"]["body_text"] == "This mail starts a new thread."
+    assert detail["message"]["gmail_labels"] == ["SENT"]
+
+
+def test_send_job_uses_gmail_api_when_gmail_send_scope_is_connected(
+    client,
+    database_path,
+    monkeypatch,
+) -> None:
+    message_id = create_known_sender_mail(
+        client,
+        subject="Gmail reply source",
+        body_text="Original Gmail body.",
+    )
+    send_response = client.post(
+        f"{MAILS_URL}/send",
+        json={
+            "to_addresses": ["reply@example.com"],
+            "cc_addresses": ["team@example.com"],
+            "subject": "Gmail reply source",
+            "body_text": "Thanks from Gmail.",
+            "reply_to_message_id": message_id,
+        },
+    )
+    send_request_id = send_response.json()["data"]["id"]
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings (id, key, value_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "setting_google_gmail_oauth_connection",
+                "google_gmail_oauth_connection",
+                json.dumps(
+                    {
+                        "access_token": "gmail-send-access-token",
+                        "token_expires_at": "2099-05-26T23:00:00+09:00",
+                        "connected_at": "2026-05-26T08:00:00+09:00",
+                        "scopes": [
+                            "https://www.googleapis.com/auth/gmail.readonly",
+                            "https://www.googleapis.com/auth/gmail.send",
+                        ],
+                    }
+                ),
+                "2026-05-26T08:00:00+09:00",
+            ),
+        )
+        connection.commit()
+
+    sent_raw_messages = []
+
+    def fake_gmail_api_send_raw_message(access_token, raw_message, *, thread_id=None):
+        assert access_token == "gmail-send-access-token"
+        assert thread_id == "thread_mail_api"
+        sent_raw_messages.append(raw_message)
+        return {"id": "gmail_sent_real", "threadId": "thread_mail_api"}
+
+    def fake_gmail_api_get_json(path, access_token, params=None):
+        assert access_token == "gmail-send-access-token"
+        if path == "/users/me/profile":
+            return {"emailAddress": "me@example.com"}
+        if path == "/users/me/messages/gmail_sent_real":
+            return {
+                "id": "gmail_sent_real",
+                "threadId": "thread_mail_api",
+                "internalDate": "1779746400000",
+                "labelIds": ["SENT"],
+                "snippet": "Thanks from Gmail.",
+                "payload": {
+                    "mimeType": "text/plain",
+                    "headers": [
+                        {"name": "From", "value": "me@example.com"},
+                        {"name": "To", "value": "reply@example.com"},
+                        {"name": "Cc", "value": "team@example.com"},
+                        {"name": "Subject", "value": "Gmail reply source"},
+                        {"name": "Message-ID", "value": "<gmail-sent-real@example.com>"},
+                        {"name": "In-Reply-To", "value": "<mail-api-1@example.com>"},
+                    ],
+                    "body": {
+                        "data": base64.urlsafe_b64encode(
+                            b"Thanks from Gmail."
+                        ).decode("ascii").rstrip("=")
+                    },
+                },
+            }
+        raise AssertionError(f"unexpected Gmail API path: {path}")
+
+    from caseclosed import google_integration
+
+    monkeypatch.setattr(
+        google_integration,
+        "gmail_api_send_raw_message",
+        fake_gmail_api_send_raw_message,
+    )
+    monkeypatch.setattr(
+        google_integration,
+        "gmail_api_get_json",
+        fake_gmail_api_get_json,
+    )
+
+    send_now_response = client.post(f"{MAILS_URL}/send-requests/{send_request_id}/send-now")
+    run_response = client.post("/api/v1/jobs/run-next")
+
+    assert send_now_response.status_code == 200
+    assert run_response.status_code == 200
+    assert len(sent_raw_messages) == 1
+    raw_message = message_from_bytes(sent_raw_messages[0])
+    assert raw_message["From"] == "me@example.com"
+    assert raw_message["To"] == "reply@example.com"
+    assert raw_message["Cc"] == "team@example.com"
+    assert raw_message["In-Reply-To"] == "<mail-api-1@example.com>"
+    assert raw_message.get_payload().strip() == "Thanks from Gmail."
+
+    detail_response = client.get(f"{MAILS_URL}/{message_id}")
+    sent_messages = [
+        message
+        for message in detail_response.json()["data"]["thread_messages"]
+        if "SENT" in message["gmail_labels"]
+    ]
     assert len(sent_messages) == 1
-    assert sent_messages[0]["subject"] == "Reply source"
-    assert sent_messages[0]["from_address"] == "caseclosed.me@example.local"
-    assert sent_messages[0]["to_addresses"] == ["reply@example.com"]
-    assert sent_messages[0]["cc_addresses"] == ["team@example.com"]
-    assert sent_messages[0]["body_text"] == "Thanks.\n\n> Original body."
-    assert sent_messages[0]["in_reply_to_header"] == "<mail-api-1@example.com>"
+    assert sent_messages[0]["gmail_message_id"] == "gmail_sent_real"
+    assert sent_messages[0]["from_address"] == "me@example.com"
 
     with sqlite3.connect(database_path) as connection:
         send_request_row = connection.execute(
@@ -386,13 +687,124 @@ def test_mock_send_job_adds_sent_message_to_thread(client, database_path) -> Non
             (send_request_id,),
         ).fetchone()
 
-    assert send_request_row[0] == "sent_mock"
+    assert send_request_row[0] == "sent_gmail"
     assert send_request_row[1] == sent_messages[0]["id"]
+
+
+def test_gmail_send_job_builds_attachment_mime_part(
+    client,
+    database_path,
+    monkeypatch,
+) -> None:
+    send_response = client.post(
+        f"{MAILS_URL}/send",
+        json={
+            "to_addresses": ["receiver@example.com"],
+            "subject": "Attachment mail",
+            "body_text": "Please see attached.",
+            "attachments": [
+                {
+                    "filename": "note.txt",
+                    "content_type": "text/plain",
+                    "data_base64": base64.b64encode(b"attached text").decode("ascii"),
+                    "size": 13,
+                }
+            ],
+        },
+    )
+    send_request_id = send_response.json()["data"]["id"]
+    assert send_response.json()["data"]["attachment_names"] == ["note.txt"]
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings (id, key, value_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "setting_google_gmail_oauth_connection",
+                "google_gmail_oauth_connection",
+                json.dumps(
+                    {
+                        "access_token": "gmail-send-access-token",
+                        "token_expires_at": "2099-05-26T23:00:00+09:00",
+                        "connected_at": "2026-05-26T08:00:00+09:00",
+                        "scopes": [
+                            "https://www.googleapis.com/auth/gmail.readonly",
+                            "https://www.googleapis.com/auth/gmail.send",
+                        ],
+                    }
+                ),
+                "2026-05-26T08:00:00+09:00",
+            ),
+        )
+        connection.commit()
+
+    sent_raw_messages = []
+
+    def fake_gmail_api_send_raw_message(access_token, raw_message, *, thread_id=None):
+        assert access_token == "gmail-send-access-token"
+        assert thread_id is None
+        sent_raw_messages.append(raw_message)
+        return {"id": "gmail_sent_attachment", "threadId": "thread_sent_attachment"}
+
+    def fake_gmail_api_get_json(path, access_token, params=None):
+        assert access_token == "gmail-send-access-token"
+        if path == "/users/me/profile":
+            return {"emailAddress": "me@example.com"}
+        if path == "/users/me/messages/gmail_sent_attachment":
+            return {
+                "id": "gmail_sent_attachment",
+                "threadId": "thread_sent_attachment",
+                "internalDate": "1779746400000",
+                "labelIds": ["SENT"],
+                "payload": {
+                    "mimeType": "text/plain",
+                    "headers": [
+                        {"name": "From", "value": "me@example.com"},
+                        {"name": "To", "value": "receiver@example.com"},
+                        {"name": "Subject", "value": "Attachment mail"},
+                    ],
+                    "body": {
+                        "data": base64.urlsafe_b64encode(
+                            b"Please see attached."
+                        ).decode("ascii").rstrip("=")
+                    },
+                },
+            }
+        raise AssertionError(f"unexpected Gmail API path: {path}")
+
+    from caseclosed import google_integration
+
+    monkeypatch.setattr(
+        google_integration,
+        "gmail_api_send_raw_message",
+        fake_gmail_api_send_raw_message,
+    )
+    monkeypatch.setattr(
+        google_integration,
+        "gmail_api_get_json",
+        fake_gmail_api_get_json,
+    )
+
+    client.post(f"{MAILS_URL}/send-requests/{send_request_id}/send-now")
+    run_response = client.post("/api/v1/jobs/run-next")
+
+    assert run_response.status_code == 200
+    raw_message = message_from_bytes(sent_raw_messages[0])
+    attachments = [
+        part
+        for part in raw_message.walk()
+        if part.get_content_disposition() == "attachment"
+    ]
+    assert len(attachments) == 1
+    assert attachments[0].get_filename() == "note.txt"
+    assert attachments[0].get_payload(decode=True) == b"attached text"
 
 
 def test_scheduled_send_request_can_be_rescheduled_sent_now_and_canceled(
     client,
     database_path,
+    monkeypatch,
 ) -> None:
     message_id = create_known_sender_mail(
         client,
@@ -447,6 +859,16 @@ def test_scheduled_send_request_can_be_rescheduled_sent_now_and_canceled(
         },
     )
     second_id = second_schedule_response.json()["data"]["id"]
+    connect_gmail_send(database_path)
+    patch_gmail_send_response(
+        monkeypatch,
+        gmail_message_id="gmail_sent_scheduled",
+        gmail_thread_id="thread_mail_api",
+        subject="Scheduled source",
+        body_text="Send now reply.",
+        to_address="reply@example.com",
+        in_reply_to="<mail-api-1@example.com>",
+    )
     send_now_response = client.post(f"{MAILS_URL}/send-requests/{second_id}/send-now")
     run_response = client.post("/api/v1/jobs/run-next")
 
@@ -471,7 +893,7 @@ def test_scheduled_send_request_can_be_rescheduled_sent_now_and_canceled(
                 (send_request["id"], second_id),
             ).fetchall()
         )
-    assert statuses == {send_request["id"]: "canceled", second_id: "sent_mock"}
+    assert statuses == {send_request["id"]: "canceled", second_id: "sent_gmail"}
 
 
 def test_send_only_scheduled_request_appears_in_done_list_and_detail(client) -> None:
@@ -685,6 +1107,116 @@ def test_mail_list_supports_matomail_style_tabs_and_read_filter(client) -> None:
     assert read_item["received_date"] == "2026-05-23"
     assert isinstance(read_item["importance_rank"], int)
     assert unread_response.json()["data"]["items"] == []
+
+
+def test_mail_list_needs_action_matches_unprocessed_high_or_middle_messages(
+    client,
+) -> None:
+    client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Needs Action Sender",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "needs.action@example.com", "is_primary": True}
+            ],
+        },
+    )
+    processed_high_id = ingest_mail(
+        client,
+        gmail_message_id="gmail_needs_processed_high",
+        gmail_thread_id="thread_needs_processed_high_low",
+        from_address="needs.action@example.com",
+        subject="Processed high older mail",
+        received_at="2026-05-23T09:00:00+09:00",
+    )
+    low_unprocessed_id = ingest_mail(
+        client,
+        gmail_message_id="gmail_needs_low_unprocessed",
+        gmail_thread_id="thread_needs_processed_high_low",
+        from_address="needs.action@example.com",
+        subject="Low latest mail",
+        received_at="2026-05-23T10:00:00+09:00",
+    )
+    high_unprocessed_id = ingest_mail(
+        client,
+        gmail_message_id="gmail_needs_high_unprocessed",
+        gmail_thread_id="thread_needs_high_unprocessed",
+        from_address="needs.action@example.com",
+        subject="High action mail",
+        received_at="2026-05-23T11:00:00+09:00",
+    )
+    middle_unprocessed_id = ingest_mail(
+        client,
+        gmail_message_id="gmail_needs_middle_unprocessed",
+        gmail_thread_id="thread_needs_middle_unprocessed",
+        from_address="needs.action@example.com",
+        subject="Middle action mail",
+        received_at="2026-05-23T12:00:00+09:00",
+    )
+    pinned_unprocessed_id = ingest_mail(
+        client,
+        gmail_message_id="gmail_needs_pinned_unprocessed",
+        gmail_thread_id="thread_needs_pinned_unprocessed",
+        from_address="needs.action@example.com",
+        subject="Pinned mail",
+        received_at="2026-05-23T13:00:00+09:00",
+    )
+    client.post(
+        f"{MAILS_URL}/{processed_high_id}/importance",
+        json={"importance": "High"},
+    )
+    client.post(f"{MAILS_URL}/{processed_high_id}/process", json={"reason": "handled"})
+    client.post(f"{MAILS_URL}/{low_unprocessed_id}/importance", json={"importance": "Low"})
+    client.post(f"{MAILS_URL}/{high_unprocessed_id}/importance", json={"importance": "High"})
+    client.post(
+        f"{MAILS_URL}/{middle_unprocessed_id}/importance",
+        json={"importance": "Middle"},
+    )
+    client.post(
+        f"{MAILS_URL}/{pinned_unprocessed_id}/importance",
+        json={"importance": "Pinned"},
+    )
+
+    response = client.get(f"{MAILS_URL}?needs_action=true")
+
+    assert response.status_code == 200
+    gmail_thread_ids = {
+        item["gmail_thread_id"] for item in response.json()["data"]["items"]
+    }
+    assert gmail_thread_ids == {
+        "thread_needs_high_unprocessed",
+        "thread_needs_middle_unprocessed",
+    }
+
+
+def test_spam_contact_mail_appears_in_skip_tab_with_contact_status(client) -> None:
+    client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Spam Sender",
+            "status": "spam",
+            "email_addresses": [
+                {"email_address": "spam.list@example.com", "is_primary": True}
+            ],
+        },
+    )
+    message_id = ingest_mail(
+        client,
+        gmail_message_id="gmail_spam_tab",
+        gmail_thread_id="thread_spam_tab",
+        from_address="spam.list@example.com",
+        subject="Spam tab mail",
+        received_at="2026-05-23T13:00:00+09:00",
+    )
+
+    skip_response = client.get(f"{MAILS_URL}?tab=skip")
+
+    assert skip_response.status_code == 200
+    items = skip_response.json()["data"]["items"]
+    assert [item["id"] for item in items] == [message_id]
+    assert items[0]["effective_importance"] == "skip"
+    assert items[0]["sender_contact"]["status"] == "spam"
 
 
 def test_mail_list_aggregates_inbound_messages_by_thread(client) -> None:
@@ -1113,6 +1645,20 @@ def test_request_mail_summary_queues_for_unclassified_mail(
     assert payload["message_id"] == message_id
     assert payload["force"] is True
     assert payload["reason"] == "manual_request"
+
+
+def test_request_mail_summary_rejects_pinned_mail(client) -> None:
+    message_id = create_known_sender_mail(
+        client,
+        subject="Pinned mail to read directly",
+        body_text="This should not be summarized.",
+    )
+    client.post(f"{MAILS_URL}/{message_id}/importance", json={"importance": "Pinned"})
+
+    response = client.post(f"{MAILS_URL}/{message_id}/summary")
+
+    assert response.status_code == 409
+    assert response.json()["error"]["message"] == "Pinned mail cannot be summarized."
 
 
 def test_mail_read_unread_update(client) -> None:

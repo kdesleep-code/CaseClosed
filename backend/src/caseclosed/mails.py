@@ -21,6 +21,7 @@ from caseclosed.db.models import ContactEmailAddress
 from caseclosed.db.models import ContactTag
 from caseclosed.db.models import GmailMessage
 from caseclosed.db.models import Job
+from caseclosed.db.models import LlmRun
 from caseclosed.db.models import MailAutoState
 from caseclosed.db.models import MailLlmBlockFilter
 from caseclosed.db.models import MailSendRequest
@@ -41,9 +42,15 @@ from caseclosed.services.mail_ingestion import message_is_sent
 from caseclosed.services.mail_ingestion import row_matches_llm_block_query
 from caseclosed.services.background_worker import kick_job_drain
 from caseclosed.services.llm_provider import LLM_FUNCTION_TYPES
+from caseclosed.services.llm_provider import (
+    FUNCTION_TYPE_NEW_MAIL_DRAFT_GENERATION,
+)
+from caseclosed.services.llm_provider import FUNCTION_TYPE_REPLY_DRAFT_GENERATION
+from caseclosed.services.llm_provider import build_mail_draft_generation_provider
 from caseclosed.services.llm_provider import list_llm_model_profiles
 from caseclosed.services.llm_provider import llm_function_config_data
 from caseclosed.services.llm_provider import llm_model_profile_data
+from caseclosed.mail_drafts import delete_mail_drafts_for_reply_target
 from caseclosed.services.mail_summary import SUMMARY_TARGET_IMPORTANCE
 from caseclosed.services.mail_summary import enqueue_mail_summary_job
 
@@ -83,6 +90,13 @@ class MailProcessRequest(BaseModel):
     reason: str | None = None
 
 
+class MailSendAttachmentPayload(BaseModel):
+    filename: str
+    content_type: str | None = None
+    data_base64: str
+    size: int | None = None
+
+
 class MailSendRequestPayload(BaseModel):
     to_addresses: list[str]
     cc_addresses: list[str] | None = None
@@ -90,8 +104,22 @@ class MailSendRequestPayload(BaseModel):
     subject: str | None = None
     body_text: str
     attachment_names: list[str] | None = None
+    attachments: list[MailSendAttachmentPayload] | None = None
     reply_to_message_id: str | None = None
     scheduled_at: str | None = None
+
+
+class MailDraftGenerationRequest(BaseModel):
+    instruction: str | None = None
+    standard_prompt: str | None = None
+    to_addresses: list[str] | None = None
+    cc_addresses: list[str] | None = None
+    bcc_addresses: list[str] | None = None
+    subject: str | None = None
+    auto_body_text: str | None = None
+    body_text: str | None = None
+    reply_to_message_id: str | None = None
+    related_case_summaries: list[dict[str, object]] | None = None
 
 
 class MailSendSchedulePayload(BaseModel):
@@ -123,7 +151,12 @@ IMPORTANCE_RANKS = {
     "sent": 7,
 }
 
-SEND_REQUEST_VISIBLE_STATUSES = {"scheduled_mock", "queued_mock", "sending_mock"}
+SEND_REQUEST_VISIBLE_STATUSES = {
+    "scheduled_mock",
+    "queued_mock",
+    "sending_mock",
+    "sending_gmail",
+}
 MOCK_FROM_ADDRESS = "caseclosed.me@example.local"
 
 
@@ -139,6 +172,7 @@ def mock_mail_result_data(result: MailIngestionResult) -> dict[str, object]:
         "pending_address": result.pending_address,
         "pending_reason": result.pending_reason,
         "queued_job_id": result.queued_job_id,
+        "queued_contact_ai_memo_job_id": result.queued_contact_ai_memo_job_id,
     }
 
 
@@ -167,6 +201,33 @@ def mail_send_request_data(send_request: MailSendRequest) -> dict[str, object]:
         "updated_at": send_request.updated_at,
         "version": send_request.version,
     }
+
+
+def attachment_payloads_json(
+    attachments: list[MailSendAttachmentPayload] | None,
+) -> str | None:
+    if not attachments:
+        return None
+    values: list[dict[str, object]] = []
+    for attachment in attachments:
+        filename = attachment.filename.strip()
+        data_base64 = attachment.data_base64.strip()
+        if filename == "" or data_base64 == "":
+            raise json_error(422, "VALIDATION_ERROR", "Attachment data is invalid.")
+        values.append(
+            {
+                "filename": filename,
+                "content_type": (
+                    attachment.content_type.strip()
+                    if attachment.content_type is not None
+                    and attachment.content_type.strip() != ""
+                    else "application/octet-stream"
+                ),
+                "data_base64": data_base64,
+                "size": attachment.size,
+            }
+        )
+    return json.dumps(values, ensure_ascii=True)
 
 
 def send_request_thread_id(send_request: MailSendRequest) -> str:
@@ -359,6 +420,7 @@ def contact_summary(
         "display_name": contact.display_name,
         "avatar_url": contact.avatar_url,
         "kind": contact.kind,
+        "status": contact.status,
         "tags": contact_tags(session, contact.id) if session is not None else [],
     }
 
@@ -378,6 +440,31 @@ def contact_for_address(
         )
         .limit(1)
     ).scalar_one_or_none()
+
+
+def recipient_contact_memos(
+    session: DatabaseSession,
+    email_addresses: list[str],
+) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    seen_contact_ids: set[str] = set()
+    for email_address in email_addresses:
+        contact = contact_for_address(session, email_address)
+        if contact is None or contact.id in seen_contact_ids:
+            continue
+        seen_contact_ids.add(contact.id)
+        user_memo = contact.user_memo if contact.user_memo is not None else contact.memo
+        items.append(
+            {
+                "contact_id": contact.id,
+                "display_name": contact.display_name,
+                "kind": contact.kind,
+                "status": contact.status,
+                "email_address": email_address,
+                "user_memo": user_memo,
+            }
+        )
+    return items
 
 
 def recipient_data(
@@ -785,8 +872,6 @@ def aggregate_thread_rows(
 ) -> list[tuple[GmailMessage, MailUserState, MailAutoState, str, str, str | None]]:
     thread_rows: dict[str, list[tuple[GmailMessage, MailUserState, MailAutoState]]] = {}
     for message, user_state, auto_state in rows:
-        if message_is_sent(message):
-            continue
         thread_rows.setdefault(message.thread_id, []).append(
             (message, user_state, auto_state)
         )
@@ -795,13 +880,16 @@ def aggregate_thread_rows(
         tuple[GmailMessage, MailUserState, MailAutoState, str, str, str | None]
     ] = []
     for thread_group in thread_rows.values():
+        display_group = [
+            row for row in thread_group if not message_is_sent(row[0])
+        ] or thread_group
         latest_message, latest_user_state, latest_auto_state = max(
-            thread_group,
+            display_group,
             key=lambda row: (row[0].received_at, row[0].id),
         )
         importance_candidates = [
             row[1].user_importance or row[2].effective_importance
-            for row in thread_group
+            for row in display_group
             if (row[1].user_importance or row[2].effective_importance) != "skip"
         ]
         if not importance_candidates:
@@ -813,7 +901,7 @@ def aggregate_thread_rows(
             )
         thread_read_status = (
             "unread"
-            if any(row[1].read_status == "unread" for row in thread_group)
+            if any(row[1].read_status == "unread" for row in display_group)
             else "read"
         )
         thread_read_at = (
@@ -839,6 +927,20 @@ def aggregate_thread_rows(
         key=lambda row: (row[0].received_at, row[0].id),
         reverse=True,
     )
+
+
+def needs_action_thread_ids(
+    rows: list[tuple[GmailMessage, MailUserState, MailAutoState]],
+) -> set[str]:
+    return {
+        message.thread_id
+        for message, user_state, auto_state in rows
+        if not message_is_sent(message)
+        and auto_state.pending_reason is None
+        and user_state.processed_status != "processed"
+        and (user_state.user_importance or auto_state.effective_importance)
+        in {"high", "middle"}
+    }
 
 
 def send_only_requests(session: DatabaseSession) -> list[MailSendRequest]:
@@ -1110,6 +1212,16 @@ def send_mail(
             raise json_error(404, "NOT_FOUND", "Reply target mail not found.")
 
     now = jst_iso()
+    attachment_names = [name.strip() for name in payload.attachment_names or [] if name.strip() != ""]
+    attachment_data_json = attachment_payloads_json(payload.attachments)
+    if attachment_names and attachment_data_json is None:
+        raise json_error(
+            422,
+            "VALIDATION_ERROR",
+            "Attachment file data is required. Refresh the compose screen and attach the file again.",
+        )
+    if payload.attachments:
+        attachment_names = [attachment.filename.strip() for attachment in payload.attachments]
     scheduled_at = (
         payload.scheduled_at.strip()
         if payload.scheduled_at is not None and payload.scheduled_at.strip() != ""
@@ -1129,10 +1241,8 @@ def send_mail(
         ),
         subject=payload.subject,
         body_text=body_text,
-        attachment_names_json=json.dumps(
-            [name.strip() for name in payload.attachment_names or [] if name.strip() != ""],
-            ensure_ascii=True,
-        ),
+        attachment_names_json=json.dumps(attachment_names, ensure_ascii=True),
+        attachment_data_json=attachment_data_json,
         reply_to_message_id=payload.reply_to_message_id,
         sent_message_id=None,
         scheduled_at=scheduled_at,
@@ -1148,7 +1258,117 @@ def send_mail(
         available_at=scheduled_at,
     )
     session.commit()
+    delete_mail_drafts_for_reply_target(payload.reply_to_message_id)
     return {"ok": True, "data": mail_send_request_data(send_request)}
+
+
+@router.post("/generate-draft")
+def generate_mail_draft(
+    payload: MailDraftGenerationRequest,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    to_addresses = normalize_address_list(payload.to_addresses)
+    cc_addresses = normalize_address_list(payload.cc_addresses)
+    bcc_addresses = normalize_address_list(payload.bcc_addresses)
+    all_recipient_addresses = to_addresses + cc_addresses + bcc_addresses
+    if len(all_recipient_addresses) == 0:
+        raise json_error(422, "VALIDATION_ERROR", "At least one recipient is required.")
+
+    reply_to_message = None
+    if payload.reply_to_message_id is not None:
+        reply_to_message = session.get(GmailMessage, payload.reply_to_message_id)
+        if reply_to_message is None:
+            raise json_error(404, "NOT_FOUND", "Reply target mail not found.")
+
+    function_type = (
+        FUNCTION_TYPE_REPLY_DRAFT_GENERATION
+        if reply_to_message is not None
+        else FUNCTION_TYPE_NEW_MAIL_DRAFT_GENERATION
+    )
+    related_case_summaries = payload.related_case_summaries or []
+    provider = build_mail_draft_generation_provider(function_type)
+    input_payload = {
+        "instruction": payload.instruction or "",
+        "standard_prompt": payload.standard_prompt or "",
+        "to_addresses": to_addresses,
+        "cc_addresses": cc_addresses,
+        "bcc_addresses": bcc_addresses,
+        "current_subject": payload.subject or "",
+        "auto_body_text": payload.auto_body_text if reply_to_message is not None else "",
+        "current_body": payload.body_text or "",
+        "reply_to_message_id": payload.reply_to_message_id,
+        "reply_to_subject": reply_to_message.subject if reply_to_message is not None else "",
+        "recipient_contact_memos": recipient_contact_memos(
+            session,
+            all_recipient_addresses,
+        ),
+        "related_case_summaries": related_case_summaries,
+    }
+    now = jst_iso()
+    provider_response = provider.complete_json(
+        function_type=function_type,
+        input_payload=input_payload,
+    )
+    output = provider_response.output
+    llm_run = LlmRun(
+        id=new_id("llm_run"),
+        function_type=function_type,
+        provider_name=provider.provider_name,
+        model_name=provider.model_name,
+        prompt_version_id=None,
+        input_hash=None,
+        input_source_json=json.dumps(
+            {
+                "reply_to_message_id": payload.reply_to_message_id,
+                "to_addresses": to_addresses,
+                "cc_addresses": cc_addresses,
+                "bcc_addresses": bcc_addresses,
+                "has_instruction": bool((payload.instruction or "").strip()),
+                "has_standard_prompt": bool((payload.standard_prompt or "").strip()),
+                "related_case_summary_count": len(related_case_summaries),
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        ),
+        input_diagnostic_json=json.dumps(
+            {
+                "instruction_length": len(payload.instruction or ""),
+                "standard_prompt_length": len(payload.standard_prompt or ""),
+                "auto_body_text_length": len(payload.auto_body_text or ""),
+                "current_body_length": len(payload.body_text or ""),
+                "recipient_contact_memo_count": len(
+                    input_payload["recipient_contact_memos"]
+                ),
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        ),
+        applied_instruction_rule_ids_json=json.dumps([], ensure_ascii=True),
+        output_json=json.dumps(output, ensure_ascii=True, sort_keys=True),
+        output_text_preview=provider_response.output_preview,
+        status="succeeded",
+        error_type=None,
+        error_message=None,
+        retry_count=0,
+        max_retry_count=3,
+        prompt_tokens=provider_response.prompt_tokens,
+        completion_tokens=provider_response.completion_tokens,
+        total_tokens=provider_response.total_tokens,
+        estimated_cost=provider_response.estimated_cost,
+        started_at=now,
+        finished_at=now,
+        created_at=now,
+    )
+    session.add(llm_run)
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "subject": str(output["subject"]),
+            "body_text": str(output["body"]),
+            "llm_run_id": llm_run.id,
+        },
+    }
 
 
 @router.get("/send-requests")
@@ -1184,7 +1404,13 @@ def get_send_request_or_404(
 
 
 def ensure_send_request_mutable(send_request: MailSendRequest) -> None:
-    if send_request.status in {"sent_mock", "sending_mock", "canceled"}:
+    if send_request.status in {
+        "sent_mock",
+        "sent_gmail",
+        "sending_mock",
+        "sending_gmail",
+        "canceled",
+    }:
         raise json_error(409, "CONFLICT", "Mail send request cannot be changed.")
 
 
@@ -1233,7 +1459,7 @@ def cancel_mail_send_request(
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
     send_request = get_send_request_or_404(session, send_request_id)
-    if send_request.status in {"sent_mock", "sending_mock"}:
+    if send_request.status in {"sent_mock", "sent_gmail", "sending_mock", "sending_gmail"}:
         raise json_error(409, "CONFLICT", "Mail send request cannot be canceled.")
     now = jst_iso()
     send_request.status = "canceled"
@@ -1249,6 +1475,7 @@ def list_mails(
     processed: str = "all",
     importance: str = "all",
     importance_any: str | None = None,
+    needs_action: bool = False,
     contact_status: str = "all",
     read: str = "all",
     q: str | None = None,
@@ -1285,50 +1512,65 @@ def list_mails(
             if row[0].thread_id in matching_thread_ids
         ]
 
+    matching_needs_action_thread_ids = (
+        needs_action_thread_ids(all_rows) if needs_action else set()
+    )
+
     aggregated_rows = aggregate_thread_rows(all_rows)
-    if normalized_processed in {"0", "unprocessed"}:
+    if needs_action:
         aggregated_rows = [
-            row for row in aggregated_rows if row[1].processed_status == "unprocessed"
+            row
+            for row in aggregated_rows
+            if row[0].thread_id in matching_needs_action_thread_ids
         ]
-    elif normalized_processed in {"1", "processed"}:
-        aggregated_rows = [
-            row for row in aggregated_rows if row[1].processed_status == "processed"
-        ]
+    else:
+        if normalized_processed in {"0", "unprocessed"}:
+            aggregated_rows = [
+                row
+                for row in aggregated_rows
+                if row[1].processed_status == "unprocessed"
+            ]
+        elif normalized_processed in {"1", "processed"}:
+            aggregated_rows = [
+                row for row in aggregated_rows if row[1].processed_status == "processed"
+            ]
 
-    if normalized_tab == "pending":
-        aggregated_rows = [row for row in aggregated_rows if row[2].pending_reason is not None]
-    elif normalized_tab == "skip":
-        aggregated_rows = [
-            row
-            for row in aggregated_rows
-            if row[2].pending_reason is None and row[3] == "skip"
-        ]
-    elif normalized_tab == "processed":
-        aggregated_rows = [
-            row
-            for row in aggregated_rows
-            if row[2].pending_reason is None
-            and row[3] != "skip"
-            and row[1].processed_status == "processed"
-        ]
-    elif normalized_tab == "unprocessed":
-        aggregated_rows = [
-            row
-            for row in aggregated_rows
-            if row[2].pending_reason is None
-            and row[3] != "skip"
-            and row[1].processed_status == "unprocessed"
-        ]
+        if normalized_tab == "pending":
+            aggregated_rows = [
+                row for row in aggregated_rows if row[2].pending_reason is not None
+            ]
+        elif normalized_tab == "skip":
+            aggregated_rows = [
+                row
+                for row in aggregated_rows
+                if row[2].pending_reason is None and row[3] == "skip"
+            ]
+        elif normalized_tab == "processed":
+            aggregated_rows = [
+                row
+                for row in aggregated_rows
+                if row[2].pending_reason is None
+                and row[3] != "skip"
+                and row[1].processed_status == "processed"
+            ]
+        elif normalized_tab == "unprocessed":
+            aggregated_rows = [
+                row
+                for row in aggregated_rows
+                if row[2].pending_reason is None
+                and row[3] != "skip"
+                and row[1].processed_status == "unprocessed"
+            ]
 
-    if importance != "all":
-        normalized_importance = normalize_importance_filter(importance)
-        aggregated_rows = [
-            row for row in aggregated_rows if row[3] == normalized_importance
-        ]
-    if normalized_importance_any:
-        aggregated_rows = [
-            row for row in aggregated_rows if row[3] in normalized_importance_any
-        ]
+        if importance != "all":
+            normalized_importance = normalize_importance_filter(importance)
+            aggregated_rows = [
+                row for row in aggregated_rows if row[3] == normalized_importance
+            ]
+        if normalized_importance_any:
+            aggregated_rows = [
+                row for row in aggregated_rows if row[3] in normalized_importance_any
+            ]
 
     if normalized_contact_status == "pending":
         aggregated_rows = [row for row in aggregated_rows if row[2].pending_reason is not None]
@@ -1346,6 +1588,7 @@ def list_mails(
         and normalized_processed in {"all", "1", "processed"}
         and importance == "all"
         and not normalized_importance_any
+        and not needs_action
         and normalized_contact_status != "pending"
         and normalized_read in {"all", "read"}
     ):
@@ -1581,6 +1824,8 @@ def apply_llm_block_filter(
         auto_state.llm_blocked = 1
         auto_state.llm_block_reason = reason
         auto_state.llm_blocked_at = now
+        if auto_state.pending_reason is None:
+            auto_state.effective_importance = "pinned"
         auto_state.updated_at = now
         auto_state.version += 1
 
@@ -1759,6 +2004,8 @@ def request_mail_summary(
         raise json_error(409, "CONFLICT", "Pending mail cannot be summarized.")
     if bool(auto_state.llm_blocked):
         raise json_error(409, "CONFLICT", "LLM blocked mail cannot be summarized.")
+    if auto_state.effective_importance == "pinned":
+        raise json_error(409, "CONFLICT", "Pinned mail cannot be summarized.")
 
     now = jst_iso()
     job_id = enqueue_mail_summary_job(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -17,8 +18,12 @@ from caseclosed.db.models import MailLlmBlockFilter
 from caseclosed.db.models import MailUserState
 from caseclosed.db.runtime import jst_iso
 from caseclosed.email_addressing import normalize_email_address
+from caseclosed.services.contact_ai_memo_update import (
+    enqueue_contact_ai_memo_update_job,
+)
 
 SUMMARY_TARGET_IMPORTANCE = {"high", "middle"}
+SPAM_SUBJECT_PATTERN = re.compile(r"\[\s*spam\s*\]", re.IGNORECASE)
 
 
 def new_id(prefix: str) -> str:
@@ -59,6 +64,7 @@ class MailIngestionResult:
     pending_address: str | None
     pending_reason: str | None
     queued_job_id: str | None
+    queued_contact_ai_memo_job_id: str | None
 
 
 @dataclass(frozen=True)
@@ -103,6 +109,7 @@ def ingest_mock_mail(
                 else None
             ),
             queued_job_id=None,
+            queued_contact_ai_memo_job_id=None,
         )
 
     now = jst_iso()
@@ -152,17 +159,24 @@ def ingest_mock_mail(
         )
     )
 
+    subject_marked_spam = mail_input_subject_marked_spam(mail_input)
     sender_resolution = (
         SenderResolution(
             pending_address=None,
             pending_reason=None,
-            skipped=False,
+            skipped=subject_marked_spam,
             should_classify=False,
-            fixed_importance="sent",
+            fixed_importance="skip" if subject_marked_spam else "sent",
             llm_instruction=None,
+            resolved_contact=None,
         )
-        if is_sent
+        if is_sent or subject_marked_spam
         else resolve_sender(session, mail_input, now)
+    )
+    llm_block_match = (
+        MailLlmBlockMatch(blocked=False, reason=None)
+        if subject_marked_spam
+        else match_mail_input_llm_block_filter(session, mail_input)
     )
     effective_importance = effective_importance_for_message(
         pending=sender_resolution.pending_address is not None,
@@ -170,8 +184,8 @@ def ingest_mock_mail(
         external_starred=mail_input.external_starred,
         sent=is_sent,
         fixed_importance=sender_resolution.fixed_importance,
+        llm_blocked=llm_block_match.blocked,
     )
-    llm_block_match = match_mail_input_llm_block_filter(session, mail_input)
     queued_job_id = None
     if (
         not llm_block_match.blocked
@@ -190,6 +204,15 @@ def ingest_mock_mail(
         and not is_sent
     ):
         queued_job_id = enqueue_summary_job(session, message, now)
+    queued_contact_ai_memo_job_id = None
+    if not llm_block_match.blocked and sender_resolution.resolved_contact is not None:
+        queued_contact_ai_memo_job_id = enqueue_contact_ai_memo_update_job(
+            session,
+            contact=sender_resolution.resolved_contact,
+            message=message,
+            now=now,
+            reason="mail_ingested",
+        )
     session.add(
         MailAutoState(
             id=new_id("mail_auto_state"),
@@ -227,6 +250,7 @@ def ingest_mock_mail(
         ),
         pending_reason=sender_resolution.pending_reason,
         queued_job_id=queued_job_id,
+        queued_contact_ai_memo_job_id=queued_contact_ai_memo_job_id,
     )
 
 
@@ -271,6 +295,7 @@ class SenderResolution:
     should_classify: bool
     fixed_importance: str | None
     llm_instruction: str | None
+    resolved_contact: Contact | None
 
 
 @dataclass(frozen=True)
@@ -278,6 +303,7 @@ class AppliedContactMailRule:
     changed: bool
     reason: str
     queued_job_id: str | None
+    queued_contact_ai_memo_job_id: str | None
 
 
 def resolve_sender(
@@ -304,7 +330,11 @@ def resolve_sender(
             should_classify=False,
             fixed_importance=None,
             llm_instruction=None,
+            resolved_contact=None,
         )
+
+    if from_contact is not None and from_contact.status in {"skipped", "spam"}:
+        return sender_resolution_for_resolved_contact(from_contact)
 
     if from_contact is not None and from_contact.kind == "mailing_list":
         if from_contact.sender_resolution_mode == "reply_to":
@@ -316,6 +346,7 @@ def resolve_sender(
                     should_classify=False,
                     fixed_importance=None,
                     llm_instruction=None,
+                    resolved_contact=None,
                 )
             reply_to_email_address = upsert_observed_email_address(
                 session,
@@ -335,6 +366,7 @@ def resolve_sender(
                     should_classify=False,
                     fixed_importance=None,
                     llm_instruction=None,
+                    resolved_contact=None,
                 )
             return sender_resolution_for_resolved_contact(reply_to_contact)
 
@@ -342,7 +374,7 @@ def resolve_sender(
 
 
 def sender_resolution_for_resolved_contact(contact: Contact | None) -> SenderResolution:
-    if contact is not None and contact.status == "skipped":
+    if contact is not None and contact.status in {"skipped", "spam"}:
         return SenderResolution(
             pending_address=None,
             pending_reason=None,
@@ -350,6 +382,7 @@ def sender_resolution_for_resolved_contact(contact: Contact | None) -> SenderRes
             should_classify=False,
             fixed_importance="skip",
             llm_instruction=None,
+            resolved_contact=contact,
         )
     if contact is not None and contact.mail_importance_rule_action == "fixed":
         fixed_importance = contact.mail_importance_rule_importance or "low"
@@ -360,6 +393,7 @@ def sender_resolution_for_resolved_contact(contact: Contact | None) -> SenderRes
             should_classify=False,
             fixed_importance=fixed_importance,
             llm_instruction=None,
+            resolved_contact=contact,
         )
     if contact is not None and contact.mail_importance_rule_action == "llm_with_instruction":
         return SenderResolution(
@@ -369,6 +403,7 @@ def sender_resolution_for_resolved_contact(contact: Contact | None) -> SenderRes
             should_classify=True,
             fixed_importance=None,
             llm_instruction=contact.mail_importance_rule_instruction,
+            resolved_contact=contact,
         )
     return SenderResolution(
         pending_address=None,
@@ -377,6 +412,7 @@ def sender_resolution_for_resolved_contact(contact: Contact | None) -> SenderRes
         should_classify=True,
         fixed_importance=None,
         llm_instruction=None,
+        resolved_contact=contact,
     )
 
 
@@ -399,6 +435,7 @@ def apply_contact_mail_importance_rule(
             changed=True,
             reason="released_sent",
             queued_job_id=None,
+            queued_contact_ai_memo_job_id=None,
         )
 
     sender_resolution = sender_resolution_for_resolved_contact(contact)
@@ -408,20 +445,43 @@ def apply_contact_mail_importance_rule(
             changed=True,
             reason="released_to_skip",
             queued_job_id=None,
+            queued_contact_ai_memo_job_id=None,
         )
 
     if sender_resolution.fixed_importance is not None:
-        auto_state.effective_importance = sender_resolution.fixed_importance
+        auto_state.effective_importance = (
+            "pinned" if bool(auto_state.llm_blocked) else sender_resolution.fixed_importance
+        )
         queued_job_id = None
         if (
             sender_resolution.fixed_importance in SUMMARY_TARGET_IMPORTANCE
             and not bool(auto_state.llm_blocked)
         ):
             queued_job_id = enqueue_summary_job(session, message, now)
+        queued_contact_ai_memo_job_id = None
+        if not bool(auto_state.llm_blocked):
+            queued_contact_ai_memo_job_id = enqueue_contact_ai_memo_update_job(
+                session,
+                contact=contact,
+                message=message,
+                now=now,
+                reason="pending_contact_resolved",
+                allow_archived_initial=contact.status == "archived",
+            )
         return AppliedContactMailRule(
             changed=True,
             reason="released_to_fixed_importance",
             queued_job_id=queued_job_id,
+            queued_contact_ai_memo_job_id=queued_contact_ai_memo_job_id,
+        )
+
+    if bool(auto_state.llm_blocked):
+        auto_state.effective_importance = "pinned"
+        return AppliedContactMailRule(
+            changed=True,
+            reason="released_to_pinned_llm_blocked",
+            queued_job_id=None,
+            queued_contact_ai_memo_job_id=None,
         )
 
     auto_state.effective_importance = (
@@ -435,6 +495,16 @@ def apply_contact_mail_importance_rule(
             now,
             llm_instruction=sender_resolution.llm_instruction,
         )
+    queued_contact_ai_memo_job_id = None
+    if not bool(auto_state.llm_blocked):
+        queued_contact_ai_memo_job_id = enqueue_contact_ai_memo_update_job(
+            session,
+            contact=contact,
+            message=message,
+            now=now,
+            reason="pending_contact_resolved",
+            allow_archived_initial=contact.status == "archived",
+        )
     return AppliedContactMailRule(
         changed=True,
         reason=(
@@ -443,6 +513,7 @@ def apply_contact_mail_importance_rule(
             else "released_to_importance_job"
         ),
         queued_job_id=queued_job_id,
+        queued_contact_ai_memo_job_id=queued_contact_ai_memo_job_id,
     )
 
 
@@ -640,6 +711,10 @@ def mail_input_is_sent(mail_input: MockMailInput) -> bool:
     return any(label.lower() == "sent" for label in mail_input.gmail_labels or [])
 
 
+def mail_input_subject_marked_spam(mail_input: MockMailInput) -> bool:
+    return bool(mail_input.subject and SPAM_SUBJECT_PATTERN.search(mail_input.subject))
+
+
 def message_is_sent(message: GmailMessage) -> bool:
     labels = json.loads(message.gmail_labels_json) if message.gmail_labels_json else []
     if not isinstance(labels, list):
@@ -723,11 +798,14 @@ def effective_importance_for_message(
     external_starred: bool,
     sent: bool = False,
     fixed_importance: str | None = None,
+    llm_blocked: bool = False,
 ) -> str:
     if sent:
         return "sent"
     if pending:
         return "pending"
+    if llm_blocked:
+        return "pinned"
     if fixed_importance is not None:
         return fixed_importance
     if skipped:

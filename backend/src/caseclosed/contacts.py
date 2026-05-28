@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session as DatabaseSession
 
 from caseclosed.auth import json_error
+from caseclosed.db.models import AppSetting
 from caseclosed.db.models import Contact
 from caseclosed.db.models import ContactEmailAddress
 from caseclosed.db.models import ContactRegistrationSuggestion
@@ -30,13 +31,16 @@ from caseclosed.services.background_worker import kick_job_drain
 
 router = APIRouter(prefix="/api/v1/contacts", tags=["contacts"])
 
-CONTACT_STATUSES = {"active", "skipped", "archived"}
+CONTACT_STATUSES = {"active", "skipped", "spam", "archived"}
 EMAIL_ADDRESS_STATUSES = {"active", "inactive", "deleted"}
 CONTACT_KINDS = {"person", "mailing_list"}
 SENDER_RESOLUTION_MODES = {"self", "reply_to"}
 RESERVED_CONTACT_TAGS = {"mailing-list"}
 MAIL_IMPORTANCE_RULE_ACTIONS = {"llm", "fixed", "llm_with_instruction"}
 MAIL_IMPORTANCE_RULE_VALUES = {"pinned", "high", "middle", "low"}
+CONTACT_CUSTOM_TABS_KEY = "contact_custom_tabs"
+MAX_CONTACT_CUSTOM_TABS = 4
+MAX_CONTACT_CUSTOM_TAB_NAME_LENGTH = 12
 
 
 class ContactEmailAddressInput(BaseModel):
@@ -90,8 +94,72 @@ class ContactMerge(BaseModel):
     target_contact_id: str
 
 
+class ContactCustomTabInput(BaseModel):
+    id: str
+    label: str
+    expression: str
+
+
+class ContactCustomTabsPayload(BaseModel):
+    items: list[ContactCustomTabInput]
+
+
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex}"
+
+
+def read_setting_json(session: DatabaseSession, key: str) -> dict[str, object] | None:
+    setting = session.scalar(select(AppSetting).where(AppSetting.key == key))
+    if setting is None:
+        return None
+    data = json.loads(setting.value_json)
+    return data if isinstance(data, dict) else None
+
+
+def write_setting_json(
+    session: DatabaseSession,
+    key: str,
+    value: dict[str, object],
+    now: str,
+) -> None:
+    setting = session.scalar(select(AppSetting).where(AppSetting.key == key))
+    value_json = json.dumps(value, ensure_ascii=True, sort_keys=True)
+    if setting is None:
+        session.add(
+            AppSetting(
+                id=f"setting_{key}",
+                key=key,
+                value_json=value_json,
+                updated_at=now,
+            )
+        )
+        return
+    setting.value_json = value_json
+    setting.updated_at = now
+
+
+def contact_custom_tab_data(tab: ContactCustomTabInput) -> dict[str, str]:
+    return {
+        "id": tab.id.strip(),
+        "label": tab.label.strip()[:MAX_CONTACT_CUSTOM_TAB_NAME_LENGTH],
+        "expression": tab.expression.strip(),
+    }
+
+
+def validate_contact_custom_tabs(tabs: list[ContactCustomTabInput]) -> list[dict[str, str]]:
+    if len(tabs) > MAX_CONTACT_CUSTOM_TABS:
+        raise json_error(422, "VALIDATION_ERROR", "Too many custom contact tabs.")
+    items = []
+    seen_ids = set()
+    for tab in tabs:
+        item = contact_custom_tab_data(tab)
+        if item["id"] == "" or item["label"] == "" or item["expression"] == "":
+            raise json_error(422, "VALIDATION_ERROR", "Custom contact tab is invalid.")
+        if item["id"] in seen_ids:
+            raise json_error(422, "VALIDATION_ERROR", "Custom contact tab id is duplicated.")
+        seen_ids.add(item["id"])
+        items.append(item)
+    return items
 
 
 def validate_contact_status(status: str) -> None:
@@ -577,6 +645,41 @@ def ensure_active_primary_email_address(
     active_email_addresses[0].is_primary = 1
     active_email_addresses[0].updated_at = now
     active_email_addresses[0].version += 1
+
+
+@router.get("/custom-tabs")
+def get_contact_custom_tabs(
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    setting = read_setting_json(session, CONTACT_CUSTOM_TABS_KEY) or {}
+    items = setting.get("items")
+    if not isinstance(items, list):
+        items = []
+    safe_items = [
+        {
+            "id": item.get("id"),
+            "label": item.get("label"),
+            "expression": item.get("expression"),
+        }
+        for item in items
+        if isinstance(item, dict)
+        and isinstance(item.get("id"), str)
+        and isinstance(item.get("label"), str)
+        and isinstance(item.get("expression"), str)
+    ]
+    return {"ok": True, "data": {"items": safe_items[:MAX_CONTACT_CUSTOM_TABS]}}
+
+
+@router.put("/custom-tabs")
+def update_contact_custom_tabs(
+    payload: ContactCustomTabsPayload,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    now = jst_iso()
+    items = validate_contact_custom_tabs(payload.items)
+    write_setting_json(session, CONTACT_CUSTOM_TABS_KEY, {"items": items}, now)
+    session.commit()
+    return {"ok": True, "data": {"items": items}}
 
 
 @router.get("")

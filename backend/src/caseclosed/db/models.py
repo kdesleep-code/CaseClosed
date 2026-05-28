@@ -553,6 +553,7 @@ class MailSendRequest(Base):
     subject: Mapped[str | None] = mapped_column(Text)
     body_text: Mapped[str] = mapped_column(Text, nullable=False)
     attachment_names_json: Mapped[str | None] = mapped_column(Text)
+    attachment_data_json: Mapped[str | None] = mapped_column(Text)
     reply_to_message_id: Mapped[str | None] = mapped_column(ForeignKey("gmail_messages.id"))
     sent_message_id: Mapped[str | None] = mapped_column(ForeignKey("gmail_messages.id"))
     scheduled_at: Mapped[str | None] = mapped_column(Text)

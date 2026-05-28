@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import json
 import sqlite3
 
 CONTACTS_URL = "/api/v1/contacts"
@@ -71,6 +72,58 @@ def test_mock_mail_ingestion_marks_unknown_from_as_pending(
     assert pending_item["inferred_sender_resolution"] == "self"
 
 
+def test_mock_mail_ingestion_skips_subject_marked_spam_without_contact_pending(
+    client,
+    database_path: Path,
+) -> None:
+    response = client.post(
+        MOCK_MAILS_URL,
+        json={
+            "gmail_message_id": "gmail_subject_spam_1",
+            "gmail_thread_id": "thread_subject_spam",
+            "subject": "[SPAM] Suspicious account notice",
+            "from_address": "spoofed.support@example.com",
+            "received_at": "2026-05-23T10:05:00+09:00",
+            "body_text": "Suspicious content.",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["pending"] is False
+    assert data["pending_address"] is None
+    assert data["queued_job_id"] is None
+
+    with sqlite3.connect(database_path) as connection:
+        auto_row = connection.execute(
+            """
+            SELECT pending_reason, effective_importance, pending_from_address_id,
+                   llm_blocked
+            FROM mail_auto_state
+            WHERE message_id = ?
+            """,
+            (data["message_id"],),
+        ).fetchone()
+        email_count = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM contact_email_addresses
+            WHERE normalized_email_address = 'spoofed.support@example.com'
+            """
+        ).fetchone()
+        job_count = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM jobs
+            WHERE job_type IN ('mail_importance_classification', 'mail_summary')
+            """
+        ).fetchone()
+
+    assert auto_row == (None, "skip", None, 0)
+    assert email_count == (0,)
+    assert job_count == (0,)
+
+
 def test_mock_mail_ingestion_queues_importance_job_for_known_person(
     client,
     database_path: Path,
@@ -128,6 +181,134 @@ def test_mock_mail_ingestion_queues_importance_job_for_known_person(
     assert email_row == ("linked", 1)
     assert auto_row == (None, "unclassified", None)
     assert "gmail_known_1" in job_payload[0]
+
+
+def test_known_person_mail_updates_contact_ai_memo_after_worker_runs(
+    client,
+    database_path: Path,
+) -> None:
+    create_response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Recent Activity Sender",
+            "status": "active",
+            "ai_memo": "Earlier memo.",
+            "email_addresses": [
+                {"email_address": "activity.sender@example.com", "is_primary": True}
+            ],
+        },
+    )
+    contact_id = create_response.json()["data"]["id"]
+
+    ingest_response = client.post(
+        MOCK_MAILS_URL,
+        json={
+            "gmail_message_id": "gmail_contact_ai_memo",
+            "gmail_thread_id": "thread_contact_ai_memo",
+            "subject": "Workshop coordination update",
+            "from_address": "activity.sender@example.com",
+            "received_at": "2026-05-26T12:00:00+09:00",
+            "body_text": "They are coordinating the May workshop schedule.",
+        },
+    )
+
+    assert ingest_response.status_code == 200
+    assert ingest_response.json()["data"]["queued_contact_ai_memo_job_id"] is not None
+
+    with sqlite3.connect(database_path) as connection:
+        job_row = connection.execute(
+            """
+            SELECT id, status
+            FROM jobs
+            WHERE job_type = 'contact_ai_memo_update'
+            """
+        ).fetchone()
+
+    assert job_row is not None
+    assert job_row[1] == "pending"
+
+    for _ in range(3):
+        run_response = client.post("/api/v1/jobs/run-next")
+        assert run_response.status_code == 200
+
+    with sqlite3.connect(database_path) as connection:
+        ai_memo = connection.execute(
+            "SELECT ai_memo FROM contacts WHERE id = ?",
+            (contact_id,),
+        ).fetchone()[0]
+        llm_row = connection.execute(
+            """
+            SELECT function_type, input_source_json, input_diagnostic_json
+            FROM llm_runs
+            WHERE function_type = 'contact_ai_memo_update'
+            """
+        ).fetchone()
+
+    assert "Earlier memo." in ai_memo
+    assert "Workshop coordination update" in ai_memo
+    assert llm_row[0] == "contact_ai_memo_update"
+    assert "body_text" not in llm_row[1]
+    assert "body_text_length" in llm_row[2]
+
+
+def test_pending_contact_archived_creation_gets_one_initial_ai_memo(
+    client,
+    database_path: Path,
+) -> None:
+    ingest_response = client.post(
+        MOCK_MAILS_URL,
+        json={
+            "gmail_message_id": "gmail_archived_pending_memo",
+            "gmail_thread_id": "thread_archived_pending_memo",
+            "subject": "One time archive context",
+            "from_address": "archive.pending@example.com",
+            "from_name": "Archive Pending",
+            "received_at": "2026-05-27T12:00:00+09:00",
+            "body_text": "This mail explains who this archived contact was.",
+        },
+    )
+    assert ingest_response.status_code == 200
+    assert ingest_response.json()["data"]["pending"] is True
+
+    create_response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Archive Pending",
+            "status": "archived",
+            "kind": "person",
+            "email_addresses": [
+                {"email_address": "archive.pending@example.com", "is_primary": True}
+            ],
+        },
+    )
+    assert create_response.status_code == 200
+    contact_id = create_response.json()["data"]["id"]
+
+    with sqlite3.connect(database_path) as connection:
+        job_row = connection.execute(
+            """
+            SELECT id, status, payload_json
+            FROM jobs
+            WHERE job_type = 'contact_ai_memo_update'
+            """
+        ).fetchone()
+
+    assert job_row is not None
+    assert job_row[1] == "pending"
+    assert json.loads(job_row[2])["allow_archived_initial"] is True
+
+    for _ in range(3):
+        run_response = client.post("/api/v1/jobs/run-next")
+        assert run_response.status_code == 200
+
+    with sqlite3.connect(database_path) as connection:
+        contact_row = connection.execute(
+            "SELECT status, ai_memo FROM contacts WHERE id = ?",
+            (contact_id,),
+        ).fetchone()
+
+    assert contact_row[0] == "archived"
+    assert "One time archive context" in contact_row[1]
 
 
 def test_mock_sent_mail_does_not_queue_importance_or_pending_contact(
@@ -238,6 +419,99 @@ def test_contact_fixed_pinned_rule_skips_importance_and_summary_jobs(
     assert auto_state[0] == "pinned"
     assert ("mail_importance_classification",) not in jobs
     assert ("mail_summary",) not in jobs
+
+
+def test_spam_person_contact_routes_mail_to_skip_without_jobs(
+    client,
+    database_path: Path,
+) -> None:
+    client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Spam Person",
+            "status": "spam",
+            "email_addresses": [
+                {"email_address": "spam.person@example.com", "is_primary": True}
+            ],
+        },
+    )
+
+    response = client.post(
+        MOCK_MAILS_URL,
+        json={
+            "gmail_message_id": "gmail_spam_person",
+            "gmail_thread_id": "thread_spam_person",
+            "subject": "Suspicious person mail",
+            "from_address": "spam.person@example.com",
+            "received_at": "2026-05-24T09:05:00+09:00",
+        },
+    )
+
+    assert response.status_code == 200
+    with sqlite3.connect(database_path) as connection:
+        auto_state = connection.execute(
+            """
+            SELECT pending_reason, effective_importance
+            FROM mail_auto_state
+            WHERE message_id = ?
+            """,
+            (response.json()["data"]["message_id"],),
+        ).fetchone()
+        jobs = connection.execute("SELECT job_type FROM jobs").fetchall()
+
+    assert auto_state == (None, "skip")
+    assert jobs == []
+
+
+def test_skipped_mailing_list_routes_mail_to_skip_without_reply_to_resolution(
+    client,
+    database_path: Path,
+) -> None:
+    client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Skipped ML",
+            "status": "skipped",
+            "kind": "mailing_list",
+            "sender_resolution_mode": "reply_to",
+            "email_addresses": [
+                {"email_address": "skipped-list@example.com", "is_primary": True}
+            ],
+        },
+    )
+
+    response = client.post(
+        MOCK_MAILS_URL,
+        json={
+            "gmail_message_id": "gmail_skipped_ml",
+            "gmail_thread_id": "thread_skipped_ml",
+            "subject": "Skipped list mail",
+            "from_address": "skipped-list@example.com",
+            "reply_to_address": "real.sender@example.com",
+            "received_at": "2026-05-24T09:06:00+09:00",
+        },
+    )
+
+    assert response.status_code == 200
+    with sqlite3.connect(database_path) as connection:
+        auto_state = connection.execute(
+            """
+            SELECT pending_reason, effective_importance, pending_from_address_id
+            FROM mail_auto_state
+            WHERE message_id = ?
+            """,
+            (response.json()["data"]["message_id"],),
+        ).fetchone()
+        reply_to_count = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM contact_email_addresses
+            WHERE normalized_email_address = 'real.sender@example.com'
+            """
+        ).fetchone()
+
+    assert auto_state == (None, "skip", None)
+    assert reply_to_count == (0,)
 
 
 def test_contact_instruction_rule_is_passed_to_importance_job(

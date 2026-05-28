@@ -1,9 +1,11 @@
-import { Fragment, useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import { t } from './i18n'
 import type { MessageKey } from './i18n'
 import { AppLink, navigateTo } from './navigation'
 import defaultContactAvatarUrl from './assets/default-contact-avatar.svg'
 import defaultMailingListAvatarUrl from './assets/default-mailing-list-avatar.svg'
+import gmailIconUrl from './assets/gmail-icon-2020.svg'
 import unknownContactAvatarUrl from './assets/default-unknown-contact-avatar.svg'
 import {
   cancelMailSendRequest,
@@ -62,8 +64,320 @@ function isSentMessage(message: MailThreadMessage) {
   return (message.gmail_labels ?? []).some((label) => label.toLowerCase() === 'sent')
 }
 
+function isIncompleteIncomingMessage(message: MailThreadMessage) {
+  return !isSentMessage(message) && message.processed_status !== 'processed'
+}
+
+function latestReceivedMailDate(threadMessages: MailThreadMessage[]) {
+  const receivedMessages = threadMessages.filter((message) => !isSentMessage(message))
+  const messages = receivedMessages.length > 0 ? receivedMessages : threadMessages
+  return messages
+    .map((message) => message.received_at)
+    .sort((left, right) => right.localeCompare(left))[0]
+    ?.slice(0, 10)
+}
+
 function mailBody(message: MailThreadMessage) {
   return message.body_text ?? message.snippet ?? ''
+}
+
+const urlPattern = /(https?:\/\/[^\s<>"']+|www\.[^\s<>"']+)/gi
+const trailingUrlPunctuationPattern = /[.,;:!?、。．，）)\]}」』】]+$/
+const maxDisplayedUrlLength = 30
+
+function urlHref(url: string) {
+  return url.toLowerCase().startsWith('www.') ? `https://${url}` : url
+}
+
+function displayedUrlText(url: string) {
+  if (url.length <= maxDisplayedUrlLength) {
+    return url
+  }
+  return `${url.slice(0, maxDisplayedUrlLength)}...`
+}
+
+function linkifiedNodes(text: string): ReactNode[] {
+  const nodes: ReactNode[] = []
+  const matcher = new RegExp(urlPattern)
+  let lastIndex = 0
+
+  for (const match of text.matchAll(matcher)) {
+    const rawUrl = match[0]
+    const matchIndex = match.index ?? 0
+    const trailingPunctuation = rawUrl.match(trailingUrlPunctuationPattern)?.[0] ?? ''
+    const matchedUrl = rawUrl.slice(0, rawUrl.length - trailingPunctuation.length)
+    if (matchedUrl === '') {
+      continue
+    }
+
+    if (matchIndex > lastIndex) {
+      nodes.push(text.slice(lastIndex, matchIndex))
+    }
+    nodes.push(
+      <a href={urlHref(matchedUrl)} key={`${matchIndex}-${matchedUrl}`} rel="noreferrer" target="_blank">
+        {displayedUrlText(matchedUrl)}
+      </a>,
+    )
+    if (trailingPunctuation !== '') {
+      nodes.push(trailingPunctuation)
+    }
+    lastIndex = matchIndex + rawUrl.length
+  }
+
+  if (lastIndex < text.length) {
+    nodes.push(text.slice(lastIndex))
+  }
+  return nodes.length > 0 ? nodes : [text]
+}
+
+function LinkifiedText({ text }: { text: string }) {
+  return <>{linkifiedNodes(text)}</>
+}
+
+const unsafeHtmlTags = [
+  'script',
+  'iframe',
+  'object',
+  'embed',
+  'applet',
+  'form',
+  'input',
+  'button',
+  'textarea',
+  'select',
+  'meta',
+]
+
+function isSafeHtmlUrl(value: string, allowImageData = false) {
+  const trimmed = value.trim()
+  if (trimmed === '') {
+    return false
+  }
+  if (allowImageData && /^data:image\/(?:png|gif|jpe?g|webp);base64,/i.test(trimmed)) {
+    return true
+  }
+  try {
+    const url = new URL(trimmed, window.location.origin)
+    return ['http:', 'https:', 'mailto:'].includes(url.protocol)
+  } catch {
+    return false
+  }
+}
+
+function sanitizedMailHtml(rawHtml: string) {
+  const document = new DOMParser().parseFromString(rawHtml, 'text/html')
+  for (const tagName of unsafeHtmlTags) {
+    document.querySelectorAll(tagName).forEach((element) => element.remove())
+  }
+  document.querySelectorAll('*').forEach((element) => {
+    for (const attribute of [...element.attributes]) {
+      const name = attribute.name.toLowerCase()
+      const value = attribute.value
+      if (name.startsWith('on')) {
+        element.removeAttribute(attribute.name)
+        continue
+      }
+      if (name === 'href') {
+        if (!isSafeHtmlUrl(value)) {
+          element.removeAttribute(attribute.name)
+          continue
+        }
+        element.setAttribute('target', '_blank')
+        element.setAttribute('rel', 'noreferrer')
+      }
+      if (name === 'src' && !isSafeHtmlUrl(value, true)) {
+        element.removeAttribute(attribute.name)
+      }
+      if (name === 'srcset') {
+        element.removeAttribute(attribute.name)
+      }
+      if (name === 'style' && /expression\s*\(|javascript\s*:|behavior\s*:/i.test(value)) {
+        element.removeAttribute(attribute.name)
+      }
+    }
+  })
+  return document.body.innerHTML
+}
+
+function mailHtmlDocument(rawHtml: string) {
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <base target="_blank">
+  <style>
+    :root { color-scheme: light; }
+    html, body { margin: 0; padding: 0; background: transparent; color: #5a2a20; overflow: hidden; }
+    body {
+      box-sizing: border-box;
+      padding: 16px 18px;
+      font: 16px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      overflow-wrap: anywhere;
+    }
+    img { max-width: 100%; height: auto; }
+    table { max-width: 100%; border-collapse: collapse; }
+    pre { white-space: pre-wrap; }
+    a { color: #7a2f24; }
+  </style>
+</head>
+<body>${sanitizedMailHtml(rawHtml)}</body>
+</html>`
+}
+
+function HtmlMailBody({ html }: { html: string }) {
+  const iframeRef = useRef<HTMLIFrameElement | null>(null)
+  const resizeObserverRef = useRef<ResizeObserver | null>(null)
+  const imageCleanupRef = useRef<(() => void) | null>(null)
+  const resizeTimerIdsRef = useRef<number[]>([])
+  const srcDoc = useMemo(() => mailHtmlDocument(html), [html])
+
+  function cleanupResizeWatchers() {
+    resizeObserverRef.current?.disconnect()
+    resizeObserverRef.current = null
+    imageCleanupRef.current?.()
+    imageCleanupRef.current = null
+    for (const timerId of resizeTimerIdsRef.current) {
+      window.clearTimeout(timerId)
+    }
+    resizeTimerIdsRef.current = []
+  }
+
+  function resizeIframe() {
+    const iframe = iframeRef.current
+    const body = iframe?.contentDocument?.body
+    const documentElement = iframe?.contentDocument?.documentElement
+    if (iframe === null || body == null || documentElement == null) {
+      return
+    }
+    iframe.style.height = `${Math.max(
+      180,
+      body.scrollHeight,
+      body.offsetHeight,
+      documentElement.scrollHeight,
+      documentElement.offsetHeight,
+      documentElement.clientHeight,
+    )}px`
+  }
+
+  function watchIframeSize() {
+    cleanupResizeWatchers()
+    resizeIframe()
+
+    const iframe = iframeRef.current
+    const document = iframe?.contentDocument
+    if (document == null || document.body == null || document.documentElement == null) {
+      return
+    }
+
+    const observer = new ResizeObserver(() => resizeIframe())
+    observer.observe(document.body)
+    observer.observe(document.documentElement)
+    resizeObserverRef.current = observer
+
+    const images = [...document.images]
+    for (const image of images) {
+      image.addEventListener('load', resizeIframe)
+      image.addEventListener('error', resizeIframe)
+    }
+    imageCleanupRef.current = () => {
+      for (const image of images) {
+        image.removeEventListener('load', resizeIframe)
+        image.removeEventListener('error', resizeIframe)
+      }
+    }
+
+    window.requestAnimationFrame(resizeIframe)
+    resizeTimerIdsRef.current = [100, 300, 800, 1600].map((milliseconds) =>
+      window.setTimeout(resizeIframe, milliseconds),
+    )
+  }
+
+  useEffect(() => cleanupResizeWatchers, [srcDoc])
+
+  return (
+    <iframe
+      className="mail-thread-html-body"
+      onLoad={watchIframeSize}
+      ref={iframeRef}
+      sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+      scrolling="no"
+      srcDoc={srcDoc}
+      title={t('mail.thread.htmlBody')}
+    />
+  )
+}
+
+type SplitBody = {
+  mainText: string
+  quotedText: string | null
+}
+
+function looksLikeQuotedReplyIntro(line: string) {
+  return /^On .+ wrote:$/i.test(line.trim())
+}
+
+function looksLikeOriginalMessageDivider(line: string) {
+  const trimmed = line.trim()
+  return /^[-_]{2,}\s*Original Message\s*[-_]{2,}$/i.test(trimmed)
+    || /^[-_]{2,}\s*Forwarded message\s*[-_]{2,}$/i.test(trimmed)
+}
+
+function splitQuotedReply(text: string): SplitBody {
+  const lines = text.split('\n')
+  const quoteStartIndex = lines.findIndex((line, index) => {
+    const trimmed = line.trimStart()
+    if (trimmed.startsWith('>')) {
+      return true
+    }
+    if (looksLikeOriginalMessageDivider(line)) {
+      return true
+    }
+    return (
+      looksLikeQuotedReplyIntro(line) &&
+      lines.slice(index + 1).some((nextLine) => nextLine.trimStart().startsWith('>'))
+    )
+  })
+
+  if (quoteStartIndex <= 0) {
+    return { mainText: text, quotedText: null }
+  }
+
+  const mainText = lines.slice(0, quoteStartIndex).join('\n').trimEnd()
+  const quotedText = lines.slice(quoteStartIndex).join('\n').trim()
+  if (mainText === '' || quotedText === '') {
+    return { mainText: text, quotedText: null }
+  }
+  return { mainText, quotedText }
+}
+
+function MailBodyContent({ html, text }: { html?: string | null; text: string }) {
+  if (html !== undefined && html !== null && html.trim() !== '') {
+    return <HtmlMailBody html={html} />
+  }
+
+  const body = text || t('mail.thread.noBody')
+  const splitBody = splitQuotedReply(body)
+  if (splitBody.quotedText === null) {
+    return (
+      <pre className="mail-thread-body">
+        <LinkifiedText text={body} />
+      </pre>
+    )
+  }
+
+  return (
+    <>
+      <pre className="mail-thread-body">
+        <LinkifiedText text={splitBody.mainText} />
+      </pre>
+      <details className="mail-thread-section mail-thread-head-details mail-thread-quoted-details">
+        <summary>{t('mail.thread.quotedReply')}</summary>
+        <pre className="mail-thread-body mail-thread-quoted-body">
+          <LinkifiedText text={splitBody.quotedText} />
+        </pre>
+      </details>
+    </>
+  )
 }
 
 function composeReplyBody(message: MailThreadMessage) {
@@ -205,6 +519,26 @@ function mailListHrefFor(message: MailThreadMessage) {
   return `/mail?${params.toString()}`
 }
 
+function returnToHrefFromLocation() {
+  const returnTo = new URLSearchParams(window.location.search).get('return_to')
+  if (returnTo === null || returnTo.trim() === '') {
+    return null
+  }
+  try {
+    const destination = new URL(returnTo, window.location.origin)
+    if (
+      destination.origin !== window.location.origin ||
+      !destination.pathname.startsWith('/mail') ||
+      destination.pathname.startsWith('/mail/')
+    ) {
+      return null
+    }
+    return `${destination.pathname}${destination.search}${destination.hash}`
+  } catch {
+    return null
+  }
+}
+
 function delay(milliseconds: number) {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds))
 }
@@ -320,9 +654,15 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
   const [busyAction, setBusyAction] = useState<string | null>(null)
   const [importanceMenuId, setImportanceMenuId] = useState<string | null>(null)
   const targetRef = useRef<HTMLDivElement | null>(null)
+  const didScrollToTargetRef = useRef(false)
+  const pendingInboxNavigationRef = useRef<{
+    cleanup: () => void
+    timeoutId: number
+  } | null>(null)
 
   useEffect(() => {
     let isMounted = true
+    didScrollToTargetRef.current = false
     getMailDetail(messageId)
       .then(async (nextDetail) => {
         if (
@@ -351,10 +691,52 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
   }, [messageId])
 
   useEffect(() => {
-    if (detail !== null) {
-      targetRef.current?.scrollIntoView?.({ block: 'center' })
+    if (detail !== null && !didScrollToTargetRef.current) {
+      targetRef.current?.scrollIntoView?.({ block: 'start', inline: 'nearest' })
+      didScrollToTargetRef.current = true
     }
   }, [detail])
+
+  useEffect(() => {
+    return () => {
+      cancelPendingInboxNavigation()
+    }
+  }, [])
+
+  function cancelPendingInboxNavigation() {
+    const pendingNavigation = pendingInboxNavigationRef.current
+    if (pendingNavigation === null) {
+      return
+    }
+    window.clearTimeout(pendingNavigation.timeoutId)
+    pendingNavigation.cleanup()
+    pendingInboxNavigationRef.current = null
+  }
+
+  function scheduleInboxNavigation(date: string | undefined) {
+    cancelPendingInboxNavigation()
+
+    const destination =
+      returnToHrefFromLocation() ??
+      (date === undefined
+        ? '/mail?tab=unprocessed'
+        : `/mail?tab=unprocessed&date=${encodeURIComponent(date)}`)
+    const cancelOnUserOperation = () => {
+      cancelPendingInboxNavigation()
+    }
+    window.addEventListener('pointerdown', cancelOnUserOperation, { capture: true })
+    window.addEventListener('keydown', cancelOnUserOperation, { capture: true })
+    const cleanup = () => {
+      window.removeEventListener('pointerdown', cancelOnUserOperation, { capture: true })
+      window.removeEventListener('keydown', cancelOnUserOperation, { capture: true })
+    }
+    const timeoutId = window.setTimeout(() => {
+      pendingInboxNavigationRef.current?.cleanup()
+      pendingInboxNavigationRef.current = null
+      navigateTo(destination)
+    }, 1000)
+    pendingInboxNavigationRef.current = { cleanup, timeoutId }
+  }
 
   async function runAction(
     actionId: string,
@@ -409,9 +791,13 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
 
   function incomingActionsFor(message: MailThreadMessage): IncomingAction[] {
     const isProcessed = message.processed_status === 'processed'
+    const isPinned = message.effective_importance === 'pinned'
     const hasSummary = detail?.summary?.items?.some(
       (summary) => summary.message_id === message.id,
     ) === true
+    const isLastIncompleteIncomingMessage =
+      detail?.thread_messages.filter(isIncompleteIncomingMessage).length === 1 &&
+      isIncompleteIncomingMessage(message)
     return [
       {
         id: 'done',
@@ -432,7 +818,12 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
               if (isProcessed) {
                 await unprocessMail(message.id)
               } else {
-                await processMail(message.id)
+                const nextDetail = await processMail(message.id)
+                if (isLastIncompleteIncomingMessage && detail !== null) {
+                  const inboxDate = latestReceivedMailDate(detail.thread_messages)
+                  scheduleInboxNavigation(inboxDate)
+                  return nextDetail
+                }
               }
               return getMailDetail(messageId)
             },
@@ -445,11 +836,14 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
         disabled:
           !['mail.thread.action.reply', 'mail.thread.action.summary'].includes(key) ||
           busyAction !== null ||
+          (key === 'mail.thread.action.summary' && isPinned) ||
           (key === 'mail.thread.action.summary' && hasSummary),
         className: 'mail-thread-action-quiet',
         title:
           key === 'mail.thread.action.summary'
-            ? hasSummary
+            ? isPinned
+              ? t('mail.thread.summaryPinnedTitle')
+              : hasSummary
               ? t('mail.thread.summaryExistsTitle')
               : t('mail.thread.summaryMockTitle')
             : key === 'mail.thread.action.reply'
@@ -632,7 +1026,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                   target="_blank"
                   title={t('mail.thread.openGmail')}
                 >
-                  <span aria-hidden="true" className="mail-thread-gmail-glyph">M</span>
+                  <img alt="" aria-hidden="true" src={gmailIconUrl} />
                 </a>
               )}
             </div>
@@ -739,9 +1133,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                       </details>
                       <section className="mail-thread-section">
                         <h3>{t('mail.thread.body')}</h3>
-                        <pre className="mail-thread-body">
-                          {sendRequest.body_text || t('mail.thread.noBody')}
-                        </pre>
+                        <MailBodyContent text={sendRequest.body_text} />
                       </section>
                     </article>
                   </div>
@@ -924,7 +1316,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                   {messageSummary !== undefined && (
                     <section className="mail-thread-section mail-thread-mail-summary">
                       <h3>{t('mail.thread.mailSummary')}</h3>
-                      <p>{messageSummary.summary_text}</p>
+                      <p><LinkifiedText text={messageSummary.summary_text} /></p>
                     </section>
                   )}
 
@@ -942,7 +1334,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                     <details className="mail-thread-section mail-thread-head-details">
                       <summary>{t('mail.thread.translation')}</summary>
                       <pre className="mail-thread-body">
-                        {messageSummary.translation_text}
+                        <LinkifiedText text={messageSummary.translation_text} />
                       </pre>
                     </details>
                   )}
@@ -950,16 +1342,12 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                   {messageSummary === undefined ? (
                     <section className="mail-thread-section">
                       <h3>{t('mail.thread.body')}</h3>
-                      <pre className="mail-thread-body">
-                        {mailBody(message) || t('mail.thread.noBody')}
-                      </pre>
+                      <MailBodyContent html={message.body_html} text={mailBody(message)} />
                     </section>
                   ) : (
                     <details className="mail-thread-section mail-thread-head-details">
                       <summary>{t('mail.thread.originalBody')}</summary>
-                      <pre className="mail-thread-body">
-                        {mailBody(message) || t('mail.thread.noBody')}
-                      </pre>
+                      <MailBodyContent html={message.body_html} text={mailBody(message)} />
                     </details>
                   )}
                 </article>

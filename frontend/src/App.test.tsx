@@ -1,6 +1,6 @@
 ﻿import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { fireEvent } from '@testing-library/react'
+import { fireEvent, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import App from './App'
@@ -460,6 +460,7 @@ describe('Phase 4 mail screen', () => {
       subject: 'Draft subject',
       body_text: 'Draft body',
       attachment_names: [],
+      attachments: [],
       reply_to_message_id: null,
       scheduled_at: null,
     })
@@ -637,7 +638,7 @@ describe('Phase 4 mail screen', () => {
       snippet: null,
       gmail_link: 'https://mail.google.com/mail/u/0/#inbox/mock_created',
       external_starred: false,
-      body_text: 'This is a mock mail for review.',
+      body_text: 'This is a mock mail for review. https://example.com/review',
       body_html: null,
       created_at: '2026-05-23T13:00:00+09:00',
       updated_at: '2026-05-23T13:00:00+09:00',
@@ -745,12 +746,13 @@ describe('Phase 4 mail screen', () => {
                     {
                       id: 'summary_mail_new',
                       message_id: 'mail_new',
-                      summary_text: 'Mail summary after manual request.',
+                      summary_text:
+                        'Mail summary after manual request. https://example.com/summary',
                       action_required: true,
                       deadline_text: null,
                       next_action: 'Review it.',
                       key_points: ['Review requested'],
-                      translation_text: 'メール要約後の和訳。',
+                      translation_text: 'メール要約後の和訳。https://example.com/translation',
                       language: 'ja',
                       llm_run_id: 'llm_run_summary',
                       updated_at: '2026-05-23T13:03:00+09:00',
@@ -853,12 +855,13 @@ describe('Phase 4 mail screen', () => {
                     {
                       id: 'summary_mail_new',
                       message_id: 'mail_new',
-                      summary_text: 'Mail summary after manual request.',
+                      summary_text:
+                        'Mail summary after manual request. https://example.com/summary',
                       action_required: true,
                       deadline_text: null,
                       next_action: 'Review it.',
                       key_points: ['Review requested'],
-                      translation_text: 'メール要約後の和訳。',
+                      translation_text: 'メール要約後の和訳。https://example.com/translation',
                       language: 'ja',
                       llm_run_id: 'llm_run_summary',
                       updated_at: '2026-05-23T13:03:00+09:00',
@@ -946,7 +949,11 @@ describe('Phase 4 mail screen', () => {
       'href',
       'https://mail.google.com/mail/u/0/#inbox/mock_created',
     )
-    expect(screen.getByText('This is a mock mail for review.')).toBeInTheDocument()
+    expect(screen.getByText(/This is a mock mail for review/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'https://example.com/review' })).toHaveAttribute(
+      'href',
+      'https://example.com/review',
+    )
     expect(screen.getAllByText('Head').length).toBeGreaterThan(0)
     expect(screen.getAllByRole('heading', { name: 'Body' }).length).toBeGreaterThan(0)
     expect(screen.getByText('Scheduled send')).toBeInTheDocument()
@@ -960,8 +967,14 @@ describe('Phase 4 mail screen', () => {
         method: 'POST',
       }),
     )
-    expect(await screen.findByText('Mail summary after manual request.')).toBeInTheDocument()
-    expect(screen.getByText('メール要約後の和訳。')).toBeInTheDocument()
+    expect(await screen.findByText(/Mail summary after manual request/)).toBeInTheDocument()
+    expect(
+      screen.getByRole('link', { name: 'https://example.com/summary' }),
+    ).toHaveAttribute('href', 'https://example.com/summary')
+    expect(screen.getByText(/メール要約後の和訳/)).toBeInTheDocument()
+    expect(
+      screen.getByRole('link', { name: 'https://example.com/translatio...' }),
+    ).toHaveAttribute('href', 'https://example.com/translation')
 
     await user.click(screen.getByRole('button', { name: 'Cancel send' }))
     expect(fetchMock).toHaveBeenCalledWith(
@@ -982,8 +995,19 @@ describe('Phase 4 mail screen', () => {
         method: 'POST',
       }),
     )
-    expect(await screen.findByRole('button', { name: 'Reopen' })).toBeInTheDocument()
+    await waitFor(
+      () => {
+        expect(`${window.location.pathname}${window.location.search}`).toBe(
+          '/mail?tab=unprocessed&date=2026-05-23',
+        )
+      },
+      { timeout: 2500 },
+    )
 
+    navigateTo('/mail/mail_new')
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Review mock mail' }),
+    ).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Reply' }))
     expect(
       await screen.findByRole('heading', { level: 1, name: 'Compose Mail' }),
@@ -998,7 +1022,7 @@ describe('Phase 4 mail screen', () => {
     )
     await user.click(screen.getByRole('button', { name: 'Auto body' }))
     expect(screen.getByLabelText('Auto body preview').textContent).toBe(
-      'On 2026-05-23 13:00:00 JST, review.mock.sender@example.com wrote:\n> This is a mock mail for review.',
+      'On 2026-05-23 13:00:00 JST, review.mock.sender@example.com wrote:\n> This is a mock mail for review. https://example.com/review',
     )
 
     navigateTo('/mail/mail_new')
@@ -1467,11 +1491,11 @@ describe('Phase 2 maintenance screen', () => {
     ).not.toBeInTheDocument()
   })
 
-  it('shows mock send requests in the temporary Debug tab', async () => {
+  it('shows send requests in the temporary Debug tab', async () => {
     const user = userEvent.setup()
     vi.stubGlobal(
       'fetch',
-      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+      vi.fn((input: string | URL | Request) => {
         const path = input.toString()
         if (path === '/api/v1/auth/session') {
           return activeSessionResponse()
@@ -1582,24 +1606,6 @@ describe('Phase 2 maintenance screen', () => {
             },
           })
         }
-        if (path === '/api/v1/jobs/run-next' && init?.method === 'POST') {
-          return apiResponse(200, {
-            ok: true,
-            data: { job_id: 'job_debug_run' },
-          })
-        }
-        if (path === '/api/v1/mails/mock-ingest' && init?.method === 'POST') {
-          return apiResponse(200, {
-            ok: true,
-            data: {
-              message_id: 'mail_debug_mock',
-              pending: true,
-              pending_address: 'review.mock.sender@example.com',
-              queued_job_id: null,
-            },
-          })
-        }
-
         throw new Error(`Unexpected request: ${path}`)
       }),
     )
@@ -1610,14 +1616,12 @@ describe('Phase 2 maintenance screen', () => {
     expect(screen.getByRole('heading', { name: 'Debug' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Debug tools' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'LLM block filter' })).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Run next job' }))
-    expect(await screen.findByText('Job ran: job_debug_run')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Ingest mock mail' }))
     expect(
-      await screen.findByText(
-        'Pending contact created for review.mock.sender@example.com.',
-      ),
-    ).toBeInTheDocument()
+      screen.queryByRole('button', { name: 'Ingest mock mail' }),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Run next job' }),
+    ).not.toBeInTheDocument()
     expect(await screen.findByRole('row', { name: /mail_send_review/ })).toHaveTextContent(
       'Review send request',
     )
@@ -1750,10 +1754,22 @@ describe('Phase 3 contacts screen', () => {
     const user = userEvent.setup()
     vi.stubGlobal(
       'fetch',
-      vi.fn((input: string | URL | Request) => {
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
         const path = input.toString()
         if (path === '/api/v1/auth/session') {
           return activeSessionResponse()
+        }
+        if (path === '/api/v1/contacts/custom-tabs') {
+          if (init?.method === 'PUT') {
+            return apiResponse(200, {
+              ok: true,
+              data: JSON.parse(String(init.body ?? '{}')),
+            })
+          }
+          return apiResponse(200, {
+            ok: true,
+            data: { items: [] },
+          })
         }
         if (path === '/api/v1/contacts') {
           return apiResponse(200, {
@@ -1841,6 +1857,7 @@ describe('Phase 3 contacts screen', () => {
       'Mailing list',
       'archived',
       'Skip',
+      'SPAM',
     ])
     expect(screen.getByRole('tab', { name: 'active' })).toHaveAttribute(
       'aria-selected',
@@ -1869,7 +1886,7 @@ describe('Phase 3 contacts screen', () => {
     expect(screen.getByText('Example Student')).toBeInTheDocument()
     expect(screen.queryByText('Example List')).not.toBeInTheDocument()
     await user.clear(screen.getByLabelText('Search contacts'))
-    await user.click(screen.getByRole('tab', { name: 'Mailing list' }))
+    await user.click(screen.getByRole('tab', { name: 'Skip' }))
     expect(screen.getByText('Example List')).toBeInTheDocument()
     expect(screen.getByText('sender:Reply-To')).toBeInTheDocument()
     expect(screen.getByText('{faculty&public-relations}')).toBeInTheDocument()
@@ -1954,8 +1971,10 @@ describe('Phase 3 contacts screen', () => {
     await user.click(screen.getByRole('tab', { name: 'Skip' }))
 
     expect(screen.queryByText('Example Student')).not.toBeInTheDocument()
-    expect(screen.queryByText('Example List')).not.toBeInTheDocument()
+    expect(screen.getByText('Example List')).toBeInTheDocument()
     await user.click(screen.getByRole('tab', { name: 'Mailing list' }))
+    expect(screen.queryByText('Example List')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('tab', { name: 'Skip' }))
     expect(screen.getByText('Example List')).toBeInTheDocument()
 
     await user.click(screen.getByRole('tab', { name: '+' }))
@@ -1982,6 +2001,7 @@ describe('Phase 3 contacts screen', () => {
       'Mailing list',
       'archived',
       'Skip',
+      'SPAM',
     ])
 
     await user.click(screen.getByRole('button', { name: 'Delete tab' }))

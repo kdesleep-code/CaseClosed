@@ -17,6 +17,7 @@ from caseclosed.services.llm_provider import build_mail_thread_summary_provider
 from caseclosed.services.mail_ingestion import message_is_sent
 
 FUNCTION_TYPE = "mail_thread_summary"
+SUMMARY_TARGET_IMPORTANCE = {"high", "middle"}
 
 
 def new_id(prefix: str) -> str:
@@ -222,6 +223,7 @@ def should_include_message(message: GmailMessage, auto_state: MailAutoState) -> 
         not message_is_sent(message)
         and auto_state.pending_reason is None
         and not bool(auto_state.llm_blocked)
+        and auto_state.effective_importance in SUMMARY_TARGET_IMPORTANCE
     )
 
 

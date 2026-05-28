@@ -62,6 +62,35 @@ def test_contact_can_be_created_and_listed(client, database_path: Path) -> None:
     assert detail_data["related_cases"] == []
 
 
+def test_contact_custom_tabs_are_persisted(client) -> None:
+    initial_response = client.get(f"{CONTACTS_URL}/custom-tabs")
+    update_response = client.put(
+        f"{CONTACTS_URL}/custom-tabs",
+        json={
+            "items": [
+                {
+                    "id": "custom_tsukuba",
+                    "label": "Tsukuba",
+                    "expression": "tsukuba&student",
+                }
+            ]
+        },
+    )
+    next_response = client.get(f"{CONTACTS_URL}/custom-tabs")
+
+    assert initial_response.status_code == 200
+    assert initial_response.json()["data"]["items"] == []
+    assert update_response.status_code == 200
+    assert update_response.json()["data"]["items"] == [
+        {
+            "id": "custom_tsukuba",
+            "label": "Tsukuba",
+            "expression": "tsukuba&student",
+        }
+    ]
+    assert next_response.json()["data"]["items"] == update_response.json()["data"]["items"]
+
+
 def test_mailing_list_contact_can_choose_sender_resolution_mode(
     client,
     database_path: Path,

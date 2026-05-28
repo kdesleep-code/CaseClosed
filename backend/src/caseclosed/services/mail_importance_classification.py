@@ -44,10 +44,15 @@ def handle_mail_importance_classification(
         if auto_state.pending_reason is not None:
             raise ValueError(f"Mail is still pending: {message.id}")
         if bool(auto_state.llm_blocked):
+            auto_state.effective_importance = "pinned"
+            auto_state.updated_at = now
+            auto_state.version += 1
+            session.commit()
             return {
                 "message_id": message.id,
                 "skipped": True,
                 "reason": "llm_blocked",
+                "effective_importance": "pinned",
             }
 
         provider_response = llm_provider.complete_json(
@@ -143,6 +148,4 @@ def effective_importance(
 ) -> str:
     if external_importance == "high":
         return "high"
-    if suggested_importance == "skip":
-        return "pinned"
     return suggested_importance

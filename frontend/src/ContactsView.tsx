@@ -6,28 +6,27 @@ import {
   createContact,
   deleteContact,
   deleteContactEmailAddress,
+  listContactCustomTabs,
   listContacts,
   listUnresolvedFromAddresses,
   mergeContact,
   moveContactEmailAddress,
+  saveContactCustomTabs,
   setContactPrimaryEmailAddress,
   updateContact,
 } from './phase3Api'
-import type { Contact, UnresolvedFromAddress } from './phase3Api'
+import type { Contact, ContactCustomTab, UnresolvedFromAddress } from './phase3Api'
 import { t } from './i18n'
 import { AppLink, navigateTo } from './navigation'
 
 type ContactsMode = 'list' | 'pending'
-type StatusFilter = 'all' | 'active' | 'skipped' | 'archived' | 'mailing_list'
+type ContactStatus = 'active' | 'skipped' | 'spam' | 'archived'
+type PendingContactStatus = 'active' | 'archived' | 'skipped' | 'spam'
+type StatusFilter = 'all' | ContactStatus | 'mailing_list'
 type ContactKind = 'person' | 'mailing_list'
 type SenderResolutionMode = 'self' | 'reply_to'
 type ContactMailImportanceRuleAction = 'llm' | 'fixed' | 'llm_with_instruction'
 type ContactMailImportanceRuleValue = 'pinned' | 'high' | 'middle' | 'low'
-type CustomContactTab = {
-  id: string
-  label: string
-  expression: string
-}
 
 export type ContactsInitialData =
   | {
@@ -40,7 +39,7 @@ export type ContactsInitialData =
       unresolvedFromAddresses: UnresolvedFromAddress[]
     }
 
-const maxCustomTabs = 5
+const maxCustomTabs = 4
 const maxCustomTabNameLength = 12
 const defaultContactAvatarUrl = new URL(
   './assets/default-contact-avatar.svg',
@@ -139,14 +138,14 @@ function ContactsView({
   const [pendingDisplayNames, setPendingDisplayNames] = useState<Record<string, string>>(
     {},
   )
-  const [pendingDecisions, setPendingDecisions] = useState<Record<string, 'active' | 'skipped'>>({})
+  const [pendingDecisions, setPendingDecisions] = useState<Record<string, PendingContactStatus>>({})
   const [pendingKinds, setPendingKinds] = useState<Record<string, ContactKind>>({})
   const [pendingSenderResolutions, setPendingSenderResolutions] = useState<
     Record<string, SenderResolutionMode>
   >({})
   const [displayName, setDisplayName] = useState('')
   const [emailAddress, setEmailAddress] = useState('')
-  const [status, setStatus] = useState<'active' | 'skipped'>('active')
+  const [status, setStatus] = useState<PendingContactStatus>('active')
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [isCreateOpen, setIsCreateOpen] = useState(false)
@@ -155,7 +154,7 @@ function ContactsView({
   const [selectedTagFilter, setSelectedTagFilter] = useState<string | null>(null)
   const [sortMode, setSortMode] = useState<'name' | 'updated'>('name')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('active')
-  const [customTabs, setCustomTabs] = useState<CustomContactTab[]>([])
+  const [customTabs, setCustomTabs] = useState<ContactCustomTab[]>([])
   const [activeCustomTabId, setActiveCustomTabId] = useState<string | null>(null)
   const [isCustomTabEditorOpen, setIsCustomTabEditorOpen] = useState(false)
   const [customTabName, setCustomTabName] = useState('')
@@ -164,9 +163,7 @@ function ContactsView({
   const [isContactDetailEditing, setIsContactDetailEditing] = useState(false)
   const [detailDisplayName, setDetailDisplayName] = useState('')
   const [detailMemo, setDetailMemo] = useState('')
-  const [detailStatus, setDetailStatus] = useState<
-    'active' | 'skipped' | 'archived'
-  >('active')
+  const [detailStatus, setDetailStatus] = useState<ContactStatus>('active')
   const [detailKind, setDetailKind] = useState<ContactKind>('person')
   const [detailSenderResolutionMode, setDetailSenderResolutionMode] =
     useState<SenderResolutionMode>('self')
@@ -198,6 +195,27 @@ function ContactsView({
   )
   const handledDeepLinkRef = useRef('')
   const pendingScrollContactIdRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (mode !== 'list') {
+      return
+    }
+    let isMounted = true
+    listContactCustomTabs()
+      .then((items) => {
+        if (isMounted) {
+          setCustomTabs(items)
+        }
+      })
+      .catch((requestError) => {
+        if (isMounted) {
+          setError(describeError(requestError))
+        }
+      })
+    return () => {
+      isMounted = false
+    }
+  }, [mode])
 
   useEffect(() => {
     if (initialData !== undefined && initialData.mode === mode) {
@@ -385,7 +403,7 @@ function ContactsView({
 
   function handlePendingDecision(
     item: UnresolvedFromAddress,
-    decision: 'active' | 'skipped',
+    decision: PendingContactStatus,
   ) {
     setPendingDecisions((currentDecisions) => ({
       ...currentDecisions,
@@ -421,7 +439,7 @@ function ContactsView({
 
   async function handleCreatePendingContact(
     item: UnresolvedFromAddress,
-    status: 'active' | 'skipped',
+    status: PendingContactStatus,
     kind: ContactKind = 'person',
     senderResolution: SenderResolutionMode = 'self',
   ) {
@@ -482,7 +500,7 @@ function ContactsView({
     setIsContactDetailEditing(false)
     setDetailDisplayName(contact.display_name)
     setDetailMemo(contact.user_memo ?? '')
-    setDetailStatus(contact.status as 'active' | 'skipped' | 'archived')
+    setDetailStatus(contact.status as ContactStatus)
     setDetailKind(contact.kind ?? 'person')
     setDetailSenderResolutionMode(contact.sender_resolution_mode ?? 'self')
     setDetailMailImportanceRuleAction(contact.mail_importance_rule_action ?? 'llm')
@@ -511,7 +529,7 @@ function ContactsView({
     setNotice(null)
     setDetailDisplayName(contact.display_name)
     setDetailMemo(contact.user_memo ?? '')
-    setDetailStatus(contact.status as 'active' | 'skipped' | 'archived')
+    setDetailStatus(contact.status as ContactStatus)
     setDetailKind(contact.kind ?? 'person')
     setDetailSenderResolutionMode(contact.sender_resolution_mode ?? 'self')
     setDetailMailImportanceRuleAction(contact.mail_importance_rule_action ?? 'llm')
@@ -803,6 +821,14 @@ function ContactsView({
     }
   }
 
+  async function persistCustomTabs(nextTabs: ContactCustomTab[]) {
+    try {
+      setCustomTabs(await saveContactCustomTabs(nextTabs))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    }
+  }
+
   function handleAddCustomTab(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const label = (customTabName.trim() || customTabExpression.trim()).slice(
@@ -819,7 +845,9 @@ function ContactsView({
       label,
       expression,
     }
-    setCustomTabs((currentTabs) => [...currentTabs, tab])
+    const nextTabs = [...customTabs, tab]
+    setCustomTabs(nextTabs)
+    void persistCustomTabs(nextTabs)
     setActiveCustomTabId(tab.id)
     setStatusFilter('all')
     setIsCustomTabEditorOpen(false)
@@ -836,7 +864,9 @@ function ContactsView({
   }
 
   function handleDeleteCustomTab(tabId: string) {
-    setCustomTabs((currentTabs) => currentTabs.filter((tab) => tab.id !== tabId))
+    const nextTabs = customTabs.filter((tab) => tab.id !== tabId)
+    setCustomTabs(nextTabs)
+    void persistCustomTabs(nextTabs)
     setActiveCustomTabId(null)
     setStatusFilter('all')
     setIsCustomTabEditorOpen(false)
@@ -907,12 +937,12 @@ function ContactsView({
         return customTabMatches(contact, activeCustomTab.expression)
       }
       if (statusFilter === 'mailing_list') {
-        return isMailingListContact(contact)
-      }
-      if (isMailingListContact(contact)) {
-        return false
+        return isMailingListContact(contact) && contact.status === 'active'
       }
       if (statusFilter !== 'all' && contact.status !== statusFilter) {
+        return false
+      }
+      if (isMailingListContact(contact) && contact.status === 'active') {
         return false
       }
       return true
@@ -1032,23 +1062,24 @@ function ContactsView({
                     </div>
                     <div className="pending-toggle-field">
                       <span>{t('contacts.pending.decision')}</span>
-                    <div className="pending-contact-buttons">
-                      <button
-                        aria-pressed={pendingDecision(item) === 'active'}
-                        disabled={busyEmailAddress === item.email_address}
-                        onClick={() => handlePendingDecision(item, 'active')}
-                        type="button"
-                      >
-                        {t('common.active')}
-                      </button>
-                      <button
-                        aria-pressed={pendingDecision(item) === 'skipped'}
-                        disabled={busyEmailAddress === item.email_address}
-                        onClick={() => handlePendingDecision(item, 'skipped')}
-                        type="button"
-                      >
-                        {t('common.skipped')}
-                      </button>
+                    <div className="pending-contact-buttons pending-contact-decision-buttons">
+                      {(['active', 'archived', 'skipped', 'spam'] as const).map((decision) => (
+                        <button
+                          aria-pressed={pendingDecision(item) === decision}
+                          disabled={busyEmailAddress === item.email_address}
+                          key={decision}
+                          onClick={() => handlePendingDecision(item, decision)}
+                          type="button"
+                        >
+                          {decision === 'active'
+                            ? t('common.active')
+                            : decision === 'spam'
+                              ? t('common.spam')
+                              : decision === 'archived'
+                                ? t('common.archived')
+                                : t('common.skipped')}
+                        </button>
+                      ))}
                     </div>
                     </div>
                     <div className="pending-toggle-field">
@@ -1252,12 +1283,13 @@ function ContactsView({
                     <span>{t('common.status')}</span>
                     <select
                       onChange={(event) =>
-                        setStatus(event.target.value as 'active' | 'skipped')
+                        setStatus(event.target.value as PendingContactStatus)
                       }
                       value={status}
                     >
                       <option value="active">{t('common.active')}</option>
                       <option value="skipped">{t('common.skipped')}</option>
+                      <option value="spam">{t('common.spam')}</option>
                     </select>
                   </label>
                   <button disabled={isSubmitting} type="submit">
@@ -1386,7 +1418,7 @@ function ContactsView({
                   >
                     {t('contacts.kind.mailingList')}
                   </button>
-                  {(['archived', 'skipped'] as const).map((filter) => (
+                  {(['archived', 'skipped', 'spam'] as const).map((filter) => (
                     <button
                       aria-controls="contact-list-panel"
                       aria-selected={
@@ -1400,7 +1432,11 @@ function ContactsView({
                       role="tab"
                       type="button"
                     >
-                      {filter === 'skipped' ? t('contacts.tab.skip') : t('common.archived')}
+                      {filter === 'skipped'
+                        ? t('contacts.tab.skip')
+                        : filter === 'spam'
+                          ? t('common.spam')
+                          : t('common.archived')}
                     </button>
                   ))}
                 </div>
@@ -1605,17 +1641,13 @@ function ContactsView({
                                     <select
                                       aria-label={t('contacts.detail.status')}
                                       onChange={(event) =>
-                                        setDetailStatus(
-                                          event.target.value as
-                                            | 'active'
-                                            | 'skipped'
-                                            | 'archived',
-                                        )
+                                        setDetailStatus(event.target.value as ContactStatus)
                                       }
                                       value={detailStatus}
                                     >
                                       <option value="active">{t('common.active')}</option>
                                       <option value="skipped">{t('common.skipped')}</option>
+                                      <option value="spam">{t('common.spam')}</option>
                                       <option value="archived">{t('common.archived')}</option>
                                     </select>
                                   </label>

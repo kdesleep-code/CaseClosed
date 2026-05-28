@@ -13,6 +13,20 @@ def get_database_url() -> str:
     return os.environ.get("CASECLOSED_DATABASE_URL", DEFAULT_DATABASE_URL)
 
 
+def get_mail_drafts_database_path() -> Path:
+    configured_path = os.environ.get("CASECLOSED_MAIL_DRAFTS_DATABASE_PATH")
+    if configured_path is not None and configured_path.strip() != "":
+        return Path(configured_path.strip())
+
+    database_url = get_database_url()
+    if database_url.startswith("sqlite:///"):
+        database_path = Path(database_url.removeprefix("sqlite:///"))
+        suffix = database_path.suffix or ".sqlite3"
+        return database_path.with_name(f"{database_path.stem}.drafts{suffix}")
+
+    return Path("./data/caseclosed.drafts.sqlite3")
+
+
 def get_bootstrap_password() -> str | None:
     return os.environ.get("CASECLOSED_BOOTSTRAP_PASSWORD")
 
@@ -110,3 +124,34 @@ def get_background_worker_stale_check_seconds() -> int:
         minimum=5,
         maximum=3600,
     )
+
+
+def get_google_oauth_client_id() -> str | None:
+    value = os.environ.get("CASECLOSED_GOOGLE_OAUTH_CLIENT_ID")
+    if value is None or value.strip() == "":
+        return None
+    return value.strip()
+
+
+def get_google_oauth_client_secret() -> str | None:
+    value = os.environ.get("CASECLOSED_GOOGLE_OAUTH_CLIENT_SECRET")
+    if value is None or value.strip() == "":
+        return None
+    return value.strip()
+
+
+def get_google_oauth_redirect_uri() -> str:
+    value = os.environ.get("CASECLOSED_GOOGLE_OAUTH_REDIRECT_URI")
+    if value is not None and value.strip() != "":
+        return value.strip()
+    return "http://127.0.0.1:8000/api/v1/google/gmail/oauth/callback"
+
+
+def get_google_gmail_scopes() -> list[str]:
+    value = os.environ.get("CASECLOSED_GOOGLE_GMAIL_SCOPES")
+    if value is None or value.strip() == "":
+        return [
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.send",
+        ]
+    return [scope for scope in value.split() if scope.strip() != ""]

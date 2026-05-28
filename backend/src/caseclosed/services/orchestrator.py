@@ -5,6 +5,9 @@ from datetime import datetime
 from datetime import timedelta
 
 from caseclosed.db.models import Job
+from caseclosed.services.contact_ai_memo_update import (
+    handle_contact_ai_memo_update,
+)
 from caseclosed.services.contact_resolution_followup import (
     handle_contact_resolution_followup,
 )
@@ -23,6 +26,7 @@ from caseclosed.services.queue import SQLiteQueue
 JobHandler = Callable[[Job], dict[str, object]]
 
 DEFAULT_HANDLERS: dict[str, JobHandler] = {
+    "contact_ai_memo_update": handle_contact_ai_memo_update,
     "contact_registration_prefill": handle_contact_registration_prefill,
     "contact_resolution_followup": handle_contact_resolution_followup,
     "mail_importance_classification": handle_mail_importance_classification,

@@ -1,5 +1,41 @@
 # Case-Closed
 
+## Local startup
+
+This project uses a FastAPI backend and a Vite/React frontend.
+
+### Backend
+
+Run from the repository root:
+
+```powershell
+python -m uvicorn caseclosed.main:app --app-dir backend/src --env-file .env --host 127.0.0.1 --port 8000
+```
+
+Backend URL:
+
+```text
+http://127.0.0.1:8000
+```
+
+### Frontend
+
+Run from the `frontend` directory:
+
+```powershell
+cd frontend
+npm install
+npm run dev -- --host 127.0.0.1 --port 5173
+```
+
+Frontend URL:
+
+```text
+http://127.0.0.1:5173
+```
+
+The backend reads local secrets from `.env`. Do not commit real API keys or OAuth secrets.
+
 本Webアプリは、大学教員として日々発生する研究・教育・事務・委員会・出張・生活上の大型作業を、**案件:Case**単位で管理し、連絡漏れ・対応漏れ・期限超過・作業の滞留を防ぐことを目的とする。
 
 最大の目標は以下である。

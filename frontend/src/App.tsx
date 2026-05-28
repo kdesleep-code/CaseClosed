@@ -142,8 +142,8 @@ async function loadMailInitialData(
   const page =
     viewMode === 'action-needed'
       ? await listMailPage({
-          tab: 'unprocessed',
-          importance_any: 'high,middle',
+          tab: 'all',
+          needs_action: true,
           limit: 25,
         })
       : await listMailPage({
@@ -362,7 +362,13 @@ function PreloadedMailRoute({
     (preload?.path === '/mail' || preload?.path === '/mail/action-needed') &&
     preload.mail !== undefined
   ) {
-    return <MailView initialData={preload.mail} />
+    const routeKey = [
+      preload.path,
+      preload.mail.viewMode,
+      preload.mail.activeTab,
+      preload.mail.selectedDate,
+    ].join(':')
+    return <MailView key={routeKey} initialData={preload.mail} />
   }
 
   return <MailRouteGate viewMode={viewMode} />
