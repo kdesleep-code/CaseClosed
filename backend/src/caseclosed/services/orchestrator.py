@@ -17,6 +17,7 @@ from caseclosed.services.contact_registration_prefill import (
 from caseclosed.services.mail_importance_classification import (
     handle_mail_importance_classification,
 )
+from caseclosed.services.mail_attachment_fetch import handle_mail_attachment_fetch
 from caseclosed.services.mail_sending import handle_mail_send_mock
 from caseclosed.services.mail_summary import handle_mail_summary
 from caseclosed.services.mail_thread_summary import handle_mail_thread_summary
@@ -30,6 +31,7 @@ DEFAULT_HANDLERS: dict[str, JobHandler] = {
     "contact_registration_prefill": handle_contact_registration_prefill,
     "contact_resolution_followup": handle_contact_resolution_followup,
     "mail_importance_classification": handle_mail_importance_classification,
+    "mail_attachment_fetch": handle_mail_attachment_fetch,
     "mail_summary": handle_mail_summary,
     "mail_thread_summary": handle_mail_thread_summary,
     "mail_send_mock": handle_mail_send_mock,

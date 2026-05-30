@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session as DatabaseSession
 from caseclosed.db.models import Contact
 from caseclosed.db.models import ContactEmailAddress
 from caseclosed.db.models import GmailMessage
+from caseclosed.db.models import GmailMessageAttachment
 from caseclosed.db.models import GmailThread
 from caseclosed.db.models import Job
 from caseclosed.db.models import MailAutoState
@@ -28,6 +29,15 @@ SPAM_SUBJECT_PATTERN = re.compile(r"\[\s*spam\s*\]", re.IGNORECASE)
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex}"
+
+
+@dataclass(frozen=True)
+class MailAttachmentInput:
+    gmail_attachment_id: str
+    filename: str
+    mime_type: str | None = None
+    byte_size: int = 0
+    part_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -54,6 +64,7 @@ class MockMailInput:
     gmail_link: str | None = None
     gmail_labels: list[str] | None = None
     external_starred: bool = False
+    attachments: list[MailAttachmentInput] | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +95,8 @@ def ingest_mock_mail(
         )
     )
     if existing_message is not None:
+        now = jst_iso()
+        upsert_message_attachments(session, existing_message, mail_input, now)
         existing_auto_state = session.scalar(
             select(MailAutoState).where(MailAutoState.message_id == existing_message.id)
         )
@@ -144,6 +157,7 @@ def ingest_mock_mail(
         version=1,
     )
     session.add(message)
+    upsert_message_attachments(session, message, mail_input, now)
     session.add(
         MailUserState(
             id=new_id("mail_user_state"),
@@ -213,6 +227,8 @@ def ingest_mock_mail(
             now=now,
             reason="mail_ingested",
         )
+    if not is_sent:
+        update_contact_inbound_mail_stats_for_message(session, message)
     session.add(
         MailAutoState(
             id=new_id("mail_auto_state"),
@@ -251,6 +267,85 @@ def ingest_mock_mail(
         pending_reason=sender_resolution.pending_reason,
         queued_job_id=queued_job_id,
         queued_contact_ai_memo_job_id=queued_contact_ai_memo_job_id,
+    )
+
+
+def upsert_message_attachments(
+    session: DatabaseSession,
+    message: GmailMessage,
+    mail_input: MockMailInput,
+    now: str,
+) -> None:
+    attachments = [
+        attachment
+        for attachment in mail_input.attachments or []
+        if attachment.gmail_attachment_id.strip() != ""
+        and attachment.filename.strip() != ""
+    ]
+    if not attachments:
+        return
+
+    existing_rows = session.scalars(
+        select(GmailMessageAttachment).where(
+            GmailMessageAttachment.message_id == message.id
+        )
+    ).all()
+    existing_by_key = {
+        attachment_key(row.gmail_attachment_id, row.part_id, row.filename): row
+        for row in existing_rows
+    }
+
+    for attachment in attachments:
+        key = attachment_key(
+            attachment.gmail_attachment_id,
+            attachment.part_id,
+            attachment.filename,
+        )
+        byte_size = max(0, int(attachment.byte_size or 0))
+        existing = existing_by_key.get(key)
+        if existing is None:
+            session.add(
+                GmailMessageAttachment(
+                    id=new_id("mail_attachment"),
+                    message_id=message.id,
+                    gmail_message_id=message.gmail_message_id,
+                    gmail_attachment_id=attachment.gmail_attachment_id.strip(),
+                    part_id=attachment.part_id,
+                    filename=attachment.filename.strip(),
+                    mime_type=attachment.mime_type,
+                    byte_size=byte_size,
+                    storage_object_id=None,
+                    created_at=now,
+                    updated_at=now,
+                    version=1,
+                )
+            )
+            continue
+
+        changed = False
+        if existing.mime_type != attachment.mime_type:
+            existing.mime_type = attachment.mime_type
+            changed = True
+        if existing.byte_size != byte_size:
+            existing.byte_size = byte_size
+            changed = True
+        if existing.gmail_message_id != message.gmail_message_id:
+            existing.gmail_message_id = message.gmail_message_id
+            changed = True
+        if changed:
+            existing.updated_at = now
+            existing.version += 1
+
+
+def attachment_key(
+    gmail_attachment_id: str,
+    part_id: str | None,
+    filename: str,
+) -> tuple[str, str, str]:
+    return (
+        gmail_attachment_id.strip(),
+        (part_id or "").strip(),
+        filename.strip(),
     )
 
 
@@ -695,6 +790,37 @@ def upsert_observed_email_address(
     contact_email_address.updated_at = now
     contact_email_address.version += 1
     return contact_email_address
+
+
+def update_contact_inbound_mail_stats_for_message(
+    session: DatabaseSession,
+    message: GmailMessage,
+) -> None:
+    normalized_addresses = {
+        address
+        for address in [message.from_address, message.reply_to_address]
+        if address is not None and address.strip() != ""
+    }
+    if not normalized_addresses:
+        return
+
+    contacts = session.scalars(
+        select(Contact)
+        .join(ContactEmailAddress, ContactEmailAddress.contact_id == Contact.id)
+        .where(
+            ContactEmailAddress.normalized_email_address.in_(normalized_addresses),
+            ContactEmailAddress.deleted_at.is_(None),
+            Contact.deleted_at.is_(None),
+        )
+        .distinct()
+    ).all()
+    for contact in contacts:
+        contact.inbound_message_count += 1
+        if (
+            contact.latest_received_at is None
+            or message.received_at > contact.latest_received_at
+        ):
+            contact.latest_received_at = message.received_at
 
 
 def unresolved_email_address(

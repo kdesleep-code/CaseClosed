@@ -208,3 +208,29 @@ def retry_job(
     job.updated_at = jst_iso()
     session.commit()
     return {"ok": True, "data": job_data(job, session)}
+
+
+@router.post("/{job_id}/discard")
+def discard_job(
+    job_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    job = session.get(Job, job_id)
+    if job is None:
+        raise json_error(404, "NOT_FOUND", "Job not found.")
+    if job.status not in {"failed", "stale"}:
+        raise json_error(
+            409,
+            "CONFLICT",
+            "Only failed or stale jobs can be discarded.",
+        )
+
+    now = jst_iso()
+    job.status = "discarded"
+    job.locked_by = None
+    job.locked_at = None
+    job.heartbeat_at = None
+    job.finished_at = now
+    job.updated_at = now
+    session.commit()
+    return {"ok": True, "data": job_data(job, session)}

@@ -8,6 +8,7 @@ from uuid import uuid4
 from fastapi import APIRouter
 from fastapi import Depends
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DatabaseSession
 
@@ -381,6 +382,7 @@ def email_address_data(email_address: ContactEmailAddress) -> dict[str, object]:
 
 def contact_data(contact: Contact, session: DatabaseSession) -> dict[str, object]:
     user_memo = contact.user_memo if contact.user_memo is not None else contact.memo
+    email_addresses = contact_email_addresses(session, contact.id)
     return {
         "id": contact.id,
         "display_name": contact.display_name,
@@ -394,15 +396,43 @@ def contact_data(contact: Contact, session: DatabaseSession) -> dict[str, object
         "mail_importance_rule_action": contact.mail_importance_rule_action,
         "mail_importance_rule_importance": contact.mail_importance_rule_importance,
         "mail_importance_rule_instruction": contact.mail_importance_rule_instruction,
+        "inbound_message_count": contact.inbound_message_count,
+        "latest_received_at": contact.latest_received_at,
         "tags": [] if contact.kind == "mailing_list" else contact_tags(session, contact.id),
-        "email_addresses": [
-            email_address_data(email_address)
-            for email_address in contact_email_addresses(session, contact.id)
-        ],
+        "email_addresses": [email_address_data(email_address) for email_address in email_addresses],
         "created_at": contact.created_at,
         "updated_at": contact.updated_at,
         "version": contact.version,
     }
+
+
+def recalculate_contact_inbound_message_count(
+    session: DatabaseSession,
+    contact: Contact,
+) -> None:
+    normalized_addresses = list(
+        session.scalars(
+            select(ContactEmailAddress.normalized_email_address).where(
+                ContactEmailAddress.contact_id == contact.id,
+                ContactEmailAddress.deleted_at.is_(None),
+            )
+        ).all()
+    )
+    if not normalized_addresses:
+        contact.inbound_message_count = 0
+        contact.latest_received_at = None
+        return
+
+    count, latest_received_at = session.execute(
+        select(func.count(func.distinct(GmailMessage.id)), func.max(GmailMessage.received_at))
+        .where(
+            (GmailMessage.from_address.in_(normalized_addresses))
+            | (GmailMessage.reply_to_address.in_(normalized_addresses))
+        )
+        .where(~func.coalesce(GmailMessage.gmail_labels_json, "").like('%"SENT"%'))
+    ).one()
+    contact.inbound_message_count = int(count or 0)
+    contact.latest_received_at = latest_received_at
 
 
 def unique_contact_display_name(
@@ -884,6 +914,7 @@ def create_contact(
     set_contact_tags(session, contact.id, payload.tags, now)
     for email_address in payload.email_addresses:
         link_email_address(session, contact, email_address, now=now, source="manual")
+    recalculate_contact_inbound_message_count(session, contact)
     if contact.status == "spam":
         apply_spam_status_to_existing_contact_mail(
             session,
@@ -1068,6 +1099,7 @@ def add_contact_email_address(
 
     now = jst_iso()
     link_email_address(session, contact, payload, now=now, source="manual")
+    recalculate_contact_inbound_message_count(session, contact)
     if contact.status == "spam":
         apply_spam_status_to_existing_contact_mail(
             session,
@@ -1213,6 +1245,8 @@ def move_contact_email_address(
         email_address=email_address,
         now=now,
     )
+    recalculate_contact_inbound_message_count(session, source_contact)
+    recalculate_contact_inbound_message_count(session, target_contact)
 
     source_contact.version += 1
     source_contact.updated_at = now
@@ -1297,6 +1331,8 @@ def merge_contact(
             email_address=email_address,
             now=now,
         )
+    recalculate_contact_inbound_message_count(session, source_contact)
+    recalculate_contact_inbound_message_count(session, target_contact)
 
     merged_tags = sorted(
         set(contact_tags(session, source_contact.id))

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
+from hashlib import sha256
 from uuid import uuid4
+
+from sqlalchemy import select
 
 from caseclosed.db import runtime
 from caseclosed.db.models import Contact
@@ -13,6 +17,9 @@ from caseclosed.services.llm_provider import LlmProvider
 from caseclosed.services.llm_provider import build_contact_ai_memo_update_provider
 
 FUNCTION_TYPE = FUNCTION_TYPE_CONTACT_AI_MEMO_UPDATE
+WEEKLY_UPDATE_INTERVAL_DAYS = 7
+WEEKLY_SLOT_COUNT = 7 * 24
+MAX_BATCH_MESSAGES = 20
 
 
 def new_id(prefix: str) -> str:
@@ -33,6 +40,18 @@ def enqueue_contact_ai_memo_update_job(
         allow_archived_initial=allow_archived_initial,
     ):
         return None
+    available_at = None
+    schedule_scope = "single_message"
+    if (
+        should_update_contact_ai_memo(contact)
+        and not allow_archived_initial
+        and not contact_needs_initial_ai_memo(contact)
+    ):
+        existing_job_id = pending_contact_ai_memo_update_job_id(session, contact.id)
+        if existing_job_id is not None:
+            return existing_job_id
+        available_at = next_weekly_contact_update_at(contact.id, now)
+        schedule_scope = "weekly_batch"
 
     job_id = new_id("job")
     session.add(
@@ -48,6 +67,7 @@ def enqueue_contact_ai_memo_update_job(
                     "gmail_message_id": message.gmail_message_id,
                     "reason": reason,
                     "allow_archived_initial": allow_archived_initial,
+                    "schedule_scope": schedule_scope,
                 },
                 ensure_ascii=True,
                 sort_keys=True,
@@ -60,7 +80,7 @@ def enqueue_contact_ai_memo_update_job(
             locked_by=None,
             locked_at=None,
             heartbeat_at=None,
-            available_at=None,
+            available_at=available_at,
             started_at=None,
             finished_at=None,
             created_at=now,
@@ -70,12 +90,48 @@ def enqueue_contact_ai_memo_update_job(
     return job_id
 
 
+def pending_contact_ai_memo_update_job_id(session, contact_id: str) -> str | None:
+    for job in session.scalars(
+        select(Job).where(
+            Job.job_type == FUNCTION_TYPE,
+            Job.status.in_(["pending", "running"]),
+        )
+    ).all():
+        try:
+            payload = json.loads(job.payload_json)
+        except json.JSONDecodeError:
+            continue
+        if payload.get("contact_id") == contact_id:
+            return job.id
+    return None
+
+
+def next_weekly_contact_update_at(contact_id: str, now_iso: str) -> str:
+    now = runtime.parse_iso_datetime(now_iso)
+    digest = sha256(contact_id.encode("utf-8")).digest()
+    slot = int.from_bytes(digest[:2], "big") % WEEKLY_SLOT_COUNT
+    slot_weekday = slot // 24
+    slot_hour = slot % 24
+    days_ahead = (slot_weekday - now.weekday()) % 7
+    candidate = (
+        now.replace(hour=slot_hour, minute=0, second=0, microsecond=0)
+        + timedelta(days=days_ahead)
+    )
+    if candidate <= now:
+        candidate += timedelta(days=WEEKLY_UPDATE_INTERVAL_DAYS)
+    return runtime.jst_iso(candidate)
+
+
 def should_update_contact_ai_memo(contact: Contact) -> bool:
     return (
         contact.kind == "person"
         and contact.status == "active"
         and contact.deleted_at is None
     )
+
+
+def contact_needs_initial_ai_memo(contact: Contact) -> bool:
+    return contact.ai_memo is None or contact.ai_memo.strip() == ""
 
 
 def should_create_archived_initial_ai_memo(
@@ -100,6 +156,7 @@ def handle_contact_ai_memo_update(
     contact_id = payload["contact_id"]
     message_id = payload["message_id"]
     allow_archived_initial = bool(payload.get("allow_archived_initial"))
+    schedule_scope = str(payload.get("schedule_scope") or "single_message")
     now = runtime.jst_iso()
     llm_provider = provider or build_contact_ai_memo_update_provider()
 
@@ -121,6 +178,22 @@ def handle_contact_ai_memo_update(
         message = session.get(GmailMessage, message_id)
         if message is None:
             raise LookupError(f"Gmail message not found: {message_id}")
+        messages = (
+            contact_messages_since_last_ai_memo_update(
+                session,
+                contact=contact,
+                fallback_message=message,
+            )
+            if schedule_scope == "weekly_batch"
+            else [message]
+        )
+        if not messages:
+            return {
+                "contact_id": contact.id,
+                "message_id": message_id,
+                "skipped": True,
+                "reason": "no_new_contact_messages",
+            }
 
         provider_response = llm_provider.complete_json(
             function_type=FUNCTION_TYPE,
@@ -128,13 +201,14 @@ def handle_contact_ai_memo_update(
                 "contact_id": contact.id,
                 "contact_display_name": contact.display_name,
                 "current_ai_memo": contact.ai_memo,
-                "message_id": message.id,
-                "gmail_message_id": message.gmail_message_id,
-                "received_at": message.received_at,
-                "subject": message.subject,
-                "from_address": message.from_address,
-                "snippet": message.snippet,
-                "body_text": message.body_text,
+                "message_id": messages[-1].id,
+                "gmail_message_id": messages[-1].gmail_message_id,
+                "received_at": messages[-1].received_at,
+                "subject": messages[-1].subject,
+                "from_address": messages[-1].from_address,
+                "snippet": messages[-1].snippet,
+                "body_text": messages[-1].body_text,
+                "messages": [contact_ai_memo_message_payload(item) for item in messages],
             },
         )
         output = provider_response.output
@@ -149,9 +223,12 @@ def handle_contact_ai_memo_update(
             input_source_json=json.dumps(
                 {
                     "contact_id": contact.id,
-                    "message_id": message.id,
-                    "gmail_message_id": message.gmail_message_id,
-                    "subject": message.subject,
+                    "message_id": messages[-1].id,
+                    "gmail_message_id": messages[-1].gmail_message_id,
+                    "subject": messages[-1].subject,
+                    "message_count": len(messages),
+                    "message_ids": [item.id for item in messages],
+                    "schedule_scope": schedule_scope,
                 },
                 ensure_ascii=True,
                 sort_keys=True,
@@ -159,9 +236,9 @@ def handle_contact_ai_memo_update(
             input_diagnostic_json=json.dumps(
                 {
                     "had_existing_ai_memo": contact.ai_memo is not None,
-                    "has_body_text": message.body_text is not None,
-                    "has_snippet": message.snippet is not None,
-                    "body_text_length": len(message.body_text or ""),
+                    "has_body_text": any(item.body_text is not None for item in messages),
+                    "has_snippet": any(item.snippet is not None for item in messages),
+                    "body_text_length": sum(len(item.body_text or "") for item in messages),
                 },
                 ensure_ascii=True,
                 sort_keys=True,
@@ -189,8 +266,91 @@ def handle_contact_ai_memo_update(
         session.commit()
         return {
             "contact_id": contact.id,
-            "message_id": message.id,
+            "message_id": messages[-1].id,
+            "message_count": len(messages),
             "provider": llm_provider.provider_name,
             "llm_run_id": llm_run.id,
             "skipped": False,
         }
+
+
+def contact_messages_since_last_ai_memo_update(
+    session,
+    *,
+    contact: Contact,
+    fallback_message: GmailMessage,
+) -> list[GmailMessage]:
+    last_finished_at = None
+    runs = session.scalars(
+        select(LlmRun)
+        .where(LlmRun.function_type == FUNCTION_TYPE)
+        .order_by(LlmRun.finished_at.desc(), LlmRun.created_at.desc())
+    ).all()
+    for run in runs:
+        try:
+            input_source = json.loads(run.input_source_json or "{}")
+        except json.JSONDecodeError:
+            continue
+        if input_source.get("contact_id") == contact.id:
+            last_finished_at = run.finished_at
+            break
+    return contact_messages_after(session, contact, last_finished_at, fallback_message)
+
+
+def contact_messages_after(
+    session,
+    contact: Contact,
+    since: str | None,
+    fallback_message: GmailMessage,
+) -> list[GmailMessage]:
+    from caseclosed.db.models import ContactEmailAddress
+
+    addresses = [
+        row.normalized_email_address
+        for row in session.scalars(
+            select(ContactEmailAddress).where(
+                ContactEmailAddress.contact_id == contact.id,
+                ContactEmailAddress.deleted_at.is_(None),
+            )
+        ).all()
+    ]
+    if not addresses:
+        return [fallback_message]
+    query = (
+        select(GmailMessage)
+        .where(GmailMessage.from_address.in_(addresses))
+        .order_by(GmailMessage.received_at.desc(), GmailMessage.id.desc())
+        .limit(MAX_BATCH_MESSAGES)
+    )
+    if since is not None:
+        query = query.where(GmailMessage.received_at > since)
+    messages = [
+        message
+        for message in session.scalars(query).all()
+        if not message_is_sent_for_contact_memo(message)
+    ]
+    if fallback_message.id not in {message.id for message in messages}:
+        messages.append(fallback_message)
+    return sorted(messages, key=lambda item: (item.received_at, item.id))
+
+
+def message_is_sent_for_contact_memo(message: GmailMessage) -> bool:
+    try:
+        labels = json.loads(message.gmail_labels_json or "[]")
+    except json.JSONDecodeError:
+        labels = []
+    if not isinstance(labels, list):
+        return False
+    return any(str(label).upper() == "SENT" for label in labels)
+
+
+def contact_ai_memo_message_payload(message: GmailMessage) -> dict[str, object]:
+    return {
+        "message_id": message.id,
+        "gmail_message_id": message.gmail_message_id,
+        "received_at": message.received_at,
+        "subject": message.subject,
+        "from_address": message.from_address,
+        "snippet": message.snippet,
+        "body_text": message.body_text,
+    }

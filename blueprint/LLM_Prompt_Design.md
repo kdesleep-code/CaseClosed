@@ -53,7 +53,7 @@ LLMは、以下を上書きしてはならない。
 - ユーザーが作成・編集したTask
 - ユーザーが編集したContact情報
 - ユーザーが編集したDraft本文
-- ユーザーが設定したFile LLM Policy
+- ユーザーが設定したFile LLM input可否
 
 LLM結果は、原則として以下のいずれかに保存する。
 
@@ -1244,7 +1244,7 @@ forbidden
 
 ---
 
-# 19. ファイル要約
+# 19. ファイルLLM Digest
 
 ## 19.1 function_type
 
@@ -1254,55 +1254,106 @@ file_summary
 
 ## 19.2 実行タイミング
 
-手動実行。
+Storage詳細の `Prepare LLM Digest` から手動実行する。
 
-または `llm_policy = allowed` の低機密ファイルに限り自動実行を将来検討。
+また、後続機能がファイルをLLM入力に使おうとした時点で対象版のDigestが存在しない場合、先にDigestを生成してStorageへ反映する。
 
 ## 19.3 実行条件
 
 ```text
-allowed:
+llm_input_allowed = true:
   実行可
 
-confirm_required:
-  確認後に実行可
-
-forbidden:
+llm_input_allowed = false:
   実行不可
 ```
 
+`file_security_meta_classification` はPhase 6では保留する。現時点の制御は `storage_objects.llm_input_allowed` を正とする。
+
 ## 19.4 入力
 
-- file text
+- storage_object_id
+- storage_object_version_id
 - filename
-- origin
-- related Case Context
-- source mail summary
-- ユーザー追加プロンプト
+- content_type
+- byte_size
+- sha256_hex
+- source_kind
+- read_scope
+- truncated
+- limitations
+- source_text
+
+本文抽出は拡張子/形式ごとの抽出ブロックを通す。
+
+現状:
+
+- text系: 本文テキスト
+- markdown / table系: 本文テキスト
+- zip系: 展開せず構造ツリー
+- PDF: PyMuPDF -> pypdf/PyPDF2 -> primitive fallback
+- DOCX: python-docx利用時に段落テキスト
+- 未対応形式: metadata_only とし、制約を `coverage.limitations` に残す
+
+### 増分Digest入力
+
+対象版のDigestがなく、対象版より過去にDigestがある場合は、対象ファイルから見て過去側にある最も新しいDigestをベースにする。
+
+入力:
+
+- base_summary_id
+- base_storage_object_version_id
+- base_version_number
+- base_llm_digest
+- base_file_description
+- base_summary_points
+- base_source_sha256_hex
+- diffs
+
+`diffs` は `file_version_diffs` を古い順に並べる。LLMは、削除行を現在存在しない情報、追加行を新しく存在する情報として扱い、差分に矛盾する旧Digestの事実を持ち越さない。
+
+対象版に既にDigestがあり、ユーザーが明示的に再生成する場合は、対象版の本文抽出から全文ベースで再生成する。
 
 ## 19.5 出力JSON
 
 ```json
 {
   "schema_version": "1.0",
-  "summary": "会議資料の概要...",
-  "key_points": [
-    "議題1: ...",
-    "議題2: ..."
+  "file_description": "このファイルは会議メモの決定事項をまとめたテキストです。",
+  "summary_points": [
+    "2026-05-30の会議メモ。",
+    "予算と締切の確認を含む。"
   ],
-  "action_items": [
-    "事前に資料の該当箇所を確認する。"
-  ],
-  "sensitive_content_warning": true,
-  "confidence": 0.79,
+  "llm_digest": "後続LLM入力用の圧縮済み中間表現...",
+  "structured_digest": {
+    "document_type": "meeting_note",
+    "facts": [],
+    "entities": [],
+    "dates": [],
+    "numbers": [],
+    "action_items": [],
+    "structure_notes": []
+  },
+  "coverage": {
+    "source_kind": "text",
+    "read_scope": "text_content",
+    "truncated": false,
+    "limitations": []
+  },
+  "token_estimate": 320,
+  "reasoning_summary": "Digest生成上の短い説明。",
   "warnings": []
 }
 ```
 
+`file_description` は1文程度、`summary_points` は最大5項目とする。主目的は人間向け要約ではなく、ファイルを後続LLMへ再投入するための情報圧縮である。
+
 ## 19.6 保存先
 
-- file summaries系テーブル、または filesメタ情報拡張
+- `file_summaries`
 - `llm_runs`
+
+`file_summaries.storage_object_version_id` がNULLの場合は現在版のDigestを表す。ファイル更新で現在版が旧版へ退避された場合、該当Digestは旧版の `storage_object_version_id` に付け替える。
 
 ---
 

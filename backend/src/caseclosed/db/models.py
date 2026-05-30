@@ -286,6 +286,149 @@ class SchemaVersion(Base):
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class StorageObject(Base):
+    __tablename__ = "storage_objects"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    directory_id: Mapped[str | None] = mapped_column(ForeignKey("storage_directories.id"))
+    location_id: Mapped[str] = mapped_column(
+        ForeignKey("storage_locations.id"),
+        nullable=False,
+        default="storage_location_internal",
+    )
+    scope: Mapped[str] = mapped_column(Text, nullable=False)
+    original_filename: Mapped[str | None] = mapped_column(Text)
+    content_type: Mapped[str | None] = mapped_column(Text)
+    byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256_hex: Mapped[str] = mapped_column(Text, nullable=False)
+    storage_path: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    llm_input_allowed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    source_type: Mapped[str | None] = mapped_column(Text)
+    source_message_id: Mapped[str | None] = mapped_column(ForeignKey("gmail_messages.id"))
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    file_updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class StorageObjectVersion(Base):
+    __tablename__ = "storage_object_versions"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    storage_object_id: Mapped[str] = mapped_column(
+        ForeignKey("storage_objects.id"),
+        nullable=False,
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    original_filename: Mapped[str | None] = mapped_column(Text)
+    content_type: Mapped[str | None] = mapped_column(Text)
+    byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256_hex: Mapped[str] = mapped_column(Text, nullable=False)
+    storage_path: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class FileSummary(Base):
+    __tablename__ = "file_summaries"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    storage_object_id: Mapped[str] = mapped_column(
+        ForeignKey("storage_objects.id"),
+        nullable=False,
+    )
+    storage_object_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("storage_object_versions.id"),
+    )
+    source_sha256_hex: Mapped[str] = mapped_column(Text, nullable=False)
+    source_filename: Mapped[str | None] = mapped_column(Text)
+    source_content_type: Mapped[str | None] = mapped_column(Text)
+    source_byte_size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    summary_type: Mapped[str] = mapped_column(Text, nullable=False, default="llm_digest")
+    file_description: Mapped[str] = mapped_column(Text, nullable=False)
+    summary_points_json: Mapped[str] = mapped_column(Text, nullable=False)
+    llm_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    structured_digest_json: Mapped[str] = mapped_column(Text, nullable=False)
+    coverage_json: Mapped[str] = mapped_column(Text, nullable=False)
+    token_estimate: Mapped[int | None] = mapped_column(Integer)
+    llm_run_id: Mapped[str | None] = mapped_column(ForeignKey("llm_runs.id"))
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class FileVersionDiff(Base):
+    __tablename__ = "file_version_diffs"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    storage_object_id: Mapped[str] = mapped_column(
+        ForeignKey("storage_objects.id"),
+        nullable=False,
+    )
+    previous_version_id: Mapped[str] = mapped_column(
+        ForeignKey("storage_object_versions.id"),
+        nullable=False,
+    )
+    previous_sha256_hex: Mapped[str] = mapped_column(Text, nullable=False)
+    current_sha256_hex: Mapped[str] = mapped_column(Text, nullable=False)
+    diff_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    summary_text: Mapped[str] = mapped_column(Text, nullable=False)
+    added_lines_json: Mapped[str] = mapped_column(Text, nullable=False)
+    removed_lines_json: Mapped[str] = mapped_column(Text, nullable=False)
+    coverage_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class StorageOperationHistory(Base):
+    __tablename__ = "storage_operation_history"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    storage_object_id: Mapped[str | None] = mapped_column(Text)
+    operation_type: Mapped[str] = mapped_column(Text, nullable=False)
+    actor: Mapped[str] = mapped_column(Text, nullable=False, default="system")
+    scope: Mapped[str | None] = mapped_column(Text)
+    original_filename: Mapped[str | None] = mapped_column(Text)
+    content_type: Mapped[str | None] = mapped_column(Text)
+    byte_size: Mapped[int | None] = mapped_column(Integer)
+    storage_path: Mapped[str | None] = mapped_column(Text)
+    source_type: Mapped[str | None] = mapped_column(Text)
+    source_message_id: Mapped[str | None] = mapped_column(Text)
+    directory_id: Mapped[str | None] = mapped_column(Text)
+    details_json: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class StorageDirectory(Base):
+    __tablename__ = "storage_directories"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    parent_id: Mapped[str | None] = mapped_column(ForeignKey("storage_directories.id"))
+    directory_kind: Mapped[str] = mapped_column(Text, nullable=False, default="normal")
+    case_id: Mapped[str | None] = mapped_column(ForeignKey("cases.id"))
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class StorageLocation(Base):
+    __tablename__ = "storage_locations"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False, default="internal")
+    root_path: Mapped[str] = mapped_column(Text, nullable=False)
+    mount_hint: Mapped[str | None] = mapped_column(Text)
+    marker_id: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
 class Contact(Base):
     __tablename__ = "contacts"
 
@@ -310,6 +453,12 @@ class Contact(Base):
     )
     mail_importance_rule_importance: Mapped[str | None] = mapped_column(Text)
     mail_importance_rule_instruction: Mapped[str | None] = mapped_column(Text)
+    inbound_message_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+    latest_received_at: Mapped[str | None] = mapped_column(Text)
     deleted_at: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
@@ -446,6 +595,28 @@ class GmailMessage(Base):
     gmail_link: Mapped[str | None] = mapped_column(Text)
     gmail_labels_json: Mapped[str | None] = mapped_column(Text)
     external_starred: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class GmailMessageAttachment(Base):
+    __tablename__ = "gmail_message_attachments"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    message_id: Mapped[str] = mapped_column(
+        ForeignKey("gmail_messages.id"),
+        nullable=False,
+    )
+    gmail_message_id: Mapped[str] = mapped_column(Text, nullable=False)
+    gmail_attachment_id: Mapped[str] = mapped_column(Text, nullable=False)
+    part_id: Mapped[str | None] = mapped_column(Text)
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    mime_type: Mapped[str | None] = mapped_column(Text)
+    byte_size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    storage_object_id: Mapped[str | None] = mapped_column(
+        ForeignKey("storage_objects.id"),
+    )
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)

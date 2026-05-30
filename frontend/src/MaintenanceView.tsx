@@ -4,19 +4,31 @@ import { t } from './i18n'
 import type { MessageKey } from './i18n'
 import { AppLink } from './navigation'
 import {
+  previewableImageExtensions,
+  previewableTextExtensions,
+} from './storagePreview'
+import {
+  discardJob,
   listExternalOperations,
   listJobs,
   listPendingMails,
+  listStorageOperationHistory,
+  readLlmCostHistory,
   readMaintenanceStatus,
   resolveExternalOperation,
   retryJob,
+  updateLlmCostSettings,
 } from './phase2Api'
+import { listStorageLocations } from './phase3Api'
 import type {
   ExternalOperation,
   Job,
+  LlmCostHistory,
   MaintenanceStatus,
   PendingMail,
+  StorageOperationHistoryItem,
 } from './phase2Api'
+import type { StorageLocation } from './phase3Api'
 import {
   applyMailLlmBlockFilter,
   createGoogleGmailConnectUrl,
@@ -107,7 +119,7 @@ const usageHistoryRanges = [
   axisLabelKeys: MessageKey[]
 }>
 
-type MaintenanceTab = 'usage' | 'jobs' | 'debug'
+type MaintenanceTab = 'usage' | 'jobs' | 'storage' | 'debug'
 type UsageMetric = (typeof usageMetrics)[number]
 type UsageHistoryRange = (typeof usageHistoryRanges)[number]
 
@@ -126,6 +138,45 @@ function describeError(error: unknown) {
   return error instanceof Error ? error.message : t('maintenance.requestFailed')
 }
 
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`
+  const kib = bytes / 1024
+  if (kib < 1024) return `${kib.toFixed(kib >= 10 ? 0 : 1)} KB`
+  const mib = kib / 1024
+  if (mib < 1024) return `${mib.toFixed(mib >= 10 ? 0 : 1)} MB`
+  const gib = mib / 1024
+  return `${gib.toFixed(gib >= 10 ? 0 : 1)} GB`
+}
+
+function StorageLocationCard({ location }: { location: StorageLocation }) {
+  return (
+    <article className="storage-location-card">
+      <div>
+        <h3>{location.label}</h3>
+        <p>{location.root_path}</p>
+      </div>
+      <dl>
+        <div>
+          <dt>{t('common.type')}</dt>
+          <dd>{location.kind}</dd>
+        </div>
+        <div>
+          <dt>{t('common.status')}</dt>
+          <dd>{location.status}</dd>
+        </div>
+        <div>
+          <dt>{t('storage.objectCount')}</dt>
+          <dd>{location.object_count}</dd>
+        </div>
+        <div>
+          <dt>{t('storage.totalSize')}</dt>
+          <dd>{formatBytes(location.active_byte_size)}</dd>
+        </div>
+      </dl>
+    </article>
+  )
+}
+
 function countRequiredActions(
   jobs: Job[],
   operations: ExternalOperation[],
@@ -141,9 +192,50 @@ function jobNeedsAction(job: Job) {
 }
 
 function usageMetricValue(metric: UsageMetric, status: MaintenanceStatus | null) {
+  if (metric.key === 'llm-cost') {
+    const used = status?.llm_cost_month_used
+    const remaining = status?.llm_cost_month_remaining
+    if (used === undefined) {
+      return t('maintenance.notAvailable')
+    }
+    if (remaining === null || remaining === undefined) {
+      return formatMoney(used, 'usd')
+    }
+    return t('maintenance.llmCost.remainingShort', {
+      remaining: formatMoney(remaining, 'usd'),
+    })
+  }
   return metric.statusKey === undefined
     ? t('maintenance.notAvailable')
     : status?.[metric.statusKey] ?? t('common.none')
+}
+
+function formatMoney(value: number | null | undefined, currency: string) {
+  if (value === null || value === undefined) {
+    return t('common.none')
+  }
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: currency.toUpperCase(),
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  }).format(value)
+}
+
+function formatNumber(value: number | null | undefined) {
+  if (value === null || value === undefined) {
+    return t('common.none')
+  }
+  return new Intl.NumberFormat('en-US').format(value)
+}
+
+function storageOperationDetail(item: StorageOperationHistoryItem) {
+  const parts = [
+    item.storage_path,
+    item.source_type,
+    item.directory_id === null ? null : `dir:${item.directory_id}`,
+  ].filter((value): value is string => value !== null && value !== '')
+  return parts.length === 0 ? t('common.none') : parts.join(' / ')
 }
 
 function jobStatusDetail(job: Job) {
@@ -249,17 +341,24 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
     initialData?.pendingMails ?? [],
   )
   const [sendRequests, setSendRequests] = useState<MailSendRequest[] | null>(null)
+  const [llmCostHistory, setLlmCostHistory] = useState<LlmCostHistory | null>(null)
   const [llmModelConfig, setLlmModelConfig] = useState<LlmModelConfig | null>(null)
   const [googleGmailStatus, setGoogleGmailStatus] =
     useState<GoogleGmailStatus | null>(null)
   const [llmBlockFilters, setLlmBlockFilters] = useState<LlmBlockFilter[] | null>(null)
   const [llmBlockedMails, setLlmBlockedMails] = useState<LlmBlockedMail[] | null>(null)
+  const [storageOperationHistory, setStorageOperationHistory] =
+    useState<StorageOperationHistoryItem[] | null>(null)
   const [debugNotice, setDebugNotice] = useState<string | null>(initialDebugNotice)
   const [llmBlockQuery, setLlmBlockQuery] = useState('password')
   const [llmBlockReason, setLlmBlockReason] = useState('May contain password.')
+  const [llmMonthlyBudget, setLlmMonthlyBudget] = useState('')
+  const [storageLocations, setStorageLocations] = useState<StorageLocation[] | null>(
+    null,
+  )
   const [gmailAutoImportEnabled, setGmailAutoImportEnabled] = useState(true)
   const [gmailAutoImportInterval, setGmailAutoImportInterval] = useState('10')
-  const [gmailAutoImportMaxMessages, setGmailAutoImportMaxMessages] = useState('20')
+  const [gmailAutoImportMaxMessages, setGmailAutoImportMaxMessages] = useState('100')
   const [isDebugBusy, setIsDebugBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
@@ -329,6 +428,30 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
   }, [activeTab, sendRequests])
 
   useEffect(() => {
+    if (activeTab !== 'debug' || storageOperationHistory !== null) {
+      return
+    }
+
+    let isMounted = true
+    listStorageOperationHistory()
+      .then((items) => {
+        if (isMounted) {
+          setStorageOperationHistory(items)
+        }
+      })
+      .catch((requestError) => {
+        if (isMounted) {
+          setError(describeError(requestError))
+          setStorageOperationHistory([])
+        }
+      })
+
+    return () => {
+      isMounted = false
+    }
+  }, [activeTab, storageOperationHistory])
+
+  useEffect(() => {
     if (
       activeTab !== 'debug' ||
       (llmBlockedMails !== null && llmBlockFilters !== null && llmModelConfig !== null)
@@ -393,11 +516,69 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
     )
   }, [googleGmailStatus])
 
+  useEffect(() => {
+    if (activeTab !== 'usage' || activeUsageMetric.key !== 'llm-cost') {
+      return
+    }
+    let isMounted = true
+    readLlmCostHistory()
+      .then((history) => {
+        if (!isMounted) {
+          return
+        }
+        setLlmCostHistory(history)
+        setLlmMonthlyBudget(
+          history.monthly_budget === null ? '' : String(history.monthly_budget),
+        )
+      })
+      .catch((requestError) => {
+        if (isMounted) {
+          setError(describeError(requestError))
+        }
+      })
+
+    return () => {
+      isMounted = false
+    }
+  }, [activeTab, activeUsageMetric.key])
+
+  useEffect(() => {
+    let isMounted = true
+    if (activeTab !== 'storage' || storageLocations !== null) {
+      return () => {
+        isMounted = false
+      }
+    }
+    listStorageLocations()
+      .then((locations) => {
+        if (isMounted) setStorageLocations(locations)
+      })
+      .catch((requestError) => {
+        if (isMounted) setError(describeError(requestError))
+      })
+    return () => {
+      isMounted = false
+    }
+  }, [activeTab, storageLocations])
+
   async function handleRetry(job: Job) {
     setBusyId(job.id)
     setError(null)
     try {
       setJobs(updateById(jobs, await retryJob(job.id)))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function handleDiscard(job: Job) {
+    setBusyId(`discard-${job.id}`)
+    setError(null)
+    try {
+      const discardedJob = await discardJob(job.id)
+      setJobs(jobs.filter((item) => item.id !== discardedJob.id))
     } catch (requestError) {
       setError(describeError(requestError))
     } finally {
@@ -509,7 +690,7 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
       )
       const maxMessagesPerRun = Math.max(
         1,
-        Math.min(500, Number.parseInt(gmailAutoImportMaxMessages, 10) || 20),
+        Math.min(100, Number.parseInt(gmailAutoImportMaxMessages, 10) || 100),
       )
       const settings = await updateGoogleGmailAutoImportSettings({
         enabled: gmailAutoImportEnabled,
@@ -594,6 +775,27 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
     }
   }
 
+  async function handleLlmCostSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setError(null)
+    setBusyId('llm-cost-settings')
+    try {
+      const trimmedBudget = llmMonthlyBudget.trim()
+      const monthlyBudget =
+        trimmedBudget === '' ? null : Math.max(0, Number.parseFloat(trimmedBudget))
+      const history = await updateLlmCostSettings(monthlyBudget)
+      setLlmCostHistory(history)
+      setLlmMonthlyBudget(
+        history.monthly_budget === null ? '' : String(history.monthly_budget),
+      )
+      setStatus(await readMaintenanceStatus())
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
   return (
     <main className="app-shell">
       <div className="maintenance-shell">
@@ -644,6 +846,16 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
               >
                 {requiredActionLabel}
               </span>
+            </button>
+            <button
+              aria-controls="maintenance-storage-panel"
+              aria-selected={activeTab === 'storage'}
+              id="maintenance-storage-tab"
+              onClick={() => setActiveTab('storage')}
+              role="tab"
+              type="button"
+            >
+              {t('maintenance.storage')}
             </button>
             <button
               aria-controls="maintenance-debug-panel"
@@ -711,30 +923,170 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                       ))}
                     </div>
                   </div>
-                  <div className="usage-history-chart">
-                    <div
-                      aria-label={t('maintenance.history.scale')}
-                      className="usage-history-y-axis"
-                    >
-                      <span>{t('maintenance.history.high')}</span>
-                      <span>{t('maintenance.history.mid')}</span>
-                      <span>{t('maintenance.history.low')}</span>
-                      <span>0</span>
+                  {activeUsageMetric.key === 'llm-cost' ? (
+                    <div className="llm-cost-history">
+                      {llmCostHistory === null ? (
+                        <p>{t('maintenance.debug.loading')}</p>
+                      ) : (
+                        <>
+                          <div className="llm-cost-summary-grid">
+                            <div>
+                              <span>{t('maintenance.llmCost.remaining')}</span>
+                              <strong>
+                                {formatMoney(
+                                  llmCostHistory.month_remaining,
+                                  llmCostHistory.currency,
+                                )}
+                              </strong>
+                            </div>
+                            <div>
+                              <span>{t('maintenance.llmCost.monthUsed')}</span>
+                              <strong>
+                                {formatMoney(
+                                  llmCostHistory.month_used,
+                                  llmCostHistory.currency,
+                                )}
+                              </strong>
+                            </div>
+                            <div>
+                              <span>{t('maintenance.llmCost.todayUsed')}</span>
+                              <strong>
+                                {formatMoney(
+                                  llmCostHistory.today_used,
+                                  llmCostHistory.currency,
+                                )}
+                              </strong>
+                            </div>
+                            <div>
+                              <span>{t('maintenance.llmCost.totalUsed')}</span>
+                              <strong>
+                                {formatMoney(
+                                  llmCostHistory.total_used,
+                                  llmCostHistory.currency,
+                                )}
+                              </strong>
+                            </div>
+                          </div>
+                          <form
+                            className="llm-cost-budget-form"
+                            onSubmit={handleLlmCostSettings}
+                          >
+                            <label>
+                              <span>{t('maintenance.llmCost.monthlyBudget')}</span>
+                              <input
+                                min={0}
+                                onChange={(event) =>
+                                  setLlmMonthlyBudget(event.target.value)
+                                }
+                                placeholder={t('maintenance.llmCost.noBudget')}
+                                step="0.01"
+                                type="number"
+                                value={llmMonthlyBudget}
+                              />
+                            </label>
+                            <button
+                              className={`button-loading-dot${
+                                busyId === 'llm-cost-settings' ? ' is-loading' : ''
+                              }`}
+                              disabled={busyId === 'llm-cost-settings'}
+                              type="submit"
+                            >
+                              {t('common.save')}
+                            </button>
+                          </form>
+                          <p>{t('maintenance.llmCost.sourceLocal')}</p>
+                          <div className="maintenance-table-wrap llm-cost-table-wrap">
+                            <table>
+                              <thead>
+                                <tr>
+                                  <th scope="col">{t('maintenance.debug.llmFunction')}</th>
+                                  <th scope="col">{t('maintenance.llmCost.runs')}</th>
+                                  <th scope="col">
+                                    {t('maintenance.llmCost.promptTokens')}
+                                  </th>
+                                  <th scope="col">
+                                    {t('maintenance.llmCost.completionTokens')}
+                                  </th>
+                                  <th scope="col">
+                                    {t('maintenance.llmCost.totalTokens')}
+                                  </th>
+                                  <th scope="col">{t('maintenance.llmCost.cost')}</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {llmCostHistory.by_function.map((item) => (
+                                  <tr key={item.function_type}>
+                                    <td>{item.function_type}</td>
+                                    <td>{formatNumber(item.run_count)}</td>
+                                    <td>{formatNumber(item.prompt_tokens)}</td>
+                                    <td>{formatNumber(item.completion_tokens)}</td>
+                                    <td>{formatNumber(item.total_tokens)}</td>
+                                    <td>
+                                      {formatMoney(
+                                        item.estimated_cost,
+                                        llmCostHistory.currency,
+                                      )}
+                                    </td>
+                                  </tr>
+                                ))}
+                                {llmCostHistory.by_function.length === 0 && (
+                                  <tr>
+                                    <td colSpan={6}>
+                                      {t('maintenance.history.noHistory')}
+                                    </td>
+                                  </tr>
+                                )}
+                              </tbody>
+                            </table>
+                          </div>
+                        </>
+                      )}
                     </div>
-                    <div aria-hidden="true" className="usage-history-plot">
-                      <span />
-                      <span />
-                      <span />
-                      <span />
+                  ) : activeUsageMetric.key === 'storage' ? (
+                    <div className="storage-backup-panel">
+                      <div className="section-heading">
+                        <h3>{t('maintenance.storageBackup.heading')}</h3>
+                        <p>{t('maintenance.storageBackup.locations')}</p>
+                      </div>
+                      <dl className="gmail-auto-import-status">
+                        <div>
+                          <dt>{t('maintenance.storageBackup.status')}</dt>
+                          <dd>{status?.backup_status ?? t('common.none')}</dd>
+                        </div>
+                      </dl>
+                      <button disabled type="button">
+                        {t('maintenance.storageBackup.archive')}
+                      </button>
+                      <p>{t('maintenance.storageBackup.notImplemented')}</p>
                     </div>
-                    <span aria-hidden="true" className="usage-history-axis-gutter" />
-                    <div className="usage-history-axis">
-                      {activeUsageHistoryRange.axisLabelKeys.map((labelKey) => (
-                        <span key={labelKey}>{t(labelKey)}</span>
-                      ))}
-                    </div>
-                  </div>
-                  <p>{t('maintenance.history.noHistory')}</p>
+                  ) : (
+                    <>
+                      <div className="usage-history-chart">
+                        <div
+                          aria-label={t('maintenance.history.scale')}
+                          className="usage-history-y-axis"
+                        >
+                          <span>{t('maintenance.history.high')}</span>
+                          <span>{t('maintenance.history.mid')}</span>
+                          <span>{t('maintenance.history.low')}</span>
+                          <span>0</span>
+                        </div>
+                        <div aria-hidden="true" className="usage-history-plot">
+                          <span />
+                          <span />
+                          <span />
+                          <span />
+                        </div>
+                        <span aria-hidden="true" className="usage-history-axis-gutter" />
+                        <div className="usage-history-axis">
+                          {activeUsageHistoryRange.axisLabelKeys.map((labelKey) => (
+                            <span key={labelKey}>{t(labelKey)}</span>
+                          ))}
+                        </div>
+                      </div>
+                      <p>{t('maintenance.history.noHistory')}</p>
+                    </>
+                  )}
                 </section>
               </section>
             )}
@@ -783,21 +1135,41 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                                 {job.retry_count}/{job.max_retries}
                               </td>
                               <td>
-                                {job.status === 'failed' ? (
-                                  <button
-                                    aria-label={t('maintenance.jobs.retryFor', {
-                                      id: job.id,
-                                    })}
-                                    className={`button-loading-dot${
-                                      busyId === job.id ? ' is-loading' : ''
-                                    }`}
-                                    disabled={busyId === job.id}
-                                    onClick={() => handleRetry(job)}
-                                    title={t('maintenance.jobs.retryTitle')}
-                                    type="button"
-                                  >
-                                    {t('maintenance.jobs.retry')}
-                                  </button>
+                                {job.status === 'failed' || job.status === 'stale' ? (
+                                  <div className="resolution-actions">
+                                    {job.status === 'failed' && (
+                                      <button
+                                        aria-label={t('maintenance.jobs.retryFor', {
+                                          id: job.id,
+                                        })}
+                                        className={`button-loading-dot${
+                                          busyId === job.id ? ' is-loading' : ''
+                                        }`}
+                                        disabled={busyId !== null}
+                                        onClick={() => handleRetry(job)}
+                                        title={t('maintenance.jobs.retryTitle')}
+                                        type="button"
+                                      >
+                                        {t('maintenance.jobs.retry')}
+                                      </button>
+                                    )}
+                                    <button
+                                      aria-label={t('maintenance.jobs.discardFor', {
+                                        id: job.id,
+                                      })}
+                                      className={`button-loading-dot${
+                                        busyId === `discard-${job.id}`
+                                          ? ' is-loading'
+                                          : ''
+                                      }`}
+                                      disabled={busyId !== null}
+                                      onClick={() => handleDiscard(job)}
+                                      title={t('maintenance.jobs.discardTitle')}
+                                      type="button"
+                                    >
+                                      {t('maintenance.jobs.discard')}
+                                    </button>
+                                  </div>
                                 ) : (
                                   <span className="quiet-cell">
                                     {t('common.none')}
@@ -999,6 +1371,34 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
               </div>
             )}
 
+            {activeTab === 'storage' && (
+              <section
+                aria-labelledby="maintenance-storage-tab storage-heading"
+                className="maintenance-panel maintenance-section"
+                id="maintenance-storage-panel"
+                role="tabpanel"
+              >
+                <div className="section-heading">
+                  <h2 id="storage-heading">
+                    {t('maintenance.storage.emptyHeading')}
+                  </h2>
+                  <p>{t('maintenance.storage.emptyBody')}</p>
+                </div>
+                <div className="storage-location-grid">
+                  {storageLocations === null ? (
+                    <p>{t('storage.loading')}</p>
+                  ) : (
+                    storageLocations.map((location) => (
+                      <StorageLocationCard key={location.id} location={location} />
+                    ))
+                  )}
+                  {storageLocations !== null && storageLocations.length === 0 && (
+                    <p>{t('storage.noLocations')}</p>
+                  )}
+                </div>
+              </section>
+            )}
+
             {activeTab === 'debug' && (
               <section
                 aria-labelledby="maintenance-debug-tab debug-heading"
@@ -1025,6 +1425,28 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                     <h3 id="maintenance-debug-tools-heading">
                       {t('mail.debug.heading')}
                     </h3>
+                  </div>
+                  <div className="maintenance-debug-preview-list">
+                    <div>
+                      <h4>{t('maintenance.debug.previewableExtensions')}</h4>
+                      <p>{t('maintenance.debug.previewableExtensionsNote')}</p>
+                    </div>
+                    <div className="maintenance-extension-group">
+                      <h5>{t('maintenance.debug.previewableImageExtensions')}</h5>
+                      <div className="maintenance-extension-list">
+                        {previewableImageExtensions.map((extension) => (
+                          <span key={extension}>.{extension}</span>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="maintenance-extension-group">
+                      <h5>{t('maintenance.debug.previewableTextExtensions')}</h5>
+                      <div className="maintenance-extension-list">
+                        {previewableTextExtensions.map((extension) => (
+                          <span key={extension}>.{extension}</span>
+                        ))}
+                      </div>
+                    </div>
                   </div>
                 </section>
 
@@ -1153,7 +1575,7 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                             </span>
                             <input
                               min={1}
-                              max={500}
+                              max={100}
                               onChange={(event) =>
                                 setGmailAutoImportMaxMessages(event.target.value)
                               }
@@ -1184,6 +1606,32 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                               {t('maintenance.debug.googleGmailAutoImportLastImported')}
                             </dt>
                             <dd>{googleGmailStatus.auto_import.last_imported_count}</dd>
+                          </div>
+                          <div>
+                            <dt>
+                              {t('maintenance.debug.googleGmailAutoImportLastChecked')}
+                            </dt>
+                            <dd>{googleGmailStatus.auto_import.last_checked_count}</dd>
+                          </div>
+                          <div>
+                            <dt>
+                              {t('maintenance.debug.googleGmailAutoImportStopReason')}
+                            </dt>
+                            <dd>
+                              {googleGmailStatus.auto_import.last_stop_reason ??
+                                t('common.none')}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt>
+                              {t('maintenance.debug.googleGmailAutoImportStoppedMail')}
+                            </dt>
+                            <dd>
+                              {googleGmailStatus.auto_import
+                                .last_stopped_gmail_message_id === null
+                                ? t('common.none')
+                                : `${googleGmailStatus.auto_import.last_stopped_received_at ?? '-'} / ${googleGmailStatus.auto_import.last_stopped_gmail_message_id}`}
+                            </dd>
                           </div>
                           <div>
                             <dt>{t('maintenance.debug.googleGmailAutoImportLastError')}</dt>
@@ -1411,6 +1859,56 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                           </tr>
                         ))}
                         {llmBlockedMails?.length === 0 && (
+                          <tr>
+                            <td colSpan={5}>{t('maintenance.debug.empty')}</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+
+                <section
+                  aria-labelledby="maintenance-storage-history-heading"
+                  className="maintenance-section"
+                >
+                  <div className="section-heading">
+                    <h3 id="maintenance-storage-history-heading">
+                      {t('maintenance.debug.storageOperations')}
+                    </h3>
+                  </div>
+
+                  <div className="maintenance-table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th scope="col">{t('maintenance.debug.createdAt')}</th>
+                          <th scope="col">{t('maintenance.debug.operation')}</th>
+                          <th scope="col">{t('storage.filename')}</th>
+                          <th scope="col">{t('storage.size')}</th>
+                          <th scope="col">{t('maintenance.debug.detail')}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {storageOperationHistory === null && (
+                          <tr>
+                            <td colSpan={5}>{t('maintenance.debug.loading')}</td>
+                          </tr>
+                        )}
+                        {storageOperationHistory?.map((item) => (
+                          <tr key={item.id}>
+                            <td>{item.created_at}</td>
+                            <td>{item.operation_type}</td>
+                            <td>{item.original_filename ?? item.storage_object_id}</td>
+                            <td>
+                              {item.byte_size === null
+                                ? t('common.none')
+                                : formatBytes(item.byte_size)}
+                            </td>
+                            <td>{storageOperationDetail(item)}</td>
+                          </tr>
+                        ))}
+                        {storageOperationHistory?.length === 0 && (
                           <tr>
                             <td colSpan={5}>{t('maintenance.debug.empty')}</td>
                           </tr>

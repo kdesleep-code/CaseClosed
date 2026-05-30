@@ -8,6 +8,7 @@ import json
 CONTACTS_URL = "/api/v1/contacts"
 MOCK_MAILS_URL = "/api/v1/mails/mock-ingest"
 MAILS_URL = "/api/v1/mails"
+MAIL_DRAFTS_URL = "/api/v1/mail-drafts"
 
 
 def ingest_mail(
@@ -73,6 +74,43 @@ def create_known_sender_mail(client, *, subject: str, body_text: str = "") -> st
         },
     )
     return response.json()["data"]["message_id"]
+
+
+def insert_received_attachment(
+    database_path,
+    *,
+    attachment_id: str,
+    message_id: str,
+    gmail_message_id: str,
+    gmail_attachment_id: str,
+    filename: str = "note.pdf",
+    mime_type: str = "application/pdf",
+    byte_size: int = 123,
+) -> None:
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO gmail_message_attachments (
+                id, message_id, gmail_message_id, gmail_attachment_id,
+                part_id, filename, mime_type, byte_size, storage_object_id,
+                created_at, updated_at, version
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 1)
+            """,
+            (
+                attachment_id,
+                message_id,
+                gmail_message_id,
+                gmail_attachment_id,
+                "1",
+                filename,
+                mime_type,
+                byte_size,
+                "2026-05-28T12:00:00+09:00",
+                "2026-05-28T12:00:00+09:00",
+            ),
+        )
+        connection.commit()
 
 
 def connect_gmail_send(database_path) -> None:
@@ -209,6 +247,275 @@ def test_mail_detail_returns_message_state_and_available_actions(client) -> None
     assert data["thread_messages"][0]["processed_status"] == "unprocessed"
     assert "process" in data["available_actions"]
     assert "set_importance" in data["available_actions"]
+
+
+def test_mail_detail_and_list_report_received_attachments(client, database_path) -> None:
+    message_id = create_known_sender_mail(
+        client,
+        subject="Attachment detail",
+        body_text="Please see the file.",
+    )
+    insert_received_attachment(
+        database_path,
+        attachment_id="mail_attachment_detail",
+        message_id=message_id,
+        gmail_message_id="gmail_mail_api_1",
+        gmail_attachment_id="gmail_attach_detail",
+        filename="review-note.pdf",
+        byte_size=2048,
+    )
+
+    detail_response = client.get(f"{MAILS_URL}/{message_id}")
+    list_response = client.get(f"{MAILS_URL}?tab=unprocessed&limit=20")
+
+    assert detail_response.status_code == 200
+    detail = detail_response.json()["data"]
+    assert detail["message"]["has_attachments"] is True
+    assert detail["message"]["attachment_count"] == 1
+    assert detail["message"]["attachments"][0]["filename"] == "review-note.pdf"
+    assert detail["message"]["attachments"][0]["download_url"].endswith(
+        "/api/v1/mails/attachments/mail_attachment_detail/download"
+    )
+    assert detail["attachments"] == detail["message"]["attachments"]
+    assert list_response.status_code == 200
+    item = next(
+        item for item in list_response.json()["data"]["items"] if item["id"] == message_id
+    )
+    assert item["has_attachments"] is True
+    assert item["attachment_count"] == 1
+
+
+def test_mail_attachment_download_caches_gmail_data(
+    client,
+    database_path,
+    monkeypatch,
+) -> None:
+    message_id = create_known_sender_mail(
+        client,
+        subject="Attachment download",
+        body_text="Please download the file.",
+    )
+    insert_received_attachment(
+        database_path,
+        attachment_id="mail_attachment_download",
+        message_id=message_id,
+        gmail_message_id="gmail_mail_api_1",
+        gmail_attachment_id="gmail_attach_download",
+        filename="review-note.txt",
+        mime_type="text/plain",
+        byte_size=5,
+    )
+    connect_gmail_send(database_path)
+    calls: list[str] = []
+
+    def fake_gmail_api_get_json(path, access_token, params=None):
+        assert access_token == "gmail-send-access-token"
+        calls.append(path)
+        assert path == "/users/me/messages/gmail_mail_api_1/attachments/gmail_attach_download"
+        return {
+            "data": base64.urlsafe_b64encode(b"hello attachment")
+            .decode("ascii")
+            .rstrip("="),
+            "size": 16,
+        }
+
+    from caseclosed import google_integration
+
+    monkeypatch.setattr(google_integration, "gmail_api_get_json", fake_gmail_api_get_json)
+
+    first_response = client.get(
+        f"{MAILS_URL}/attachments/mail_attachment_download/download"
+    )
+    second_response = client.get(
+        f"{MAILS_URL}/attachments/mail_attachment_download/download"
+    )
+
+    assert first_response.status_code == 200
+    assert first_response.content == b"hello attachment"
+    assert second_response.status_code == 200
+    assert second_response.content == b"hello attachment"
+    assert calls == [
+        "/users/me/messages/gmail_mail_api_1/attachments/gmail_attach_download"
+    ]
+
+
+def test_move_cached_mail_attachment_to_storage_deletes_tmp_file(
+    client,
+    database_path,
+    monkeypatch,
+) -> None:
+    message_id = create_known_sender_mail(
+        client,
+        subject="Attachment move",
+        body_text="Please store the file.",
+    )
+    insert_received_attachment(
+        database_path,
+        attachment_id="mail_attachment_move",
+        message_id=message_id,
+        gmail_message_id="gmail_mail_api_1",
+        gmail_attachment_id="gmail_attach_move",
+        filename="move-note.txt",
+        mime_type="text/plain",
+        byte_size=5,
+    )
+    connect_gmail_send(database_path)
+
+    from caseclosed import google_integration
+
+    monkeypatch.setattr(
+        google_integration,
+        "gmail_api_get_json",
+        lambda path, access_token, params=None: {
+            "data": base64.urlsafe_b64encode(b"cached attachment")
+            .decode("ascii")
+            .rstrip("="),
+        },
+    )
+
+    cache_response = client.get(f"{MAILS_URL}/attachments/mail_attachment_move/download")
+    assert cache_response.status_code == 200
+    with sqlite3.connect(database_path) as connection:
+        tmp_row = connection.execute(
+            """
+            SELECT storage_objects.id, storage_objects.storage_path
+            FROM gmail_message_attachments
+            JOIN storage_objects
+                ON storage_objects.id = gmail_message_attachments.storage_object_id
+            WHERE gmail_message_attachments.id = ?
+            """,
+            ("mail_attachment_move",),
+        ).fetchone()
+    tmp_storage_object_id, tmp_storage_path = tmp_row
+    assert (database_path.parent / "storage" / tmp_storage_path).is_file()
+
+    move_response = client.post(
+        f"{MAILS_URL}/attachments/mail_attachment_move/move-to-storage"
+    )
+
+    assert move_response.status_code == 200
+    managed_object = move_response.json()["data"]["storage_object"]
+    assert managed_object["scope"] == "managed"
+    assert managed_object["source_type"] == "mail_attachment"
+    assert managed_object["source_message_id"] == message_id
+    with sqlite3.connect(database_path) as connection:
+        tmp_status = connection.execute(
+            "SELECT status FROM storage_objects WHERE id = ?",
+            (tmp_storage_object_id,),
+        ).fetchone()[0]
+        attachment_storage_object_id = connection.execute(
+            "SELECT storage_object_id FROM gmail_message_attachments WHERE id = ?",
+            ("mail_attachment_move",),
+        ).fetchone()[0]
+
+    assert tmp_status == "deleted"
+    assert attachment_storage_object_id == managed_object["id"]
+    assert not (database_path.parent / "storage" / tmp_storage_path).exists()
+
+    with sqlite3.connect(database_path) as connection:
+        managed_storage_path = connection.execute(
+            "SELECT storage_path FROM storage_objects WHERE id = ?",
+            (managed_object["id"],),
+        ).fetchone()[0]
+    assert (database_path.parent / "storage" / managed_storage_path).is_file()
+
+    delete_response = client.delete(f"/api/v1/storage/objects/{managed_object['id']}")
+
+    assert delete_response.status_code == 200
+    restored_object = delete_response.json()["data"]["restored_storage_object"]
+    assert restored_object["scope"] == "tmp/gmail-attachments"
+    assert restored_object["source_type"] == "mail_attachment"
+    assert restored_object["source_message_id"] == message_id
+    with sqlite3.connect(database_path) as connection:
+        managed_status = connection.execute(
+            "SELECT status FROM storage_objects WHERE id = ?",
+            (managed_object["id"],),
+        ).fetchone()[0]
+        restored_storage_path = connection.execute(
+            "SELECT storage_path FROM storage_objects WHERE id = ?",
+            (restored_object["id"],),
+        ).fetchone()[0]
+        restored_attachment_storage_object_id = connection.execute(
+            "SELECT storage_object_id FROM gmail_message_attachments WHERE id = ?",
+            ("mail_attachment_move",),
+        ).fetchone()[0]
+
+    assert managed_status == "deleted"
+    assert restored_attachment_storage_object_id == restored_object["id"]
+    assert not (database_path.parent / "storage" / managed_storage_path).exists()
+    assert (database_path.parent / "storage" / restored_storage_path).is_file()
+
+
+def test_mail_attachment_fetch_job_stores_attachment(
+    client,
+    database_path,
+    monkeypatch,
+) -> None:
+    message_id = create_known_sender_mail(
+        client,
+        subject="Attachment background fetch",
+        body_text="Please store this file in the background.",
+    )
+    insert_received_attachment(
+        database_path,
+        attachment_id="mail_attachment_fetch_job",
+        message_id=message_id,
+        gmail_message_id="gmail_mail_api_1",
+        gmail_attachment_id="gmail_attach_fetch_job",
+        filename="fetch-job.txt",
+        mime_type="text/plain",
+        byte_size=5,
+    )
+    connect_gmail_send(database_path)
+
+    from caseclosed import google_integration
+    from caseclosed.services.orchestrator import Orchestrator
+
+    monkeypatch.setattr(
+        google_integration,
+        "gmail_api_get_json",
+        lambda path, access_token, params=None: {
+            "data": base64.urlsafe_b64encode(b"background attachment")
+            .decode("ascii")
+            .rstrip("="),
+        },
+    )
+
+    response = client.post(
+        f"{MAILS_URL}/attachments/mail_attachment_fetch_job/fetch-job"
+    )
+
+    assert response.status_code == 200
+    job_id = response.json()["data"]["job_id"]
+    assert Orchestrator(worker_id="worker-test").run_once() == job_id
+
+    with sqlite3.connect(database_path) as connection:
+        job_row = connection.execute(
+            "SELECT status, error_type FROM jobs WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+        attachment_row = connection.execute(
+            """
+            SELECT gmail_message_attachments.storage_object_id,
+                   storage_objects.scope,
+                   storage_objects.original_filename,
+                   storage_objects.byte_size,
+                   storage_objects.storage_path
+            FROM gmail_message_attachments
+            JOIN storage_objects
+                ON storage_objects.id = gmail_message_attachments.storage_object_id
+            WHERE gmail_message_attachments.id = ?
+            """,
+            ("mail_attachment_fetch_job",),
+        ).fetchone()
+
+    assert job_row == ("succeeded", None)
+    assert attachment_row[1:4] == (
+        "managed",
+        "fetch-job.txt",
+        len(b"background attachment"),
+    )
+    assert (database_path.parent / "storage" / attachment_row[4]).is_file()
 
 
 def test_llm_block_filter_marks_matching_mail_and_worker_skips_llm(
@@ -696,6 +1003,33 @@ def test_gmail_send_job_builds_attachment_mime_part(
     database_path,
     monkeypatch,
 ) -> None:
+    draft_response = client.post(
+        MAIL_DRAFTS_URL,
+        json={
+            "to_addresses": ["receiver@example.com"],
+            "subject": "Attachment draft",
+            "body_text": "Draft body.",
+            "attachment_refs": [
+                {
+                    "name": "draft-note.txt",
+                    "content_type": "text/plain",
+                    "data_base64": base64.b64encode(b"draft attachment").decode("ascii"),
+                },
+            ],
+        },
+    )
+    draft_storage_object_id = draft_response.json()["data"]["attachment_refs"][0][
+        "storage_object_id"
+    ]
+    attachment_upload_response = client.post(
+        "/api/v1/storage/tmp",
+        json={
+            "filename": "note.txt",
+            "content_type": "text/plain",
+            "data_base64": base64.b64encode(b"attached text").decode("ascii"),
+        },
+    )
+    storage_object_id = attachment_upload_response.json()["data"]["storage_object"]["id"]
     send_response = client.post(
         f"{MAILS_URL}/send",
         json={
@@ -706,7 +1040,7 @@ def test_gmail_send_job_builds_attachment_mime_part(
                 {
                     "filename": "note.txt",
                     "content_type": "text/plain",
-                    "data_base64": base64.b64encode(b"attached text").decode("ascii"),
+                    "storage_object_id": storage_object_id,
                     "size": 13,
                 }
             ],
@@ -786,10 +1120,13 @@ def test_gmail_send_job_builds_attachment_mime_part(
         fake_gmail_api_get_json,
     )
 
-    client.post(f"{MAILS_URL}/send-requests/{send_request_id}/send-now")
+    send_now_response = client.post(f"{MAILS_URL}/send-requests/{send_request_id}/send-now")
+    assert send_now_response.status_code == 200
     run_response = client.post("/api/v1/jobs/run-next")
 
     assert run_response.status_code == 200
+    assert run_response.json()["data"]["job_id"] is not None
+    assert sent_raw_messages, client.get("/api/v1/jobs").json()
     raw_message = message_from_bytes(sent_raw_messages[0])
     attachments = [
         part
@@ -799,6 +1136,12 @@ def test_gmail_send_job_builds_attachment_mime_part(
     assert len(attachments) == 1
     assert attachments[0].get_filename() == "note.txt"
     assert attachments[0].get_payload(decode=True) == b"attached text"
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT status FROM storage_objects WHERE id = ?",
+            (draft_storage_object_id,),
+        ).fetchone()
+    assert row == ("deleted",)
 
 
 def test_scheduled_send_request_can_be_rescheduled_sent_now_and_canceled(
@@ -956,7 +1299,54 @@ def test_send_mail_requires_recipient_and_existing_reply_target(client) -> None:
     assert missing_reply_target_response.json()["error"]["code"] == "NOT_FOUND"
 
 
-def test_generate_reply_draft_retries_when_language_does_not_match_source(
+def test_mail_draft_generation_standard_prompt_is_saved_in_app_settings(
+    client,
+    database_path,
+) -> None:
+    initial_response = client.get(f"{MAILS_URL}/draft-generation-standard-prompt")
+    assert initial_response.status_code == 200
+    assert initial_response.json()["data"]["standard_prompt"] == ""
+    assert initial_response.json()["data"]["generation_language"] == "japanese"
+
+    update_response = client.patch(
+        f"{MAILS_URL}/draft-generation-standard-prompt",
+        json={
+            "standard_prompt": "Use concise academic English.\n",
+            "generation_language": "english",
+        },
+    )
+
+    assert update_response.status_code == 200
+    assert update_response.json()["data"]["standard_prompt"] == (
+        "Use concise academic English."
+    )
+    assert update_response.json()["data"]["generation_language"] == "english"
+    read_response = client.get(f"{MAILS_URL}/draft-generation-standard-prompt")
+    assert read_response.status_code == 200
+    assert read_response.json()["data"]["standard_prompt"] == (
+        "Use concise academic English."
+    )
+    assert read_response.json()["data"]["generation_language"] == "english"
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT value_json
+            FROM app_settings
+            WHERE key = 'mail_draft_generation_standard_prompt'
+            """
+        ).fetchone()
+        language_row = connection.execute(
+            """
+            SELECT value_json
+            FROM app_settings
+            WHERE key = 'mail_draft_generation_language'
+            """
+        ).fetchone()
+    assert row == ('"Use concise academic English."',)
+    assert language_row == ('"english"',)
+
+
+def test_generate_reply_draft_uses_language_policy_without_auto_retry(
     client,
     database_path,
     monkeypatch,
@@ -964,21 +1354,18 @@ def test_generate_reply_draft_retries_when_language_does_not_match_source(
     import importlib
 
     mails_module = importlib.import_module("caseclosed.mails")
+    provider_module = importlib.import_module("caseclosed.services.llm_provider")
 
-    class LanguageRetryProvider:
+    class CapturingDraftProvider:
         provider_name = "test"
-        model_name = "language-retry-test"
+        model_name = "language-policy-test"
 
         def __init__(self) -> None:
             self.calls = []
 
         def complete_json(self, *, function_type, input_payload):
             self.calls.append(dict(input_payload))
-            body = (
-                "承知しました。明日までに確認します。"
-                if len(self.calls) == 1
-                else "Thank you for the agenda. I will review it by tomorrow."
-            )
+            body = "承知しました。確認します。"
             output = {
                 "schema_version": "1.0",
                 "subject": "Re: Agenda review",
@@ -986,7 +1373,7 @@ def test_generate_reply_draft_retries_when_language_does_not_match_source(
                 "reasoning_summary": "Generated test draft.",
                 "warnings": [],
             }
-            return mails_module.LlmProviderResponse(
+            return provider_module.LlmProviderResponse(
                 output=output,
                 output_preview=body,
                 prompt_tokens=10,
@@ -995,7 +1382,7 @@ def test_generate_reply_draft_retries_when_language_does_not_match_source(
                 estimated_cost=0.1,
             )
 
-    provider = LanguageRetryProvider()
+    provider = CapturingDraftProvider()
     monkeypatch.setattr(
         mails_module,
         "build_mail_draft_generation_provider",
@@ -1003,8 +1390,8 @@ def test_generate_reply_draft_retries_when_language_does_not_match_source(
     )
     reply_to_message_id = ingest_mail(
         client,
-        gmail_message_id="gmail_language_retry_source",
-        gmail_thread_id="thread_language_retry_source",
+        gmail_message_id="gmail_language_policy_source",
+        gmail_thread_id="thread_language_policy_source",
         from_address="sender@example.com",
         subject="Agenda review",
         body_text=(
@@ -1013,6 +1400,11 @@ def test_generate_reply_draft_retries_when_language_does_not_match_source(
         ),
         received_at="2026-05-23T15:00:00+09:00",
     )
+    setting_response = client.patch(
+        f"{MAILS_URL}/draft-generation-standard-prompt",
+        json={"generation_language": "english"},
+    )
+    assert setting_response.status_code == 200
 
     response = client.post(
         f"{MAILS_URL}/generate-draft",
@@ -1028,21 +1420,25 @@ def test_generate_reply_draft_retries_when_language_does_not_match_source(
     )
 
     assert response.status_code == 200
-    assert response.json()["data"]["body_text"].startswith("Thank you")
-    assert len(provider.calls) == 2
+    assert response.json()["data"]["body_text"] == "承知しました。確認します。"
+    assert len(provider.calls) == 1
     assert provider.calls[0]["reply_language"] == "English"
+    assert provider.calls[0]["language_generation_prompt"] == "英語で生成してください。"
     assert "reply to an English email" in provider.calls[0]["language_policy"]
-    assert "Regenerate" in provider.calls[1]["language_retry_instruction"]
-    assert "English" in provider.calls[1]["language_retry_instruction"]
     with sqlite3.connect(database_path) as connection:
         llm_run_row = connection.execute(
             """
-            SELECT retry_count, prompt_tokens, completion_tokens, total_tokens
+            SELECT retry_count, prompt_tokens, completion_tokens, total_tokens,
+                   input_source_json, input_diagnostic_json
             FROM llm_runs
             WHERE function_type = 'reply_draft_generation'
             """
         ).fetchone()
-    assert llm_run_row == (1, 20, 10, 30)
+    assert llm_run_row[:4] == (0, 10, 5, 15)
+    assert json.loads(llm_run_row[4])["generation_language"] == "english"
+    assert json.loads(llm_run_row[5])["language_generation_prompt"] == (
+        "英語で生成してください。"
+    )
 
 
 def test_mail_detail_keeps_mailing_list_as_from_contact_and_uses_reply_to_sender(
@@ -1790,6 +2186,25 @@ def test_request_mail_summary_queues_for_unclassified_mail(
     assert payload["message_id"] == message_id
     assert payload["force"] is True
     assert payload["reason"] == "manual_request"
+
+
+def test_mail_detail_reports_active_summary_job(
+    client,
+) -> None:
+    message_id = create_known_sender_mail(
+        client,
+        subject="Summary job visible",
+        body_text="The detail view should show that summary is still running.",
+    )
+
+    summary_response = client.post(f"{MAILS_URL}/{message_id}/summary")
+    detail_response = client.get(f"{MAILS_URL}/{message_id}")
+
+    assert summary_response.status_code == 200
+    assert detail_response.status_code == 200
+    summary_jobs = detail_response.json()["data"]["summary_jobs"]
+    assert summary_jobs[message_id]["job_id"] == summary_response.json()["data"]["job_id"]
+    assert summary_jobs[message_id]["status"] == "pending"
 
 
 def test_request_mail_summary_rejects_pinned_mail(client) -> None:

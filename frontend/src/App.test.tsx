@@ -598,6 +598,45 @@ describe('Phase 4 mail screen', () => {
     )
   })
 
+  it('warns before sending when the body mentions attachments without files', async () => {
+    const user = userEvent.setup()
+    window.history.pushState({}, '', '/mail/compose')
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    let sendRequested = false
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request) => {
+        const path = input.toString()
+        if (path === '/api/v1/auth/session') {
+          return activeSessionResponse()
+        }
+        if (path === '/api/v1/mails/send') {
+          sendRequested = true
+          return apiResponse(500, {
+            ok: false,
+            error: { code: 'UNEXPECTED_SEND', message: 'Unexpected send.' },
+          })
+        }
+        throw new Error(`Unexpected request: ${path}`)
+      }),
+    )
+
+    render(<App />)
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Compose Mail' }),
+    ).toBeInTheDocument()
+    await user.type(screen.getByLabelText('To'), 'receiver@example.com')
+    await user.type(screen.getByLabelText('Body'), '資料を添付します。')
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+
+    expect(confirmSpy).toHaveBeenCalledWith(
+      'This message mentions an attachment, but no files are attached. Send anyway?',
+    )
+    expect(sendRequested).toBe(false)
+    confirmSpy.mockRestore()
+  })
+
   it('ingests a mock mail and opens the detail view', async () => {
     const user = userEvent.setup()
     const createdMail = {
@@ -1165,6 +1204,218 @@ describe('Phase 4 mail screen', () => {
     expect(await screen.findByText(/堀江さん/)).toBeInTheDocument()
   })
 
+  it('renders newsletter HTML when the plain text part uses markdown links', async () => {
+    const newsletterMail = {
+      id: 'mail_ieee_newsletter',
+      gmail_message_id: 'gmail_ieee_newsletter',
+      gmail_thread_id: 'thread_ieee_newsletter',
+      thread_id: 'thread_ieee_newsletter',
+      received_at: '2026-05-30T08:00:00+09:00',
+      received_date: '2026-05-30',
+      subject: 'Get Published in the New IEEE Open Journal of Engineering in Medicine and Biology',
+      from_address: 'ieee@example.com',
+      from_name: 'IEEE',
+      sender_address: null,
+      reply_to_address: null,
+      list_id: null,
+      processed_status: 'unprocessed',
+      read_status: 'unread',
+      read_at: null,
+      user_importance: null,
+      effective_importance: 'middle',
+      importance_rank: 2,
+      external_importance: null,
+      suggested_importance: null,
+      llm_run_id: null,
+      pending_reason: null,
+      to_addresses: ['me@example.com'],
+      cc_addresses: [],
+      bcc_addresses: [],
+      message_id_header: '<ieee-newsletter@example.com>',
+      in_reply_to_header: null,
+      references_header: null,
+      snippet: 'Highlights of April 2026',
+      gmail_link: null,
+      external_starred: false,
+      gmail_labels: ['INBOX'],
+      body_text: [
+        'To view this email as a webpage, [click here](https://example.com/view).',
+        '',
+        'Highlights of April 2026',
+        '',
+        '[Stain Consistency Learning: Handling Stain Variation for Automatic Digital Pathology Segmentation](https://example.com/paper)',
+        '',
+        'Author resources and submission guidance are available now.',
+        '',
+        'Submit your work to the open journal.',
+      ].join('\n'),
+      body_html: [
+        '<!doctype html><html><body>',
+        '<p>To view this email as a webpage, <a href="https://example.com/view">click here</a>.</p>',
+        '<h1>Highlights of April 2026</h1>',
+        '<a href="https://example.com/paper">Stain Consistency Learning: Handling Stain Variation for Automatic Digital Pathology Segmentation</a>',
+        '<p>Author resources and submission guidance are available now.</p>',
+        '<p>Submit your work to the open journal.</p>',
+        '</body></html>',
+      ].join(''),
+      created_at: '2026-05-30T08:00:00+09:00',
+      updated_at: '2026-05-30T08:00:00+09:00',
+      version: 1,
+    }
+    const detailPayload = {
+      message: newsletterMail,
+      thread_messages: [newsletterMail],
+      scheduled_send_requests: [],
+      user_state: {
+        user_importance: null,
+        processed_status: 'unprocessed',
+        processed_at: null,
+        read_status: 'unread',
+        read_at: null,
+        version: 1,
+      },
+      auto_state: {
+        external_importance: null,
+        suggested_importance: null,
+        llm_run_id: null,
+        effective_importance: 'middle',
+        pending_reason: null,
+      },
+      summary: null,
+      available_actions: [],
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        const path = input.toString()
+        if (path === '/api/v1/auth/session') {
+          return activeSessionResponse()
+        }
+        if (path === '/api/v1/mails/mail_ieee_newsletter') {
+          return apiResponse(200, { ok: true, data: detailPayload })
+        }
+        if (path === '/api/v1/mails/mail_ieee_newsletter/read' && init?.method === 'POST') {
+          return apiResponse(200, { ok: true, data: detailPayload })
+        }
+        throw new Error(`Unexpected request: ${path} ${init?.method ?? 'GET'}`)
+      }),
+    )
+    window.history.pushState({}, '', '/mail/mail_ieee_newsletter')
+
+    render(<App />)
+
+    expect(
+      await screen.findByTitle('HTML mail body'),
+    ).toHaveClass('mail-thread-html-body')
+    expect(
+      screen.queryByText(/\[click here\]\(https:\/\/example\.com\/view\)/),
+    ).not.toBeInTheDocument()
+  })
+
+  it('renders markdown table mail bodies as tables without using heading-only markdown detection', async () => {
+    const joblistMail = {
+      id: 'mail_joblist_markdown',
+      gmail_message_id: 'gmail_joblist_markdown',
+      gmail_thread_id: 'thread_joblist_markdown',
+      thread_id: 'thread_joblist_markdown',
+      received_at: '2026-05-29T08:00:00+09:00',
+      received_date: '2026-05-29',
+      subject: '[Joblist] @kdesleep-code - 2026-05-29 JST',
+      from_address: 'joblist@example.com',
+      from_name: 'Joblist',
+      sender_address: null,
+      reply_to_address: null,
+      list_id: null,
+      processed_status: 'unprocessed',
+      read_status: 'unread',
+      read_at: null,
+      user_importance: null,
+      effective_importance: 'middle',
+      importance_rank: 2,
+      external_importance: null,
+      suggested_importance: null,
+      llm_run_id: null,
+      pending_reason: null,
+      to_addresses: ['me@example.com'],
+      cc_addresses: [],
+      bcc_addresses: [],
+      message_id_header: '<joblist@example.com>',
+      in_reply_to_header: null,
+      references_header: null,
+      snippet: 'Joblist',
+      gmail_link: null,
+      external_starred: false,
+      gmail_labels: ['INBOX'],
+      body_text: [
+        '@kdesleep-code さんの Joblist（2026-05-29 JST 自動生成）',
+        '',
+        '# Joblist for @kdesleep-code',
+        '_Generated: 2026-05-29 JST_',
+        '',
+        '| # | Title | Due | Link |',
+        '|---|-------|-----|------|',
+        '| 59 | [To-do] 居室の掃除 | 2025-06-15 | [link](https://github.com/KDE-Sleep/To-do/issues/59) |',
+        '| 6 | [To-do] いい加減にEnsembleの論文を書く | 2025-10-14 | [link](https://github.com/KDE-Sleep/To-do/issues/6) |',
+        '',
+        '> 期日は Issue フォームの「期日 / Due Date」に YYYY-MM-DD で入力してください。',
+      ].join('\n'),
+      body_html: '<html><body><p>Server generated HTML exists.</p></body></html>',
+      created_at: '2026-05-29T08:00:00+09:00',
+      updated_at: '2026-05-29T08:00:00+09:00',
+      version: 1,
+    }
+    const detailPayload = {
+      message: joblistMail,
+      thread_messages: [joblistMail],
+      scheduled_send_requests: [],
+      user_state: {
+        user_importance: null,
+        processed_status: 'unprocessed',
+        processed_at: null,
+        read_status: 'unread',
+        read_at: null,
+        version: 1,
+      },
+      auto_state: {
+        external_importance: null,
+        suggested_importance: null,
+        llm_run_id: null,
+        effective_importance: 'middle',
+        pending_reason: null,
+      },
+      summary: null,
+      available_actions: [],
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        const path = input.toString()
+        if (path === '/api/v1/auth/session') {
+          return activeSessionResponse()
+        }
+        if (path === '/api/v1/mails/mail_joblist_markdown') {
+          return apiResponse(200, { ok: true, data: detailPayload })
+        }
+        if (path === '/api/v1/mails/mail_joblist_markdown/read' && init?.method === 'POST') {
+          return apiResponse(200, { ok: true, data: detailPayload })
+        }
+        throw new Error(`Unexpected request: ${path} ${init?.method ?? 'GET'}`)
+      }),
+    )
+    window.history.pushState({}, '', '/mail/mail_joblist_markdown')
+
+    render(<App />)
+
+    expect(await screen.findByRole('table')).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Title' })).toBeInTheDocument()
+    expect(screen.getByRole('cell', { name: '[To-do] 居室の掃除' })).toBeInTheDocument()
+    expect(screen.getAllByRole('link', { name: 'link' })[0]).toHaveAttribute(
+      'href',
+      'https://github.com/KDE-Sleep/To-do/issues/59',
+    )
+    expect(screen.queryByTitle('HTML mail body')).not.toBeInTheDocument()
+  })
+
   it('blocks the mail list when pending contacts remain', async () => {
     const fetchMock = vi.fn((input: string | URL | Request) => {
       const path = input.toString()
@@ -1605,7 +1856,6 @@ describe('Phase 2 maintenance screen', () => {
     expect(
       screen.getByRole('heading', { name: 'Storage history' }),
     ).toBeInTheDocument()
-    expect(screen.getByText('7d ago')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: /Running jobs 0/ }))
     expect(
       screen.getByRole('heading', { name: 'Running jobs history' }),
@@ -1973,6 +2223,8 @@ describe('Phase 3 contacts screen', () => {
     expect(screen.queryByRole('link', { name: 'Pending' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'New Contact' })).toBeInTheDocument()
     expect(screen.getByLabelText('Sort contacts')).toHaveValue('name')
+    expect(screen.getByRole('option', { name: 'Latest mail' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Most mail received' })).toBeInTheDocument()
     expect(screen.queryByRole('option', { name: 'Status' })).not.toBeInTheDocument()
     expect(screen.getByRole('tablist', { name: 'Contact List views' })).toBeInTheDocument()
     const tabList = screen.getByRole('tablist', { name: 'Contact List views' })
@@ -2021,6 +2273,102 @@ describe('Phase 3 contacts screen', () => {
     await user.type(screen.getByLabelText('Search contacts'), 'Example missing')
     expect(screen.queryByText('Example Student')).not.toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Pending Contacts' })).not.toBeInTheDocument()
+  })
+
+  it('shows the reference value used by contact sort modes', async () => {
+    const user = userEvent.setup()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request) => {
+        const path = input.toString()
+        if (path === '/api/v1/auth/session') {
+          return activeSessionResponse()
+        }
+        if (path === '/api/v1/contacts/custom-tabs') {
+          return apiResponse(200, {
+            ok: true,
+            data: { items: [] },
+          })
+        }
+        if (path === '/api/v1/contacts') {
+          return apiResponse(200, {
+            ok: true,
+            data: {
+              items: [
+                {
+                  id: 'contact_old',
+                  display_name: 'Old Mail',
+                  avatar_url: null,
+                  user_memo: null,
+                  status: 'active',
+                  tags: [],
+                  email_addresses: [],
+                  latest_received_at: '2026-05-20T09:00:00+09:00',
+                  inbound_message_count: 12,
+                  created_at: '2026-05-23T09:00:00+09:00',
+                  updated_at: '2026-05-23T09:00:00+09:00',
+                  version: 1,
+                },
+                {
+                  id: 'contact_new',
+                  display_name: 'New Mail',
+                  avatar_url: null,
+                  user_memo: null,
+                  status: 'active',
+                  tags: [],
+                  email_addresses: [],
+                  latest_received_at: '2026-05-29T09:00:00+09:00',
+                  inbound_message_count: 4,
+                  created_at: '2026-05-23T09:00:00+09:00',
+                  updated_at: '2026-05-23T09:00:00+09:00',
+                  version: 1,
+                },
+                {
+                  id: 'contact_quiet',
+                  display_name: 'Quiet Contact',
+                  avatar_url: null,
+                  user_memo: null,
+                  status: 'active',
+                  tags: [],
+                  email_addresses: [],
+                  latest_received_at: null,
+                  inbound_message_count: 0,
+                  created_at: '2026-05-23T09:00:00+09:00',
+                  updated_at: '2026-05-23T09:00:00+09:00',
+                  version: 1,
+                },
+              ],
+            },
+          })
+        }
+
+        throw new Error(`Unexpected request: ${path}`)
+      }),
+    )
+
+    render(<App />)
+
+    expect(await screen.findByText('New Mail')).toBeInTheDocument()
+
+    await user.selectOptions(screen.getByLabelText('Sort contacts'), 'latest_mail')
+    expect(screen.getByText('Latest mail: 2026-05-29')).toBeInTheDocument()
+    expect(screen.getByText('Latest mail: 2026-05-20')).toBeInTheDocument()
+    expect(screen.getByText('Latest mail: -')).toBeInTheDocument()
+    expect(
+      within(screen.getByRole('tabpanel', { name: 'active Contact List' }))
+        .getAllByRole('heading', { level: 3 })
+        .map((heading) => heading.textContent),
+    ).toEqual(['New Mail', 'Old Mail', 'Quiet Contact'])
+
+    await user.selectOptions(screen.getByLabelText('Sort contacts'), 'mail_count')
+    expect(screen.getByText('12 received')).toBeInTheDocument()
+    expect(screen.getByText('4 received')).toBeInTheDocument()
+    expect(screen.getByText('0 received')).toBeInTheDocument()
+    expect(
+      within(screen.getByRole('tabpanel', { name: 'active Contact List' }))
+        .getAllByRole('heading', { level: 3 })
+        .map((heading) => heading.textContent),
+    ).toEqual(['Old Mail', 'New Mail', 'Quiet Contact'])
   })
 
   it('filters contacts by status tabs and custom tag tabs', async () => {
@@ -2555,7 +2903,11 @@ describe('Phase 3 contacts screen', () => {
 
     await user.click(screen.getByRole('heading', { name: 'Example Student' }))
     await user.click(screen.getByRole('button', { name: 'Edit contact' }))
-    expect(screen.getByRole('button', { name: 'Update avatar' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Update avatar' })).toBeEnabled()
+    expect(screen.getByLabelText('Contact image file')).toHaveAttribute(
+      'type',
+      'file',
+    )
     expect(screen.queryByLabelText('Contact type')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Clear contact display name' }))
     expect(screen.getByLabelText('Contact display name')).toHaveValue('')

@@ -580,57 +580,109 @@ API:
 
 DB:
 
-- files
 - storage_objects
-- file_links
-- file_versions
-- file_security_rules
+- storage_locations
+- storage_directories
+- gmail_message_attachments
+- storage_operation_history
+- storage_object_versions
+- file_version_diffs
+- file_links（Phase 7のCase連携で拡張）
+- file_security_rules（LLM Policy本格化時に拡張）
 - file_summaries
-- attachment_fetch_jobs
+- attachment_fetch_jobs（専用テーブルは未採用。現状は `jobs.job_type = mail_attachment_fetch` で実装）
 
 API:
 
-- `GET /files`
-- `GET /files/{id}`
-- `POST /files/upload`
-- `POST /attachments/{id}/fetch`
-- `POST /files/{id}/summarize`
-- `PATCH /files/{id}/llm-policy`
-- `POST /files/{id}/trash`
-- `POST /files/{id}/restore`
-- `DELETE /files/{id}`
+- `GET /files`（フロントルート。APIは `/api/v1/storage/objects`）
+- `GET /files/{id}`（フロントルート。APIは `/api/v1/storage/objects/{id}`）
+- `POST /api/v1/storage/objects/upload`
+- `POST /api/v1/storage/objects`
+- `GET /api/v1/storage/objects/{id}/content`
+- `GET /api/v1/storage/objects/{id}/versions`
+- `POST /api/v1/storage/objects/{id}/versions/upload`
+- `PATCH /api/v1/storage/objects/{id}/llm-input`
+- `PATCH /api/v1/storage/objects/{id}/directory`
+- `DELETE /api/v1/storage/objects/{id}`
+- `GET /api/v1/storage/directories`
+- `POST /api/v1/storage/directories`
+- `DELETE /api/v1/storage/directories/{id}`
+- `GET /api/v1/storage/search/objects`
+- `GET /api/v1/mails/attachments/{id}/download`
+- `POST /api/v1/mails/attachments/{id}/move-to-storage`
+- `POST /api/v1/mails/attachments/{id}/fetch-job`
+- `GET /api/v1/maintenance/storage-operation-history`
+- `GET /api/v1/storage/objects/{id}/llm-digest`
+- `POST /api/v1/storage/objects/{id}/llm-digest`
 
 画面:
 
-- File一覧
-- File詳細
+- Storage一覧
+- Storage詳細
+- Storage検索・拡張子フィルタ・ディレクトリ操作
 - Mail添付カード
-- Storage設定
-- LLM Policy設定
+- Mail添付のバックグラウンド取得メニュー
+- 添付元メールカード
+- Maintenance / Debug のStorage操作履歴
+- Storage設定（Maintenance上の表示のみ。本格UIはPhase 9で対応）
+- LLM input許可/ブロック切替
+- Storage詳細でのドラッグ&ドロップ更新、バージョン選択表示、選択バージョンのダウンロード
+- Storage詳細でのLLM Digest生成・表示
+- Storage詳細でのVersion Difference折りたたみ表示
 
 LLM:
 
-- file_security_meta_classification
-- file_summary
+- file_security_meta_classification（保留）
+- file_summary（Storage詳細の Prepare LLM Digest として実装）
+
+### 現在仕様
+
+- ファイル削除は、現時点では物理ファイル削除を正とする。
+- 削除後も `storage_objects` のDBメタ情報は `status = deleted` として残す。
+- `trash / restore / purge` の3段階モデルは採用しない。必要になった時点で再検討する。
+- 物理削除・アップロード・移動・ダウンロード・LLM input設定変更などの操作履歴を `storage_operation_history` に保存する。
+- 操作履歴は当面 Maintenance / Debug に直近履歴として表示する。
+- Storage詳細画面へファイルをドロップすると、同じ `storage_objects.id` のまま現在ファイルを更新する。
+- 更新前の物理ファイルとメタ情報は `storage_object_versions` に保存する。
+- ドロップ更新時に拡張子が異なる場合は、フロント側で確認を挟む。
+- ドロップ更新時に内容hashが同一の場合は更新をスキップし、履歴に `update_skipped` を残す。
+- Storage詳細ではプルダウンで現在版/旧版を切り替え、選択したバージョンをプレビュー・ダウンロードする。
+- Storage一覧からのダウンロードは常に最新版を対象とする。
+- ファイル本文の保存時刻は `storage_objects.file_updated_at` で管理し、LLM input設定変更などのメタ情報更新時刻とは分離する。
+- 旧版を選択中は、選択版を含めてそれ以前のバージョンを削除でき、削除後は最新版表示へ戻る。
+- Prepare LLM Digestは、ファイル本文を後続LLMへ再投入するための圧縮済み中間表現を作る機能として扱う。
+- LLM Digestは、人間向けの1行説明・最大5項目の要約・後続LLM用の `llm_digest` / `structured_digest_json` / `coverage_json` を保存する。
+- LLM Digestの本文抽出は拡張子/形式ごとの抽出ブロックを通す。現状はテキスト、ZIP構造、PDF本文、DOCX本文（依存ライブラリ利用時）を扱い、未対応形式は `coverage_json` に制約を残す。
+- ファイル更新後、対象版のDigestが未生成で過去版のDigestが存在する場合は、最新の過去Digestとそこから対象版までの差分チェーンをLLM入力にして増分Digestを生成する。
+- 対象版に既にDigestがある状態でユーザーが明示的に再生成する場合は、対象版の本文抽出結果から全文ベースで再生成する。
+- ファイル更新時はLLMを使わずに前後の抽出テキスト差分を `file_version_diffs` に保存する。
+- Storage詳細のVersion Differenceは、表示中バージョンに至る差分をデフォルト折りたたみで表示し、展開時は変更行の前後だけを残して長い無変更部分を省略する。
 
 ### 完了条件
 
 - ファイルをローカル保存できる
 - 物理保存はIDベースで、元ファイル名とは分離される
 - メール添付を必要時に取得・保存できる
+- メール添付取得をJob化でき、失敗時はMaintenanceのJob一覧で確認できる
 - 添付元メールを辿れる
-- LLM Policyを設定できる
-- forbiddenはLLM投入不可
-- trash / restore / purgeが区別される
-- purge後もDBメタ情報は残る
-- 保存失敗・取得失敗がMaintenanceで見える
+- LLM input可否を設定できる
+- `llm_input_allowed = false` のファイルは、後続のFile LLM入力対象から除外する
+- 削除時に物理ファイルは削除される
+- 削除後もDBメタ情報と操作履歴は残る
+- Storage操作履歴がMaintenance / Debugで確認できる
+- Storage詳細からファイルを更新でき、旧版を選択して表示・ダウンロードできる
+- Storage詳細からLLM Digestを生成し、ファイル説明と短い要約を確認できる
+- Storage詳細で更新差分を確認でき、長いファイルでも差分周辺だけを確認できる
+- 保存失敗・取得失敗がMaintenanceで見える（未実装。attachment_fetch_jobs導入時に強化）
 
 ### レビュー観点
 
 - ファイルがどこに保存されたか理解できるか
 - メール添付の保存操作が自然か
-- LLM Policyが怖くないか
-- 誤削除しにくいか
+- LLM input許可/ブロックの扱いが怖くないか
+- 物理削除前の確認が十分か
+- ファイル更新時に別ファイルを誤って差し替えるリスクが十分に抑えられているか
+- 削除・移動・取得などの操作履歴が追跡できるか
 - 後続のCase連携に必要なメタ情報が足りているか
 
 ---
@@ -659,8 +711,8 @@ API:
 - `GET /cases/{id}/mails`
 - `POST /cases/{id}/mails`
 - `DELETE /cases/{id}/mails/{message_id}`
-- `GET /cases/{id}/files`
-- `POST /cases/{id}/files`
+- `GET /cases/{id}/files`（Phase 7でStorage object連携として設計）
+- `POST /cases/{id}/files`（Phase 7でStorage object連携として設計）
 
 画面:
 
@@ -1187,8 +1239,9 @@ CaseClosedの設計書群に従って、[機能名] を実装してください�
 
 - 添付ファイルを保存・再参照できるか
 - Fileの保存場所と元メールが辿れるか
-- LLM Policyが効いているか
-- purge後もメタ情報が残るか
+- LLM input許可/ブロックが効いているか
+- 物理削除後もDBメタ情報が残るか
+- Storage操作履歴がMaintenance / Debugで確認できるか
 
 ## Phase 7
 
@@ -1251,20 +1304,34 @@ Gmail本文をDB保存できる
 Pending中はLLM自動処理が止まる
 ```
 
-現状はPhase 4を越えて、Phase 5のMail IntelligenceとPhase 10のGmail送信機能の一部まで先行実装済みである。
+現状はPhase 4を越えて、Phase 5のMail Intelligence、Phase 6のStorage基盤、Phase 10のGmail送信機能の一部まで先行実装済みである。
 
-次の主目標はPhase 6: File / Storage基盤とする。
+Phase 6のStorage基盤は、手元ファイル・メール添付・Contact画像・Storage一覧/詳細/検索/ディレクトリ・添付元メール参照・LLM input許可切替・物理削除・Storage操作履歴・ファイル更新バージョン管理・LLM Digest・Version Differenceまで実装済みである。
+
+Phase 6で未実装として残すもの:
+
+```text
+□ file_security_meta_classification
+■ file_summary
+□ Storage設定UIの本格化（Phase 9）
+□ 保存失敗・取得失敗のMaintenance表示強化
+□ Phase 7のCase連携に合わせたfile_links拡張
+```
+
+次の主目標はPhase 6残件のうち、`file_security_meta_classification` を保留したままPhase 7: Case連携へ進むこと、またはPhase 9でStorage設定UI・Maintenance表示を強化することとする。
 
 Phase 6開始時に特に確認する:
 
 ```text
-□ 保存先ルートと容量方針
-□ 物理ファイル名をIDベースにする方針
-□ 元ファイル名・MIME・サイズ・hashの保存方針
-□ メール添付をいつ取得するか
-□ LLM投入可否Policyの初期値
-□ trash / restore / purgeの責務分離
-□ 保存失敗・取得失敗のMaintenance表示
+■ 保存先ルートと容量方針
+■ 物理ファイル名をIDベースにする方針
+■ 元ファイル名・MIME・サイズ・hashの保存方針
+■ メール添付をいつ取得するか
+■ LLM投入可否Policyの初期値
+■ 物理削除を正とし、DBメタ情報と操作履歴を残す方針
+■ Storage操作履歴のMaintenance / Debug表示
+■ 添付取得Jobを既存jobsへ載せ、失敗をMaintenance Job一覧で見えるようにする方針
+□ 保存失敗・取得失敗のMaintenance表示強化
 ```
 
 

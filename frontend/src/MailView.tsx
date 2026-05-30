@@ -13,8 +13,10 @@ import type { MessageKey } from './i18n'
 import { AppLink, navigateTo } from './navigation'
 import defaultContactAvatarUrl from './assets/default-contact-avatar.svg'
 import defaultMailingListAvatarUrl from './assets/default-mailing-list-avatar.svg'
+import defaultSpamAvatarUrl from './assets/default-spam-avatar.webp'
 import unknownContactAvatarUrl from './assets/default-unknown-contact-avatar.svg'
 import llmBlockedIconUrl from './assets/llm-blocked.svg'
+import paperclipDiagonalUrl from './assets/paperclip-diagonal.svg'
 import needsActionClearTanukiUrl from './assets/needs-action-clear-tanuki.png'
 
 export type MailTab = 'unprocessed' | 'processed' | 'skip'
@@ -134,9 +136,11 @@ function senderAvatarUrl(mail: MailListItem) {
   }
   return (
     mail.sender_contact.avatar_url ??
-    (mail.sender_contact.kind === 'mailing_list'
-      ? defaultMailingListAvatarUrl
-      : defaultContactAvatarUrl)
+    (mail.sender_contact.status === 'spam'
+      ? defaultSpamAvatarUrl
+      : mail.sender_contact.kind === 'mailing_list'
+        ? defaultMailingListAvatarUrl
+        : defaultContactAvatarUrl)
   )
 }
 
@@ -283,6 +287,7 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isBusy, setIsBusy] = useState(false)
+  const [isListLoading, setIsListLoading] = useState(false)
   const [isGmailImporting, setIsGmailImporting] = useState(false)
   const [lastAutoImportRunAt, setLastAutoImportRunAt] = useState<string | null>(null)
   const [lastAutoImportError, setLastAutoImportError] = useState<string | null>(null)
@@ -347,6 +352,7 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
     const page = await listMailPage(listFilters())
     setMails(page.items)
     setNextCursor(page.next_cursor)
+    setError(null)
   }
 
   async function refreshMailData() {
@@ -557,6 +563,8 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
       return
     }
     let isMounted = true
+    setError(null)
+    setIsListLoading(true)
     Promise.allSettled([
       listMailPage(listFilters()),
       listMailDates(activeTab),
@@ -567,6 +575,7 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
           if (pageResult.status === 'fulfilled') {
             setMails(pageResult.value.items)
             setNextCursor(pageResult.value.next_cursor)
+            setError(null)
           } else {
             setError(describeError(pageResult.reason))
           }
@@ -581,6 +590,11 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
       .catch((requestError) => {
         if (isMounted) {
           setError(describeError(requestError))
+        }
+      })
+      .finally(() => {
+        if (isMounted) {
+          setIsListLoading(false)
         }
       })
 
@@ -638,10 +652,16 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
 
   function handleSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    setError(null)
+    setNotice(null)
+    setMails([])
+    setNextCursor(null)
     setSearchQuery(searchText)
   }
 
   function clearSearch() {
+    setError(null)
+    setNotice(null)
     setSearchText('')
     setSearchQuery('')
   }
@@ -833,10 +853,14 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
                 </div>
 
                 {visibleMails.length === 0 ? (
-                  isActionNeededMode ? (
+                  isListLoading ? (
+                    <p className="mail-empty">{t('mail.loading')}</p>
+                  ) : isActionNeededMode ? (
                     <div className="mail-empty mail-empty-action-needed">
                       <img alt={t('mail.actionNeeded.emptyAlt')} src={needsActionClearTanukiUrl} />
                     </div>
+                  ) : isSearchMode ? (
+                    <p className="mail-empty">{t('mail.search.empty')}</p>
                   ) : (
                     <p className="mail-empty">{t('mail.empty')}</p>
                   )
@@ -928,6 +952,15 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
                                   <span className="visually-hidden">{t('mail.llmBlocked')}</span>
                                 </span>
                               )}
+                              {mail.has_attachments === true && (
+                                <span
+                                  aria-label={t('mail.attachmentsPresent')}
+                                  className="mail-attachment-indicator"
+                                  title={t('mail.attachmentsPresent')}
+                                >
+                                  <img alt="" src={paperclipDiagonalUrl} />
+                                </span>
+                              )}
                               {(mail.case_links ?? []).length > 0 ? (
                                 mail.case_links?.map((caseLink) => (
                                   <span key={caseLink.id}>{caseLink.title}</span>
@@ -1003,14 +1036,15 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
                   const count = mailDateCounts.get(date) ?? 0
                   const hasMail = count > 0
                   const hasUnloadedMail = autoImportUnloadedDates.has(date)
+                  const canOpenDate = hasMail || hasUnloadedMail
                   return (
                     <button
                       aria-current={date === selectedDate ? 'date' : undefined}
-                      aria-label={hasMail ? t('mail.calendar.openDate', { date, count }) : date}
-                      className={`${hasMail ? 'mail-calendar-day' : 'mail-calendar-day mail-calendar-day-empty'}${
+                      aria-label={canOpenDate ? t('mail.calendar.openDate', { date, count }) : date}
+                      className={`${canOpenDate ? 'mail-calendar-day' : 'mail-calendar-day mail-calendar-day-empty'}${
                         hasUnloadedMail ? ' has-unloaded-mail' : ''
                       }`}
-                      disabled={!hasMail || isBusy}
+                      disabled={!canOpenDate || isBusy}
                       key={date}
                       onClick={() => jumpToMailDate(date)}
                       type="button"

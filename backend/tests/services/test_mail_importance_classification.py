@@ -570,6 +570,77 @@ def test_thread_summary_splits_long_input_and_integrates_partial_summaries() -> 
     assert len(provider.payloads[-1]["partial_summaries"]) == chunk_count
 
 
+def test_thread_summary_incremental_payload_uses_current_summary() -> None:
+    service = importlib.import_module("caseclosed.services.mail_thread_summary")
+
+    class CapturingThreadSummaryProvider:
+        provider_name = "test"
+        model_name = "thread-summary-incremental-test"
+
+        def __init__(self) -> None:
+            self.payloads = []
+
+        def complete_json(self, *, function_type, input_payload):
+            assert function_type == "mail_thread_summary"
+            self.payloads.append(input_payload)
+            output = {
+                "schema_version": "1.0",
+                "summary": "更新済み要約",
+                "translation": None,
+                "needs_action": True,
+                "next_action": "新規メールを確認する",
+                "key_points": ["既存要約に新規メールを統合"],
+                "reply_needed": False,
+                "confidence": 0.8,
+                "reasoning_summary": "Incremental summary.",
+                "warnings": [],
+            }
+            return LlmProviderResponse(
+                output=output,
+                output_preview=str(output["summary"]),
+                prompt_tokens=10,
+                completion_tokens=5,
+                total_tokens=15,
+                estimated_cost=0.1,
+            )
+
+    provider = CapturingThreadSummaryProvider()
+    response, chunk_count = service.complete_thread_summary(
+        provider,
+        thread_id="thread_1",
+        gmail_thread_id="gmail_thread_1",
+        subject="Incremental thread",
+        current_thread_summary={
+            "summary": "既存のスレッド要約",
+            "next_action": "待機",
+            "key_points": ["既存ポイント"],
+            "needs_action": False,
+        },
+        messages=[
+            {
+                "message_id": "mail_new",
+                "gmail_message_id": "gmail_new",
+                "received_at": "2026-05-28T10:00:00+09:00",
+                "subject": "Incremental thread",
+                "from_address": "sender@example.com",
+                "to_addresses_json": "[]",
+                "cc_addresses_json": "[]",
+                "snippet": "New",
+                "body_text": "This is the only newly arrived mail body.",
+                "importance": "middle",
+            }
+        ],
+    )
+
+    assert chunk_count == 1
+    assert response.output["summary"] == "更新済み要約"
+    assert provider.payloads[0]["summary_scope"] == "incremental_update"
+    assert provider.payloads[0]["current_thread_summary"]["summary"] == "既存のスレッド要約"
+    assert [message["message_id"] for message in provider.payloads[0]["messages"]] == [
+        "mail_new"
+    ]
+
+
 def test_openai_json_response_repairs_invalid_json_once(monkeypatch) -> None:
     provider_module = importlib.import_module("caseclosed.services.llm_provider")
 

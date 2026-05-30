@@ -726,18 +726,17 @@ Gmail添付メタ情報。
 id                          TEXT PRIMARY KEY
 message_id                   TEXT NOT NULL REFERENCES gmail_messages(id)
 gmail_attachment_id           TEXT NULL
+part_id                       TEXT NULL
 filename                     TEXT NOT NULL
 mime_type                    TEXT NULL
-size_bytes                   INTEGER NULL
-is_downloaded                INTEGER NOT NULL DEFAULT 0
-file_id                      TEXT NULL REFERENCES files(id)
+byte_size                    INTEGER NOT NULL DEFAULT 0
+storage_object_id             TEXT NULL REFERENCES storage_objects(id)
 created_at                   TEXT NOT NULL
 updated_at                   TEXT NOT NULL
+version                      INTEGER NOT NULL DEFAULT 1
 ```
 
-添付実体は、条件を満たした場合のみ取得する。
-
-取得条件:
+添付実体は必要時に取得し、取得済みの場合は `storage_object_id` でStorage objectへ紐づける。
 
 - High / Middleメールの添付
 - Caseが推定できたメールの添付
@@ -1327,87 +1326,151 @@ superseded
 
 ## 9.1 storage_objects
 
-物理保存オブジェクト。
+現行実装では、UI上のファイル系列と最新版の物理保存オブジェクトを兼ねる。
+Case連携前のPhase 6では `files` テーブルを分けず、`storage_objects.id` をファイル系列IDとして扱う。
 
 ```text
 id                      TEXT PRIMARY KEY
+directory_id             TEXT NULL REFERENCES storage_directories(id)
+location_id              TEXT NOT NULL REFERENCES storage_locations(id)
+scope                   TEXT NOT NULL              -- managed / tmp/gmail-attachments 等
+original_filename        TEXT NULL
+content_type             TEXT NULL
+byte_size                INTEGER NOT NULL
+sha256_hex               TEXT NOT NULL
 storage_path             TEXT NOT NULL UNIQUE
-sha256                   TEXT NULL
-size_bytes               INTEGER NULL
-mime_type                TEXT NULL
+llm_input_allowed        INTEGER NOT NULL DEFAULT 0
+source_type              TEXT NULL                 -- direct_upload / mail_attachment 等
+source_message_id        TEXT NULL REFERENCES gmail_messages(id)
+status                  TEXT NOT NULL DEFAULT 'active'
 created_at               TEXT NOT NULL
+updated_at               TEXT NOT NULL
+file_updated_at          TEXT NOT NULL
+version                  INTEGER NOT NULL DEFAULT 1
 ```
 
-物理配置はIDベースとする。
+物理配置はIDベースとし、元ファイル名と分離する。
 
 例:
 
 ```text
-storage/objects/ab/cd/{storage_object_id}
+storage/managed/ab/storage_object_{id}.ext
 ```
 
-## 9.2 files
+### 削除
 
-UI上のファイル概念。
+- 現時点では物理削除を正とする。
+- 削除後も `storage_objects.status = deleted` としてDBメタ情報を残す。
+- `trash / restore / purge` の3段階モデルは採用しない。必要になった時点で再検討する。
+
+## 9.2 storage_locations
+
+保存場所定義。
 
 ```text
 id                      TEXT PRIMARY KEY
-current_storage_object_id TEXT NULL REFERENCES storage_objects(id)
-original_filename        TEXT NOT NULL
-display_filename         TEXT NULL
-origin                  TEXT NOT NULL   -- mail/upload/generated/external_link
-origin_message_id         TEXT NULL REFERENCES gmail_messages(id)
-external_url             TEXT NULL
-llm_policy               TEXT NOT NULL DEFAULT 'confirm_required'
-trashed_at               TEXT NULL
-purged_at                TEXT NULL
+label                   TEXT NOT NULL
+kind                    TEXT NOT NULL DEFAULT 'internal'
+root_path               TEXT NOT NULL
+mount_hint              TEXT NULL
+marker_id               TEXT NULL
+status                  TEXT NOT NULL DEFAULT 'active'
 created_at               TEXT NOT NULL
 updated_at               TEXT NOT NULL
 version                  INTEGER NOT NULL DEFAULT 1
 ```
 
-### origin
+## 9.3 storage_directories
 
-```text
-mail
-upload
-generated
-external_link
-```
-
-### 削除
-
-- 通常削除は `trashed_at` を入れる。
-- 物理削除は `purged_at` を入れる。
-- 物理削除後もDBメタ情報は残す。
-
-## 9.3 file_versions
-
-ファイルのバージョン履歴。
+Storage一覧上のディレクトリ。
 
 ```text
 id                      TEXT PRIMARY KEY
-file_id                  TEXT NOT NULL REFERENCES files(id)
-storage_object_id         TEXT NOT NULL REFERENCES storage_objects(id)
-version_no               INTEGER NOT NULL
+parent_id               TEXT NULL REFERENCES storage_directories(id)
+directory_kind           TEXT NOT NULL DEFAULT 'normal'
+case_id                 TEXT NULL REFERENCES cases(id)
+name                    TEXT NOT NULL
+status                  TEXT NOT NULL DEFAULT 'active'
+created_at              TEXT NOT NULL
+updated_at              TEXT NOT NULL
+version                 INTEGER NOT NULL DEFAULT 1
+```
+
+## 9.4 storage_object_versions
+
+ファイル系列の旧版。Storage詳細へのドロップ更新時、更新前の最新版をここへ退避する。
+
+```text
+id                      TEXT PRIMARY KEY
+storage_object_id        TEXT NOT NULL REFERENCES storage_objects(id)
+version_number           INTEGER NOT NULL
+original_filename        TEXT NULL
+content_type             TEXT NULL
+byte_size                INTEGER NOT NULL
+sha256_hex               TEXT NOT NULL
+storage_path             TEXT NOT NULL UNIQUE
 created_at               TEXT NOT NULL
-created_by               TEXT NOT NULL
-note                     TEXT NULL
 ```
 
 ### 制約
 
 ```text
-UNIQUE(file_id, version_no)
+UNIQUE(storage_object_id, version_number)
 ```
 
-## 9.4 file_links
+## 9.5 storage_operation_history
+
+Storage操作履歴。
+
+```text
+id                      TEXT PRIMARY KEY
+storage_object_id        TEXT NULL
+operation_type           TEXT NOT NULL   -- uploaded / updated / viewed / downloaded / update_skipped 等
+actor                   TEXT NOT NULL DEFAULT 'system'
+scope                   TEXT NULL
+original_filename        TEXT NULL
+content_type             TEXT NULL
+byte_size                INTEGER NULL
+storage_path             TEXT NULL
+source_type              TEXT NULL
+source_message_id        TEXT NULL
+directory_id             TEXT NULL
+details_json             TEXT NULL
+created_at               TEXT NOT NULL
+```
+
+Maintenance / Debugで直近履歴を表示する。
+
+## 9.6 file_version_diffs
+
+ファイル更新時にLLMを使わず作成する、前後バージョンの抽出テキスト差分。
+
+```text
+id                      TEXT PRIMARY KEY
+storage_object_id        TEXT NOT NULL REFERENCES storage_objects(id)
+previous_version_id      TEXT NOT NULL REFERENCES storage_object_versions(id)
+previous_sha256_hex      TEXT NOT NULL
+current_sha256_hex       TEXT NOT NULL
+diff_kind                TEXT NOT NULL
+summary_text             TEXT NOT NULL
+added_lines_json         TEXT NOT NULL
+removed_lines_json       TEXT NOT NULL
+coverage_json            TEXT NOT NULL
+created_at               TEXT NOT NULL
+updated_at               TEXT NOT NULL
+version                  INTEGER NOT NULL DEFAULT 1
+```
+
+Storage詳細のVersion Differenceでは、表示中バージョンに至る差分を折りたたみ表示する。展開時は変更行の前後だけを表示し、離れた無変更部分は省略する。
+
+## 9.7 file_links
 
 ファイルとCase/Task/Mail等の関連。
+Phase 7のCase連携で拡張する。
 
 ```text
 id                  TEXT PRIMARY KEY
-file_id              TEXT NOT NULL REFERENCES files(id)
+storage_object_id    TEXT NOT NULL REFERENCES storage_objects(id)
 linked_type          TEXT NOT NULL   -- case/task/mail/contact
 linked_id            TEXT NOT NULL
 link_source          TEXT NOT NULL   -- user/system/mail_attachment/generated
@@ -1418,9 +1481,10 @@ deleted_at           TEXT NULL
 メール添付由来ファイルは、添付元メールのCaseリンクに応じて表示Caseが変わる。  
 そのため、メール添付ファイルについては `file_links` を固定所属として使うのではなく、メールリンク経由の表示も許す。
 
-## 9.5 file_security_rules
+## 9.8 file_security_rules
 
 ファイル名・送信者・Caseタグ等に基づくLLM policy判定ルール。
+Phase 6では保留し、LLM Policy本格化時に拡張する。
 
 ```text
 id                      TEXT PRIMARY KEY
@@ -1433,22 +1497,34 @@ created_at               TEXT NOT NULL
 updated_at               TEXT NOT NULL
 ```
 
-## 9.6 file_summaries
+## 9.9 file_summaries
 
-ファイル本文をLLMに投入して生成した要約。
+後続LLM入力用のファイルDigest。
 
-`llm_policy` により実行可否を制御する。
+`storage_objects.llm_input_allowed` により実行可否を制御する。
 
 ```text
 id                      TEXT PRIMARY KEY
-file_id                  TEXT NOT NULL REFERENCES files(id)
-summary_text             TEXT NOT NULL
-key_points_json          TEXT NULL
-action_items_json        TEXT NULL
-sensitive_content_warning INTEGER NOT NULL DEFAULT 0
+storage_object_id        TEXT NOT NULL REFERENCES storage_objects(id)
+storage_object_version_id TEXT NULL REFERENCES storage_object_versions(id)
+source_sha256_hex        TEXT NOT NULL
+source_filename          TEXT NULL
+source_content_type      TEXT NULL
+source_byte_size         INTEGER NOT NULL DEFAULT 0
+summary_type             TEXT NOT NULL DEFAULT 'llm_digest'
+file_description         TEXT NOT NULL
+summary_points_json      TEXT NOT NULL
+llm_digest               TEXT NOT NULL
+structured_digest_json   TEXT NOT NULL
+coverage_json            TEXT NOT NULL
+token_estimate           INTEGER NULL
 llm_run_id               TEXT NULL REFERENCES llm_runs(id)
 created_at               TEXT NOT NULL
+updated_at               TEXT NOT NULL
+version                  INTEGER NOT NULL DEFAULT 1
 ```
+
+Digestは生成時のファイル実体に紐づく。最新版が更新された場合、旧Digestは旧版のDigestとして残り、現在版にDigestがなければ旧版由来であることをUIに明示する。対象版にDigestがなく過去版にDigestがある場合、最新の過去Digestとそこから対象版までの `file_version_diffs` をLLM入力として増分Digestを生成する。
 
 ---
 
@@ -1663,7 +1739,7 @@ LLMコスト上限を超過しそうな場合、以下を行う。
 
 LLMにより生成されたCase引継ぎログの編集前・確定前メタ情報。
 
-確定版はGenerated Fileとして `files` に保存する。
+確定版はGenerated FileとしてStorageへ保存する。
 
 ```text
 id                          TEXT PRIMARY KEY
@@ -1675,7 +1751,7 @@ sensitivity_notes_json        TEXT NULL
 unresolved_items_json         TEXT NULL
 llm_run_id                   TEXT NULL REFERENCES llm_runs(id)
 status                       TEXT NOT NULL DEFAULT 'draft'
-generated_file_id             TEXT NULL REFERENCES files(id)
+generated_storage_object_id   TEXT NULL REFERENCES storage_objects(id)
 created_at                   TEXT NOT NULL
 updated_at                   TEXT NOT NULL
 ```

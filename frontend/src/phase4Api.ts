@@ -1,3 +1,5 @@
+import type { StorageObject } from './phase3Api'
+
 type ApiError = {
   code: string
   message: string
@@ -48,6 +50,8 @@ export type MailListItem = {
   llm_blocked?: boolean
   llm_block_reason?: string | null
   llm_blocked_at?: string | null
+  attachment_count?: number
+  has_attachments?: boolean
   sender_contact?: {
     id: string
     display_name: string
@@ -62,6 +66,27 @@ export type MailListItem = {
     title: string
   }>
   summary?: string | null
+}
+
+export type MailAttachment = {
+  id: string
+  message_id: string
+  filename: string
+  mime_type: string | null
+  byte_size: number
+  download_url: string
+  cached: boolean
+  storage_object_id: string | null
+}
+
+export type MailAttachmentStorageMoveResult = {
+  attachment: MailAttachment
+  storage_object: StorageObject
+}
+
+export type MailAttachmentFetchJobResult = {
+  job_id: string
+  attachment: MailAttachment
 }
 
 export type MailContactSummary = {
@@ -98,6 +123,7 @@ export type MailThreadMessage = MailListItem & {
   gmail_labels?: string[]
   body_text?: string | null
   body_html?: string | null
+  attachments?: MailAttachment[]
   created_at: string
   updated_at: string
   version: number
@@ -125,6 +151,15 @@ export type MailDetail = {
   message: MailThreadMessage
   thread_messages: MailThreadMessage[]
   scheduled_send_requests?: MailSendRequest[]
+  summary_jobs?: Record<
+    string,
+    {
+      job_id: string
+      status: string
+      created_at: string
+      updated_at: string
+    }
+  >
   user_state: {
     user_importance: string | null
     processed_status: string
@@ -144,6 +179,7 @@ export type MailDetail = {
     llm_blocked_at?: string | null
   }
   summary: MailSummary | null
+  attachments?: MailAttachment[]
   available_actions: string[]
 }
 
@@ -157,7 +193,8 @@ export type MailSendPayload = {
   attachments?: Array<{
     filename: string
     content_type: string
-    data_base64: string
+    data_base64?: string
+    storage_object_id?: string
     size: number
   }>
   reply_to_message_id?: string | null
@@ -184,6 +221,7 @@ export type MailSendRequest = {
 export type MailDraftGenerationPayload = {
   instruction?: string | null
   standard_prompt?: string | null
+  generation_language?: 'japanese' | 'english'
   to_addresses?: string[]
   cc_addresses?: string[]
   bcc_addresses?: string[]
@@ -200,9 +238,18 @@ export type MailDraftGenerationResult = {
   llm_run_id: string
 }
 
+export type MailDraftGenerationStandardPrompt = {
+  standard_prompt: string
+  generation_language: 'japanese' | 'english'
+}
+
 export type MailDraftAttachmentRef = {
   name: string
-  path: string
+  path?: string
+  content_type?: string | null
+  data_base64?: string
+  size?: number
+  storage_object_id?: string | null
 }
 
 export type ResolvedMailDraftAttachment = {
@@ -211,6 +258,7 @@ export type ResolvedMailDraftAttachment = {
   content_type: string
   data_base64: string
   size: number
+  storage_object_id: string | null
 }
 
 export type MailDraft = {
@@ -315,6 +363,11 @@ export type GoogleGmailAutoImportSettings = {
   last_success_at: string | null
   last_error: string | null
   last_imported_count: number
+  last_checked_count: number
+  last_stop_reason: string | null
+  last_stopped_gmail_message_id: string | null
+  last_stopped_received_at: string | null
+  last_reached_loaded_message: boolean
   unloaded_dates: string[]
   updated_at: string | null
 }
@@ -501,6 +554,24 @@ export function generateMailDraft(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
+  })
+}
+
+export function getMailDraftGenerationStandardPrompt(): Promise<MailDraftGenerationStandardPrompt> {
+  return request('/api/v1/mails/draft-generation-standard-prompt')
+}
+
+export function updateMailDraftGenerationStandardPrompt(
+  standardPrompt: string,
+  generationLanguage: 'japanese' | 'english',
+): Promise<MailDraftGenerationStandardPrompt> {
+  return request('/api/v1/mails/draft-generation-standard-prompt', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      standard_prompt: standardPrompt,
+      generation_language: generationLanguage,
+    }),
   })
 }
 
@@ -691,6 +762,24 @@ export function requestMailSummary(messageId: string): Promise<{ job_id: string 
   return request(`/api/v1/mails/${encodeURIComponent(messageId)}/summary`, {
     method: 'POST',
   })
+}
+
+export function moveMailAttachmentToStorage(
+  attachmentId: string,
+): Promise<MailAttachmentStorageMoveResult> {
+  return request<MailAttachmentStorageMoveResult>(
+    `/api/v1/mails/attachments/${encodeURIComponent(attachmentId)}/move-to-storage`,
+    { method: 'POST' },
+  )
+}
+
+export function enqueueMailAttachmentFetchJob(
+  attachmentId: string,
+): Promise<MailAttachmentFetchJobResult> {
+  return request<MailAttachmentFetchJobResult>(
+    `/api/v1/mails/attachments/${encodeURIComponent(attachmentId)}/fetch-job`,
+    { method: 'POST' },
+  )
 }
 
 export function processMail(messageId: string): Promise<MailDetail> {

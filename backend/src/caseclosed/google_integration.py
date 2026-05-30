@@ -33,6 +33,7 @@ from caseclosed.db.runtime import jst_now
 from caseclosed.db.runtime import parse_iso_datetime
 from caseclosed.services.background_worker import kick_job_drain
 from caseclosed.services.mail_ingestion import MailIngestionResult
+from caseclosed.services.mail_ingestion import MailAttachmentInput
 from caseclosed.services.mail_ingestion import MockMailInput
 from caseclosed.services.mail_ingestion import ingest_mock_mail
 from caseclosed.settings import get_google_gmail_scopes
@@ -51,7 +52,9 @@ GMAIL_AUTO_IMPORT_SETTINGS_KEY = "google_gmail_auto_import_settings"
 GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
 GMAIL_IMPORT_BY_DATE_MAX_RESULTS = 500
 GMAIL_AUTO_IMPORT_DEFAULT_INTERVAL_MINUTES = 10
-GMAIL_AUTO_IMPORT_MAX_MESSAGES_PER_RUN = 20
+GMAIL_AUTO_IMPORT_MAX_MESSAGES_PER_RUN = 100
+GMAIL_AUTO_IMPORT_SCAN_MAX_MESSAGES = 300
+GMAIL_AUTO_IMPORT_LOOKBACK_DAYS = 3
 GMAIL_EXCLUDED_IMPORT_QUERY = "-in:drafts"
 
 
@@ -64,6 +67,10 @@ class GmailAutoImportPlan:
     import_message_ids: list[str]
     unloaded_dates: list[str]
     reached_loaded_message: bool
+    checked_count: int
+    stop_reason: str
+    stopped_gmail_message_id: str | None = None
+    stopped_received_at: str | None = None
 
 
 class GmailAutoImportSettingsPayload(BaseModel):
@@ -142,6 +149,17 @@ def google_gmail_auto_import_settings_data(
         "last_success_at": optional_string(settings.get("last_success_at")),
         "last_error": optional_string(settings.get("last_error")),
         "last_imported_count": int(settings.get("last_imported_count") or 0),
+        "last_checked_count": int(settings.get("last_checked_count") or 0),
+        "last_stop_reason": optional_string(settings.get("last_stop_reason")),
+        "last_stopped_gmail_message_id": optional_string(
+            settings.get("last_stopped_gmail_message_id")
+        ),
+        "last_stopped_received_at": optional_string(
+            settings.get("last_stopped_received_at")
+        ),
+        "last_reached_loaded_message": bool(
+            settings.get("last_reached_loaded_message", False)
+        ),
         "unloaded_dates": normalized_date_list(settings.get("unloaded_dates")),
         "updated_at": optional_string(settings.get("updated_at")),
     }
@@ -160,7 +178,7 @@ def normalized_auto_import_max_messages(value: object) -> int:
         max_messages = int(value)
     except (TypeError, ValueError):
         max_messages = GMAIL_AUTO_IMPORT_MAX_MESSAGES_PER_RUN
-    return max(1, min(max_messages, 500))
+    return max(1, min(max_messages, GMAIL_AUTO_IMPORT_MAX_MESSAGES_PER_RUN))
 
 
 def optional_string(value: object) -> str | None:
@@ -506,6 +524,11 @@ def run_google_gmail_auto_import_once(
             **settings,
             "last_run_at": now,
             "last_imported_count": 0,
+            "last_checked_count": 0,
+            "last_stop_reason": "not_connected",
+            "last_stopped_gmail_message_id": None,
+            "last_stopped_received_at": None,
+            "last_reached_loaded_message": False,
             "last_error": None,
         }
         write_setting_json(session, GMAIL_AUTO_IMPORT_SETTINGS_KEY, next_settings, now)
@@ -519,11 +542,24 @@ def run_google_gmail_auto_import_once(
     imported_count = 0
     imported_items: list[dict[str, object]] = []
     try:
+        write_setting_json(
+            session,
+            GMAIL_AUTO_IMPORT_SETTINGS_KEY,
+            {
+                **settings,
+                "last_run_at": now,
+                "last_error": None,
+                "last_stop_reason": "running",
+            },
+            now,
+        )
+        session.commit()
         access_token = google_gmail_access_token(session, connection)
         plan = latest_gmail_auto_import_plan_until_loaded(
             session,
             access_token,
             max_messages=max_messages_to_import,
+            run_at=jst_now(),
         )
         for gmail_message_id in plan.import_message_ids:
             gmail_message = gmail_api_get_json(
@@ -550,6 +586,11 @@ def run_google_gmail_auto_import_once(
             "last_success_at": now,
             "last_error": None,
             "last_imported_count": imported_count,
+            "last_checked_count": plan.checked_count,
+            "last_stop_reason": plan.stop_reason,
+            "last_stopped_gmail_message_id": plan.stopped_gmail_message_id,
+            "last_stopped_received_at": plan.stopped_received_at,
+            "last_reached_loaded_message": plan.reached_loaded_message,
             "unloaded_dates": plan.unloaded_dates,
         }
         write_setting_json(session, GMAIL_AUTO_IMPORT_SETTINGS_KEY, next_settings, now)
@@ -560,6 +601,7 @@ def run_google_gmail_auto_import_once(
             "last_run_at": now,
             "last_error": str(error),
             "last_imported_count": imported_count,
+            "last_stop_reason": "failed",
             "unloaded_dates": settings.get("unloaded_dates", []),
         }
         write_setting_json(session, GMAIL_AUTO_IMPORT_SETTINGS_KEY, next_settings, now)
@@ -572,6 +614,11 @@ def run_google_gmail_auto_import_once(
         "enabled": True,
         "imported_count": imported_count,
         "items": imported_items,
+        "checked_count": plan.checked_count,
+        "stop_reason": plan.stop_reason,
+        "stopped_gmail_message_id": plan.stopped_gmail_message_id,
+        "stopped_received_at": plan.stopped_received_at,
+        "reached_loaded_message": plan.reached_loaded_message,
     }
 
 
@@ -867,16 +914,20 @@ def latest_gmail_auto_import_plan_until_loaded(
     access_token: str,
     *,
     max_messages: int,
+    run_at: datetime | None = None,
 ) -> GmailAutoImportPlan:
     page_token = None
     checked = 0
+    max_checked = GMAIL_AUTO_IMPORT_SCAN_MAX_MESSAGES
+    oldest_import_at = auto_import_oldest_allowed_at(run_at or jst_now())
     import_message_ids: list[str] = []
     unloaded_dates: set[str] = set()
+    reached_loaded_message = False
     while True:
         params: dict[str, object] = {
             "maxResults": 100,
             "includeSpamTrash": "false",
-            "q": GMAIL_EXCLUDED_IMPORT_QUERY,
+            "q": gmail_auto_import_query(oldest_import_at),
         }
         if page_token is not None:
             params["pageToken"] = page_token
@@ -886,7 +937,9 @@ def latest_gmail_auto_import_plan_until_loaded(
             return GmailAutoImportPlan(
                 import_message_ids=import_message_ids,
                 unloaded_dates=sorted(unloaded_dates, reverse=True),
-                reached_loaded_message=False,
+                reached_loaded_message=reached_loaded_message,
+                checked_count=checked,
+                stop_reason="no_messages",
             )
         for item in messages:
             if not isinstance(item, dict):
@@ -895,6 +948,34 @@ def latest_gmail_auto_import_plan_until_loaded(
             if not isinstance(gmail_message_id, str) or gmail_message_id.strip() == "":
                 continue
             checked += 1
+            gmail_metadata = gmail_api_get_json(
+                f"/users/me/messages/{gmail_message_id}",
+                access_token,
+                {"format": "metadata"},
+            )
+            if gmail_message_is_future_dated(gmail_metadata):
+                if checked >= max_checked:
+                    return GmailAutoImportPlan(
+                        import_message_ids=import_message_ids,
+                        unloaded_dates=sorted(unloaded_dates, reverse=True),
+                        reached_loaded_message=reached_loaded_message,
+                        checked_count=checked,
+                        stop_reason="scan_limit",
+                        stopped_gmail_message_id=gmail_message_id,
+                        stopped_received_at=gmail_received_at(gmail_metadata),
+                    )
+                continue
+            received_at = gmail_message_received_datetime(gmail_metadata)
+            if received_at is not None and received_at < oldest_import_at:
+                return GmailAutoImportPlan(
+                    import_message_ids=import_message_ids,
+                    unloaded_dates=sorted(unloaded_dates, reverse=True),
+                    reached_loaded_message=reached_loaded_message,
+                    checked_count=checked,
+                    stop_reason="lookback_limit",
+                    stopped_gmail_message_id=gmail_message_id,
+                    stopped_received_at=gmail_received_at(gmail_metadata),
+                )
             exists = session.scalar(
                 select(GmailMessage.id).where(
                     GmailMessage.gmail_message_id == gmail_message_id
@@ -905,27 +986,55 @@ def latest_gmail_auto_import_plan_until_loaded(
                     import_message_ids=import_message_ids,
                     unloaded_dates=sorted(unloaded_dates, reverse=True),
                     reached_loaded_message=True,
+                    checked_count=checked,
+                    stop_reason="loaded_message",
+                    stopped_gmail_message_id=gmail_message_id,
+                    stopped_received_at=gmail_received_at(gmail_metadata),
                 )
-            gmail_message = gmail_api_get_json(
-                f"/users/me/messages/{gmail_message_id}",
-                access_token,
-                {"format": "full"},
-            )
-            if gmail_message_is_draft(gmail_message):
+            if gmail_message_is_draft(gmail_metadata):
                 continue
             if len(import_message_ids) < max_messages:
                 import_message_ids.append(gmail_message_id)
             else:
-                mail_input = gmail_message_to_mail_input(gmail_message)
-                unloaded_dates.add(mail_input.received_at[:10])
+                unloaded_dates.add(gmail_received_at(gmail_metadata)[:10])
+            if checked >= max_checked:
+                return GmailAutoImportPlan(
+                    import_message_ids=import_message_ids,
+                    unloaded_dates=sorted(unloaded_dates, reverse=True),
+                    reached_loaded_message=reached_loaded_message,
+                    checked_count=checked,
+                    stop_reason="scan_limit",
+                    stopped_gmail_message_id=gmail_message_id,
+                    stopped_received_at=gmail_received_at(gmail_metadata),
+                )
         next_page_token = data.get("nextPageToken")
         if not isinstance(next_page_token, str) or next_page_token.strip() == "":
             return GmailAutoImportPlan(
                 import_message_ids=import_message_ids,
                 unloaded_dates=sorted(unloaded_dates, reverse=True),
-                reached_loaded_message=False,
+                reached_loaded_message=reached_loaded_message,
+                checked_count=checked,
+                stop_reason="no_next_page",
             )
         page_token = next_page_token
+
+
+def auto_import_oldest_allowed_at(run_at: datetime) -> datetime:
+    jst_run_at = run_at.astimezone(JST)
+    return (jst_run_at - timedelta(days=GMAIL_AUTO_IMPORT_LOOKBACK_DAYS)).replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+
+
+def gmail_auto_import_query(oldest_import_at: datetime) -> str:
+    query_after_date = oldest_import_at.date() - timedelta(days=1)
+    return (
+        f"after:{query_after_date.strftime('%Y/%m/%d')} "
+        f"{GMAIL_EXCLUDED_IMPORT_QUERY}"
+    )
 
 
 def unloaded_gmail_message_ids_for_date(
@@ -1003,6 +1112,7 @@ def gmail_message_to_mail_input(message: dict[str, object]) -> MockMailInput:
     _, reply_to_address = parse_single_address(first_header(headers, "reply-to"))
 
     body_parts = collect_message_bodies(payload)
+    attachments = collect_message_attachments(payload)
     labels = string_list(message.get("labelIds"))
     return MockMailInput(
         gmail_message_id=gmail_message_id,
@@ -1029,6 +1139,7 @@ def gmail_message_to_mail_input(message: dict[str, object]) -> MockMailInput:
         gmail_link=f"https://mail.google.com/mail/u/0/#all/{gmail_message_id}",
         gmail_labels=labels,
         external_starred="STARRED" in labels,
+        attachments=attachments,
     )
 
 
@@ -1040,14 +1151,27 @@ def required_string(data: dict[str, object], key: str) -> str:
 
 
 def gmail_received_at(message: dict[str, object]) -> str:
-    internal_date = message.get("internalDate")
-    if isinstance(internal_date, str) and internal_date.isdigit():
-        received_at = datetime.fromtimestamp(int(internal_date) / 1000, JST)
+    received_at = gmail_message_received_datetime(message)
+    if received_at is not None:
         now = jst_now()
         if received_at > now + timedelta(minutes=5):
             return jst_iso(now)
         return received_at.isoformat()
     return jst_iso()
+
+
+def gmail_message_received_datetime(message: dict[str, object]) -> datetime | None:
+    internal_date = message.get("internalDate")
+    if isinstance(internal_date, str) and internal_date.isdigit():
+        return datetime.fromtimestamp(int(internal_date) / 1000, JST)
+    return None
+
+
+def gmail_message_is_future_dated(message: dict[str, object]) -> bool:
+    received_at = gmail_message_received_datetime(message)
+    if received_at is None:
+        return False
+    return received_at > jst_now() + timedelta(minutes=5)
 
 
 def gmail_headers(payload: dict[str, object]) -> dict[str, list[str]]:
@@ -1133,6 +1257,39 @@ def collect_message_bodies(payload: dict[str, object]) -> dict[str, str | None]:
         "text": "\n".join(text_parts).strip() or None,
         "html": "\n".join(html_parts).strip() or None,
     }
+
+
+def collect_message_attachments(payload: dict[str, object]) -> list[MailAttachmentInput]:
+    attachments: list[MailAttachmentInput] = []
+
+    def collect(part: dict[str, object]) -> None:
+        filename = part.get("filename")
+        body = part.get("body")
+        if isinstance(filename, str) and filename.strip() != "" and isinstance(body, dict):
+            attachment_id = body.get("attachmentId")
+            if isinstance(attachment_id, str) and attachment_id.strip() != "":
+                size = body.get("size")
+                attachments.append(
+                    MailAttachmentInput(
+                        gmail_attachment_id=attachment_id.strip(),
+                        filename=filename.strip(),
+                        mime_type=(
+                            part.get("mimeType")
+                            if isinstance(part.get("mimeType"), str)
+                            else None
+                        ),
+                        byte_size=size if isinstance(size, int) else 0,
+                        part_id=part.get("partId") if isinstance(part.get("partId"), str) else None,
+                    )
+                )
+        parts = part.get("parts")
+        if isinstance(parts, list):
+            for child in parts:
+                if isinstance(child, dict):
+                    collect(child)
+
+    collect(payload)
+    return attachments
 
 
 def decode_gmail_body_data(value: object) -> str | None:

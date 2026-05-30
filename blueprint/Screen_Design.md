@@ -827,25 +827,23 @@ POST /contacts/unresolved-from-addresses/{encoded_email}/generate-prefill
 - サイズ
 - 取得状態
 - 関連Case
-- LLM Policy
+- LLM input状態
 - ダウンロード可否
 
 操作:
 
 - 添付実体取得
-- Caseファイルとして保存
+- Storageへ保存
 - プレビュー
 - ダウンロード
-- LLM要約
-- LLM Policy変更
 
 API:
 
 ```http
 GET /mails/{message_id}/attachments
-POST /attachments/{attachment_id}/fetch
-POST /files/{file_id}/summarize
-PATCH /files/{file_id}/llm-policy
+GET /api/v1/mails/attachments/{attachment_id}/download
+POST /api/v1/mails/attachments/{attachment_id}/fetch-job
+POST /api/v1/mails/attachments/{attachment_id}/move-to-storage
 ```
 
 ## 4.5 監査ログ
@@ -1074,14 +1072,14 @@ GET /cases/{case_id}/contacts
 
 - ファイルカード
 - Origin
-- LLM Policy
+- LLM input状態
 - 機密度メモ
 - 添付元メール
 
 API:
 
 ```http
-GET /cases/{case_id}/files
+GET /cases/{case_id}/files  # Phase 7でStorage object連携として設計
 ```
 
 ### Case Context
@@ -1624,97 +1622,111 @@ external_operations に gmail_send を作成する。
 
 ---
 
-# 16. File一覧画面
+# 16. Storage一覧画面
 
 ## 14.1 目的
 
-Caseに関連するファイル、アップロードファイル、Gmail添付、生成物、外部リンクを確認する。
+手元ファイル、Gmail添付からStorageへ移動したファイル、生成物を確認する。Case連携前はStorage単体のファイル管理画面として扱う。
 
 ## 14.2 表示項目
 
 - ファイル名
-- Origin
-- Case
-- 添付元メール
+- Source
+- ディレクトリ
 - アップロード日時
 - サイズ
 - MIME type
-- LLM Policy
-- trashed状態
-- version
+- LLM input状態
+- 拡張子
 
 API:
 
 ```http
 GET /files
+GET /api/v1/storage/objects
 ```
 
 ## 14.3 フィルタ
 
-- Case
-- Origin
-- LLM Policy
-- trashed
+- ディレクトリ
+- 検索語
 - ファイル種別
-- 最近追加
-- 添付由来
-- Generated
+- 拡張子
+- 作成日順 / 名前順
 
 ## 14.4 必須操作
 
 - 詳細表示
 - ダウンロード
-- プレビュー
-- LLM要約
-- LLM Policy変更
-- ゴミ箱へ移動
-- 復元
-- 物理削除
-- Caseを開く
+- LLM input許可/ブロック切替
+- Delete file series
+- ディレクトリ作成・削除
+- ディレクトリ移動
 - 添付元メールを開く
 
 API:
 
 ```http
-GET /files/{file_id}
-POST /files/{file_id}/summarize
-PATCH /files/{file_id}/llm-policy
-POST /files/{file_id}/trash
-POST /files/{file_id}/restore
-DELETE /files/{file_id}
+GET /files/{storage_object_id}
+PATCH /api/v1/storage/objects/{storage_object_id}/llm-input
+PATCH /api/v1/storage/objects/{storage_object_id}/directory
+DELETE /api/v1/storage/objects/{storage_object_id}
 ```
 
-物理削除は確認ダイアログ必須。
+Delete file seriesは確認ダイアログ必須。
 
 ---
 
-# 17. File詳細画面
+# 17. Storage詳細画面
 
 ## 15.1 表示項目
 
 - ファイル名
 - 物理保存ID
-- Origin
-- Case
+- Source
 - 添付元メール
-- version一覧
-- LLM Policy
-- 要約
+- Versionプルダウン
+- LLM input状態
+- LLM Digest
+- Version Difference
 - メタ情報
-- ダウンロード履歴
-- LLM投入履歴
+- Created
+- Stored
+- Size
+- Content type
 
 ## 15.2 必須操作
 
 - プレビュー
-- ダウンロード
-- 要約生成
-- LLM Policy変更
-- ゴミ箱へ移動
-- 復元
-- 物理削除
-- Caseを開く
+- Download Selected
+- Delete file series / Delete This and Earlier
+- Allow LLM Input / Block LLM input
+- Prepare LLM Digest
+- Version選択
+- ドラッグ&ドロップによるファイル更新
 - 元メールを開く
+
+### Version表示
+
+- `Current` と旧版をプルダウンで切り替える。
+- 選択したバージョンのプレビュー、Stored、Size、Content typeを表示する。
+- 一覧画面からのダウンロードは常に最新版を対象とする。
+- 旧版選択中は、選択版を含めてそれ以前のバージョンを削除できる。削除後は最新版表示へ戻る。
+
+### LLM Digest
+
+- `llm_input_allowed = false` の場合、Prepare LLM Digestは非活性にする。
+- Digestはファイル本体プレビューの下にカード表示する。
+- 表示内容は1行説明と最大5項目の要約。
+- 現在版が更新済みでDigestが旧版由来の場合、旧バージョンのDigestであることを明示する。
+
+### Version Difference
+
+- LLM Digestの下に表示する。
+- デフォルトは折りたたみ。
+- 展開時は、前バージョンから表示中バージョンに至る差分を `+` / `-` で表示する。
+- 長いファイルでは、変更行の前後だけを表示し、離れた無変更部分は `...` で省略する。
+- 最初にアップロードされた版にはDifferenceを表示しない。
 
 ## 15.3 監査ログ
 
@@ -1723,6 +1735,8 @@ DELETE /files/{file_id}
 - ダウンロード
 - LLM投入
 - 物理削除
+- ファイル更新
+- LLM input設定変更
 
 ---
 

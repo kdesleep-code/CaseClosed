@@ -118,6 +118,34 @@ def test_pending_job_is_not_retried(client, database_path: Path) -> None:
     assert response.json()["ok"] is False
 
 
+def test_failed_job_can_be_discarded(client, database_path: Path) -> None:
+    insert_phase_2_job(database_path, job_id="job_failed", status="failed")
+
+    response = client.post(f"{JOBS_URL}/job_failed/discard")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "discarded"
+
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT status, locked_by, finished_at FROM jobs WHERE id = ?",
+            ("job_failed",),
+        ).fetchone()
+
+    assert row[0] == "discarded"
+    assert row[1] is None
+    assert row[2] is not None
+
+
+def test_pending_job_is_not_discarded(client, database_path: Path) -> None:
+    insert_phase_2_job(database_path, job_id="job_pending", status="pending")
+
+    response = client.post(f"{JOBS_URL}/job_pending/discard")
+
+    assert response.status_code == 409
+    assert response.json()["ok"] is False
+
+
 def test_run_next_job_reports_when_no_job_exists(client) -> None:
     response = client.post(f"{JOBS_URL}/run-next")
 

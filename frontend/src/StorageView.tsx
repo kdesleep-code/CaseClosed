@@ -1,0 +1,2045 @@
+import { Fragment, useEffect, useState } from 'react'
+import type { ReactNode } from 'react'
+import type { DragEvent, MouseEvent } from 'react'
+import { t } from './i18n'
+import { AppLink, navigateTo } from './navigation'
+import defaultContactAvatarUrl from './assets/default-contact-avatar.svg'
+import downloadIconUrl from './assets/download-icon.svg'
+import folderDirectoryIconUrl from './assets/folder-directory-icon.svg'
+import paperclipDiagonalUrl from './assets/paperclip-diagonal.svg'
+import trashIconUrl from './assets/trash-icon.svg'
+import {
+  fileExtension,
+  isPreviewableImageFile,
+  isPreviewableDelimitedTableFile,
+  isPreviewableMarkdownFile,
+  isPreviewablePdfFile,
+  isPreviewableTextFile,
+  isPreviewableZipFile,
+} from './storagePreview'
+import {
+  createStorageDirectory,
+  deleteStorageDirectory,
+  deleteStorageObject,
+  deleteOlderStorageObjectVersions,
+  getStorageObject,
+  getStorageObjectArchiveTree,
+  getStorageObjectLlmDigest,
+  getStorageObjectVersionArchiveTree,
+  listStorageObjectVersions,
+  listStorageDirectories,
+  listStorageObjects,
+  moveStorageObjectToDirectory,
+  searchStorageObjects,
+  prepareStorageObjectLlmDigest,
+  uploadManagedStorageFile,
+  uploadStorageObjectVersion,
+  updateStorageObjectLlmInput,
+} from './phase3Api'
+import type { StorageObject } from './phase3Api'
+import type { StorageDirectory } from './phase3Api'
+import type { StorageObjectVersion } from './phase3Api'
+import type { StorageSourceMail } from './phase3Api'
+import type { FileSummary, FileVersionDiff } from './phase3Api'
+
+type StoragePreviewFile = {
+  id: string
+  original_filename: string | null
+  content_type: string | null
+  byte_size: number
+  sha256_hex: string
+  url: string
+  download_url: string
+  updated_at: string
+}
+
+function describeError(error: unknown) {
+  return error instanceof Error ? error.message : t('storage.requestFailed')
+}
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`
+  const kib = bytes / 1024
+  if (kib < 1024) return `${kib.toFixed(kib >= 10 ? 0 : 1)} KB`
+  const mib = kib / 1024
+  if (mib < 1024) return `${mib.toFixed(mib >= 10 ? 0 : 1)} MB`
+  const gib = mib / 1024
+  return `${gib.toFixed(gib >= 10 ? 0 : 1)} GB`
+}
+
+function formatTime(value: string) {
+  return value.slice(11, 16)
+}
+
+function formatDateTime(value: string) {
+  return `${value.slice(0, 10)} ${value.slice(11, 16)}`
+}
+
+function currentStoragePreviewFile(object: StorageObject): StoragePreviewFile {
+  const cacheKey = encodeURIComponent(`${object.sha256_hex}-${object.file_updated_at}`)
+  return {
+    id: object.id,
+    original_filename: object.original_filename,
+    content_type: object.content_type,
+    byte_size: object.byte_size,
+    sha256_hex: object.sha256_hex,
+    url: `${object.url}?v=${cacheKey}`,
+    download_url: `/api/v1/storage/objects/${encodeURIComponent(object.id)}/download`,
+    updated_at: object.file_updated_at,
+  }
+}
+
+function versionStoragePreviewFile(version: StorageObjectVersion): StoragePreviewFile {
+  const baseUrl = `/api/v1/storage/objects/${encodeURIComponent(
+    version.storage_object_id,
+  )}/versions/${encodeURIComponent(version.id)}`
+  const cacheKey = encodeURIComponent(`${version.sha256_hex}-${version.created_at}`)
+  return {
+    id: version.id,
+    original_filename: version.original_filename,
+    content_type: version.content_type,
+    byte_size: version.byte_size,
+    sha256_hex: version.sha256_hex,
+    url: `${baseUrl}/content?v=${cacheKey}`,
+    download_url: baseUrl + '/download',
+    updated_at: version.created_at,
+  }
+}
+
+function mailPriorityClass(importance: string) {
+  return `mail-priority-${importance}`
+}
+
+function charsetFromContentType(contentType: string | null) {
+  const match = /charset=([^;]+)/i.exec(contentType ?? '')
+  return match?.[1]?.trim().replace(/^"|"$/g, '').toLowerCase() ?? null
+}
+
+function decodeWithEncoding(buffer: ArrayBuffer, encoding: string) {
+  try {
+    return new TextDecoder(encoding).decode(buffer)
+  } catch {
+    return null
+  }
+}
+
+function textDecodeScore(text: string) {
+  let score = 0
+  for (const char of text) {
+    const code = char.charCodeAt(0)
+    if (char === '\uFFFD') score += 100
+    if ((code < 32 && !['\n', '\r', '\t'].includes(char)) || code === 0x7f) score += 25
+  }
+  const mojibakePatterns = [
+    /縺/g,
+    /繧/g,
+    /繝/g,
+    /譁/g,
+    /荳/g,
+    /邱/g,
+    /螟/g,
+    /豌/g,
+    /�/g,
+  ]
+  for (const pattern of mojibakePatterns) {
+    score += (text.match(pattern)?.length ?? 0) * 12
+  }
+  return score
+}
+
+function decodePreviewText(buffer: ArrayBuffer, contentType: string | null) {
+  const preferredCharset = charsetFromContentType(contentType)
+  const encodings = [
+    preferredCharset,
+    'utf-8',
+    'shift_jis',
+    'euc-jp',
+    'iso-2022-jp',
+  ].filter((encoding, index, values): encoding is string => (
+    encoding !== null && values.indexOf(encoding) === index
+  ))
+
+  let bestText = ''
+  let bestScore = Number.POSITIVE_INFINITY
+  for (const encoding of encodings) {
+    const decoded = decodeWithEncoding(buffer, encoding)
+    if (decoded === null) continue
+    const score = textDecodeScore(decoded)
+    if (score < bestScore) {
+      bestText = decoded
+      bestScore = score
+    }
+  }
+  return bestText
+}
+
+async function downloadStorageObject(object: StoragePreviewFile | StorageObject) {
+  const downloadUrl =
+    'download_url' in object
+      ? object.download_url
+      : `/api/v1/storage/objects/${encodeURIComponent(object.id)}/download`
+  const response = await fetch(downloadUrl, { credentials: 'include' })
+  if (!response.ok) {
+    throw new Error(t('storage.downloadFailed'))
+  }
+  const blob = await response.blob()
+  const objectUrl = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = objectUrl
+  link.download = object.original_filename ?? object.id
+  document.body.append(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(objectUrl)
+}
+
+function isPreviewableImage(object: StoragePreviewFile) {
+  return isPreviewableImageFile({
+    contentType: object.content_type,
+    filename: object.original_filename,
+  })
+}
+
+function isPreviewableText(object: StoragePreviewFile) {
+  return isPreviewableTextFile({
+    contentType: object.content_type,
+    filename: object.original_filename,
+  })
+}
+
+function isPreviewablePdf(object: StoragePreviewFile) {
+  return isPreviewablePdfFile({
+    contentType: object.content_type,
+    filename: object.original_filename,
+  })
+}
+
+function isPreviewableMarkdown(object: StoragePreviewFile) {
+  return isPreviewableMarkdownFile({
+    contentType: object.content_type,
+    filename: object.original_filename,
+  })
+}
+
+function isPreviewableDelimitedTable(object: StoragePreviewFile) {
+  return isPreviewableDelimitedTableFile({
+    contentType: object.content_type,
+    filename: object.original_filename,
+  })
+}
+
+function isPreviewableZip(object: StoragePreviewFile) {
+  return isPreviewableZipFile({
+    contentType: object.content_type,
+    filename: object.original_filename,
+  })
+}
+
+const textPreviewByteLimit = 2 * 1024 * 1024
+const storageObjectDragType = 'application/x-caseclosed-storage-object'
+
+function storageSourceLabel(object: StorageObject) {
+  if (object.source_type === 'direct_upload') {
+    return t('storage.source.directUpload')
+  }
+  if (object.source_type === 'mail_attachment') {
+    return t('storage.source.mailAttachment')
+  }
+  return t('common.none')
+}
+
+function storageSourceMailSender(mail: StorageSourceMail) {
+  return mail.from_name?.trim() || mail.from_address
+}
+
+function directoryIdFromLocation() {
+  const value = new URLSearchParams(window.location.search).get('directory')
+  return value === null || value.trim() === '' ? null : value
+}
+
+function directoryPathLabel(path: string[] | undefined) {
+  if (path === undefined || path.length === 0) {
+    return t('storage.directory.root')
+  }
+  return [t('storage.directory.root'), ...path].join(' / ')
+}
+
+function StorageSourceMailCard({ mail }: { mail: StorageSourceMail }) {
+  return (
+    <section className="storage-source-mail-section">
+      <h2>{t('storage.source.mail')}</h2>
+      <article
+        className={`mail-list-item storage-source-mail-card ${mailPriorityClass(
+          mail.effective_importance,
+        )} mail-read-${mail.read_status}`}
+        onClick={() => navigateTo(`/mail/${encodeURIComponent(mail.id)}`)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            navigateTo(`/mail/${encodeURIComponent(mail.id)}`)
+          }
+        }}
+        role="link"
+        tabIndex={0}
+      >
+        <div className="mail-list-sender-media">
+          <span className="mail-list-time">{formatTime(mail.received_at)}</span>
+          <img
+            alt={t('mail.senderAvatarAlt', {
+              name: storageSourceMailSender(mail),
+            })}
+            src={defaultContactAvatarUrl}
+          />
+        </div>
+        <div className="mail-list-main">
+          <strong>
+            <span>{mail.subject ?? t('mail.noSubject')}</span>
+          </strong>
+          <span>{storageSourceMailSender(mail)}</span>
+        </div>
+        <p className="mail-list-summary">{mail.summary ?? ''}</p>
+        <div className="mail-list-cases">
+          {mail.has_attachments === true && (
+            <span
+              aria-label={t('mail.attachmentsPresent')}
+              className="mail-attachment-indicator"
+              title={t('mail.attachmentsPresent')}
+            >
+              <img alt="" src={paperclipDiagonalUrl} />
+            </span>
+          )}
+          <span>{t('mail.noCase')}</span>
+        </div>
+      </article>
+    </section>
+  )
+}
+
+function ActionIconLabel({
+  iconUrl,
+  label,
+}: {
+  iconUrl: string
+  label: string
+}) {
+  return (
+    <span className="storage-action-label">
+      <img alt="" aria-hidden="true" src={iconUrl} />
+      <span>{label}</span>
+    </span>
+  )
+}
+
+function LlmInputBlockedIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="storage-llm-blocked-icon"
+      viewBox="0 0 48 48"
+    >
+      <rect fill="none" height="48" width="48" />
+      <path
+        d="M17 18h14a7 7 0 0 1 7 7v7a7 7 0 0 1-7 7H17a7 7 0 0 1-7-7v-7a7 7 0 0 1 7-7Z"
+        fill="#fff6e8"
+        stroke="#6e3428"
+        strokeWidth="3"
+      />
+      <path d="M24 18v-5" stroke="#6e3428" strokeLinecap="round" strokeWidth="3" />
+      <circle cx="24" cy="10" fill="#6e3428" r="3" />
+      <circle cx="19" cy="28" fill="#6e3428" r="2.5" />
+      <circle cx="29" cy="28" fill="#6e3428" r="2.5" />
+      <path d="M19 34h10" stroke="#6e3428" strokeLinecap="round" strokeWidth="3" />
+      <circle
+        cx="34"
+        cy="34"
+        fill="#fff6e8"
+        r="10"
+        stroke="#b34035"
+        strokeWidth="4"
+      />
+      <path d="M27 41 41 27" stroke="#b34035" strokeLinecap="round" strokeWidth="4" />
+    </svg>
+  )
+}
+
+function StorageObjectCard({
+  object,
+  busy,
+  selected,
+  showPath = false,
+  onContextMenu,
+  onOpen,
+}: {
+  object: StorageObject
+  busy: boolean
+  selected: boolean
+  showPath?: boolean
+  onContextMenu: (event: MouseEvent<HTMLButtonElement>, object: StorageObject) => void
+  onOpen: (object: StorageObject) => void
+}) {
+  const filename = object.original_filename ?? object.id
+  return (
+    <button
+      aria-label={t('storage.openFile', { name: filename })}
+      aria-selected={selected}
+      className={`storage-object-card button-loading-dot${busy ? ' is-loading' : ''}`}
+      data-storage-object-id={object.id}
+      draggable
+      disabled={busy}
+      onClick={() => onOpen(object)}
+      onContextMenu={(event) => onContextMenu(event, object)}
+      onDragStart={(event) => {
+        event.dataTransfer.setData(storageObjectDragType, object.id)
+        event.dataTransfer.setData('text/plain', object.id)
+        event.dataTransfer.effectAllowed = 'copyMove'
+      }}
+      type="button"
+    >
+      {!object.llm_input_allowed && (
+        <span className="storage-llm-blocked-badge" title={t('storage.llmInput.blocked')}>
+          <LlmInputBlockedIcon />
+        </span>
+      )}
+      <span aria-hidden="true" className="storage-object-icon">
+        {fileExtension(object.original_filename)}
+      </span>
+      <span className="storage-object-card-main">
+        <strong>{filename}</strong>
+      </span>
+      <span className="storage-object-card-meta">
+        <span>{object.created_at.slice(0, 10)}</span>
+        <span>{formatBytes(object.byte_size)}</span>
+        {showPath && <span>{directoryPathLabel(object.directory_path)}</span>}
+      </span>
+    </button>
+  )
+}
+
+function StorageDirectoryCard({
+  directory,
+  onDropObject,
+  onContextMenu,
+  onOpen,
+}: {
+  directory: StorageDirectory
+  onDropObject: (objectId: string, directoryId: string | null) => void
+  onContextMenu: (event: MouseEvent<HTMLButtonElement>, directory: StorageDirectory) => void
+  onOpen: (directory: StorageDirectory) => void
+}) {
+  return (
+    <button
+      aria-label={t('storage.openDirectory', { name: directory.name })}
+      className="storage-object-card"
+      onClick={() => onOpen(directory)}
+      onContextMenu={(event) => onContextMenu(event, directory)}
+      onDragOver={(event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        event.dataTransfer.dropEffect = 'move'
+      }}
+      onDrop={(event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        const objectId =
+          event.dataTransfer.getData(storageObjectDragType) ||
+          event.dataTransfer.getData('text/plain')
+        if (objectId !== '') onDropObject(objectId, directory.id)
+      }}
+      type="button"
+    >
+      <span aria-hidden="true" className="storage-object-icon storage-directory-icon">
+        <img alt="" src={folderDirectoryIconUrl} />
+      </span>
+      <span className="storage-object-card-main">
+        <strong>{directory.name}</strong>
+      </span>
+      <span className="storage-object-card-meta">
+        <span>{directory.created_at.slice(0, 10)}</span>
+        <span>{t('storage.directory.label')}</span>
+      </span>
+    </button>
+  )
+}
+
+function StorageObjectDetailView({ storageObjectId }: { storageObjectId: string }) {
+  const [object, setObject] = useState<StorageObject | null>(null)
+  const [versions, setVersions] = useState<StorageObjectVersion[]>([])
+  const [isLoading, setIsLoading] = useState(true)
+  const [textPreview, setTextPreview] = useState<string | null>(null)
+  const [textPreviewStatus, setTextPreviewStatus] = useState<
+    'idle' | 'loading' | 'loaded' | 'too-large' | 'failed'
+  >('idle')
+  const [archiveTreeText, setArchiveTreeText] = useState<string | null>(null)
+  const [archiveTreeStatus, setArchiveTreeStatus] = useState<
+    'idle' | 'loading' | 'loaded' | 'failed'
+  >('idle')
+  const [downloadBusyId, setDownloadBusyId] = useState<string | null>(null)
+  const [llmBusy, setLlmBusy] = useState(false)
+  const [digestBusy, setDigestBusy] = useState(false)
+  const [fileSummary, setFileSummary] = useState<FileSummary | null>(null)
+  const [fileSummaryIsStale, setFileSummaryIsStale] = useState(false)
+  const [fileSummaryStaleReason, setFileSummaryStaleReason] = useState<string | null>(null)
+  const [fileVersionDiff, setFileVersionDiff] = useState<FileVersionDiff | null>(null)
+  const [fileSummaryStatus, setFileSummaryStatus] = useState<
+    'idle' | 'loading' | 'loaded' | 'missing' | 'failed'
+  >('idle')
+  const [deleteBusy, setDeleteBusy] = useState(false)
+  const [versionBusy, setVersionBusy] = useState(false)
+  const [isVersionDragOver, setIsVersionDragOver] = useState(false)
+  const [selectedVersionId, setSelectedVersionId] = useState('current')
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+
+  useEffect(() => {
+    let isMounted = true
+    setIsLoading(true)
+    setError(null)
+    setSelectedVersionId('current')
+    getStorageObject(storageObjectId)
+      .then(async (nextObject) => {
+        if (!isMounted) return
+        setObject(nextObject)
+        try {
+          const nextVersions = await listStorageObjectVersions(storageObjectId)
+          if (isMounted) setVersions(nextVersions)
+        } catch {
+          if (isMounted) setVersions([])
+        }
+      })
+      .catch((requestError) => {
+        if (isMounted) setError(describeError(requestError))
+      })
+      .finally(() => {
+        if (isMounted) setIsLoading(false)
+      })
+    return () => {
+      isMounted = false
+    }
+  }, [storageObjectId])
+
+  useEffect(() => {
+    const selectedVersion = versions.find((version) => version.id === selectedVersionId) ?? null
+    const previewFile =
+      object === null
+        ? null
+        : selectedVersion === null
+          ? currentStoragePreviewFile(object)
+          : versionStoragePreviewFile(selectedVersion)
+
+    if (
+      previewFile === null ||
+      !isPreviewableText(previewFile) ||
+      isPreviewableImage(previewFile)
+    ) {
+      setTextPreview(null)
+      setTextPreviewStatus('idle')
+      return undefined
+    }
+    const shouldLoadPartial = isPreviewableDelimitedTable(previewFile)
+    if (previewFile.byte_size > textPreviewByteLimit && !shouldLoadPartial) {
+      setTextPreview(null)
+      setTextPreviewStatus('too-large')
+      return undefined
+    }
+
+    let isMounted = true
+    setTextPreview(null)
+    setTextPreviewStatus('loading')
+    fetch(previewFile.url, {
+      credentials: 'include',
+      headers: shouldLoadPartial && previewFile.byte_size > textPreviewByteLimit
+        ? { Range: `bytes=0-${textPreviewByteLimit - 1}` }
+        : undefined,
+    })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(t('storage.preview.textFailed'))
+        }
+        const responseContentType = response.headers.get('content-type') ?? ''
+        if (responseContentType.toLowerCase().includes('text/html')) {
+          throw new Error(t('storage.preview.textFailed'))
+        }
+        return response.arrayBuffer()
+      })
+      .then((buffer) => {
+        if (!isMounted) return
+        setTextPreview(decodePreviewText(buffer, previewFile.content_type))
+        setTextPreviewStatus('loaded')
+      })
+      .catch(() => {
+        if (!isMounted) return
+        setTextPreview(null)
+        setTextPreviewStatus('failed')
+      })
+    return () => {
+      isMounted = false
+    }
+  }, [object, selectedVersionId, versions])
+
+  useEffect(() => {
+    if (object === null) {
+      setFileSummary(null)
+      setFileSummaryIsStale(false)
+      setFileSummaryStaleReason(null)
+      setFileVersionDiff(null)
+      setFileSummaryStatus('idle')
+      return undefined
+    }
+    let isMounted = true
+    setFileSummary(null)
+    setFileSummaryIsStale(false)
+    setFileSummaryStaleReason(null)
+    setFileVersionDiff(null)
+    setFileSummaryStatus('loading')
+    const versionId = selectedVersionId === 'current' ? null : selectedVersionId
+    getStorageObjectLlmDigest(object.id, versionId)
+      .then((response) => {
+        if (!isMounted) return
+        setFileSummary(response.summary)
+        setFileSummaryIsStale(response.is_stale)
+        setFileSummaryStaleReason(response.stale_reason)
+        setFileVersionDiff(response.diff)
+        setFileSummaryStatus(response.summary === null ? 'missing' : 'loaded')
+      })
+      .catch(() => {
+        if (!isMounted) return
+        setFileSummary(null)
+        setFileSummaryIsStale(false)
+        setFileSummaryStaleReason(null)
+        setFileVersionDiff(null)
+        setFileSummaryStatus('failed')
+      })
+    return () => {
+      isMounted = false
+    }
+  }, [object, selectedVersionId])
+
+  useEffect(() => {
+    const selectedVersion = versions.find((version) => version.id === selectedVersionId) ?? null
+    const previewFile =
+      object === null
+        ? null
+        : selectedVersion === null
+          ? currentStoragePreviewFile(object)
+          : versionStoragePreviewFile(selectedVersion)
+
+    if (object === null || previewFile === null || !isPreviewableZip(previewFile)) {
+      setArchiveTreeText(null)
+      setArchiveTreeStatus('idle')
+      return undefined
+    }
+
+    let isMounted = true
+    setArchiveTreeText(null)
+    setArchiveTreeStatus('loading')
+    const request =
+      selectedVersion === null
+        ? getStorageObjectArchiveTree(object.id)
+        : getStorageObjectVersionArchiveTree(object.id, selectedVersion.id)
+    request
+      .then((tree) => {
+        if (!isMounted) return
+        setArchiveTreeText(tree.tree_text)
+        setArchiveTreeStatus('loaded')
+      })
+      .catch(() => {
+        if (!isMounted) return
+        setArchiveTreeText(null)
+        setArchiveTreeStatus('failed')
+      })
+    return () => {
+      isMounted = false
+    }
+  }, [object, selectedVersionId, versions])
+
+  async function handleDownloadPreview(target: StoragePreviewFile) {
+    setDownloadBusyId(target.id)
+    setError(null)
+    try {
+      await downloadStorageObject(target)
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setDownloadBusyId(null)
+    }
+  }
+
+  async function handleUpdateLlmInput(target: StorageObject, allowed: boolean) {
+    setLlmBusy(true)
+    setError(null)
+    try {
+      const updatedObject = await updateStorageObjectLlmInput(target.id, allowed)
+      setObject(updatedObject)
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setLlmBusy(false)
+    }
+  }
+
+  async function handleDelete(target: StorageObject) {
+    if (!window.confirm(t('storage.delete.confirm', { name: target.original_filename ?? target.id }))) {
+      return
+    }
+    setDeleteBusy(true)
+    setError(null)
+    try {
+      await deleteStorageObject(target.id)
+      navigateTo('/files')
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setDeleteBusy(false)
+    }
+  }
+
+  async function handleDeleteOlderVersions(target: StorageObject, version: StorageObjectVersion) {
+    if (
+      !window.confirm(
+        t('storage.version.deleteOlderConfirm', {
+          version: String(version.version_number),
+        }),
+      )
+    ) {
+      return
+    }
+    setDeleteBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const result = await deleteOlderStorageObjectVersions(target.id, version.id)
+      const nextVersions = await listStorageObjectVersions(target.id)
+      setObject(result.storage_object)
+      setVersions(nextVersions)
+      setSelectedVersionId('current')
+      setNotice(
+        t('storage.version.deletedOlder', {
+          count: String(result.deleted_version_count),
+        }),
+      )
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setDeleteBusy(false)
+    }
+  }
+
+  async function handleLlmDigest() {
+    if (object === null || !object.llm_input_allowed || digestBusy) return
+    setDigestBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const versionId = selectedVersionId === 'current' ? null : selectedVersionId
+      const response = await prepareStorageObjectLlmDigest(object.id, versionId)
+      setObject(response.storage_object)
+      setFileSummary(response.summary)
+      setFileSummaryIsStale(response.is_stale)
+      setFileSummaryStaleReason(response.stale_reason)
+      setFileVersionDiff(response.diff)
+      setFileSummaryStatus('loaded')
+      setNotice(t('storage.llmDigest.prepared'))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setDigestBusy(false)
+    }
+  }
+
+  async function handleVersionDrop(file: File) {
+    if (object === null || versionBusy) return
+    const currentExtension = fileExtension(object.original_filename)
+    const nextExtension = fileExtension(file.name)
+    if (
+      currentExtension !== nextExtension &&
+      !window.confirm(
+        t('storage.version.extensionConfirm', {
+          current: currentExtension,
+          next: nextExtension,
+        }),
+      )
+    ) {
+      return
+    }
+    setVersionBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const response = await uploadStorageObjectVersion(object.id, file)
+      const nextVersions = await listStorageObjectVersions(object.id)
+      setObject(response.storage_object)
+      setVersions(nextVersions)
+      setSelectedVersionId('current')
+      setNotice(
+        response.skipped
+          ? t('storage.version.skippedDuplicate')
+          : t('storage.version.updated'),
+      )
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setVersionBusy(false)
+      setIsVersionDragOver(false)
+    }
+  }
+
+  const filename = object?.original_filename ?? object?.id ?? t('storage.detail.file')
+  const selectedVersion = versions.find((version) => version.id === selectedVersionId) ?? null
+  const olderVersionCount =
+    selectedVersion === null
+      ? 0
+      : versions.filter((version) => version.version_number <= selectedVersion.version_number)
+          .length
+  const previewFile =
+    object === null
+      ? null
+      : selectedVersion === null
+        ? currentStoragePreviewFile(object)
+        : versionStoragePreviewFile(selectedVersion)
+
+  return (
+    <main className="app-shell">
+      <div className="mail-shell storage-shell">
+        <header className="maintenance-header">
+          <div>
+            <p>{t('storage.heading')}</p>
+            <h1>{filename}</h1>
+          </div>
+          <nav aria-label={t('storage.navigation')} className="maintenance-nav">
+            <AppLink href="/files">{t('storage.heading')}</AppLink>
+            <AppLink href="/">{t('top.heading')}</AppLink>
+          </nav>
+        </header>
+
+        {error !== null && (
+          <section className="notice error" role="alert">
+            <p>{error}</p>
+          </section>
+        )}
+        {notice !== null && (
+          <section className="notice">
+            <p>{notice}</p>
+          </section>
+        )}
+
+        <section className="mail-panel storage-detail-panel">
+          {isLoading && <p>{t('storage.loading')}</p>}
+          {!isLoading && object !== null && (
+            <>
+              <div className="storage-detail-toolbar">
+                <button
+                  className={`button-loading-dot${
+                    previewFile !== null && downloadBusyId === previewFile.id ? ' is-loading' : ''
+                  }`}
+                  disabled={previewFile !== null && downloadBusyId === previewFile.id}
+                  onClick={() => {
+                    if (previewFile !== null) void handleDownloadPreview(previewFile)
+                  }}
+                  type="button"
+                >
+                  <ActionIconLabel
+                    iconUrl={downloadIconUrl}
+                    label={t('storage.version.downloadSelected')}
+                  />
+                </button>
+                <button
+                  className={`button-loading-dot${deleteBusy ? ' is-loading' : ''}`}
+                  disabled={deleteBusy || (selectedVersion !== null && olderVersionCount === 0)}
+                  onClick={() => {
+                    if (selectedVersion === null) {
+                      void handleDelete(object)
+                    } else {
+                      void handleDeleteOlderVersions(object, selectedVersion)
+                    }
+                  }}
+                  type="button"
+                >
+                  <ActionIconLabel
+                    iconUrl={trashIconUrl}
+                    label={
+                      selectedVersion === null
+                        ? t('storage.context.deleteSeries')
+                        : t('storage.version.deleteOlder')
+                    }
+                  />
+                </button>
+                <button
+                  className={`storage-llm-action-button button-loading-dot${
+                    llmBusy ? ' is-loading' : ''
+                  }`}
+                  disabled={llmBusy}
+                  onClick={() => void handleUpdateLlmInput(object, !object.llm_input_allowed)}
+                  type="button"
+                >
+                  {object.llm_input_allowed
+                    ? t('storage.llmInput.disallow')
+                    : t('storage.llmInput.allow')}
+                </button>
+                <button
+                  className={`storage-llm-action-button button-loading-dot${
+                    digestBusy ? ' is-loading' : ''
+                  }`}
+                  disabled={!object.llm_input_allowed || digestBusy}
+                  onClick={() => void handleLlmDigest()}
+                  type="button"
+                >
+                  {t('storage.llmDigest.button')}
+                </button>
+                <label className="storage-version-toolbar-select">
+                  <span>{t('storage.version.selectLabel')}</span>
+                  <select
+                    onChange={(event) => setSelectedVersionId(event.target.value)}
+                    value={selectedVersionId}
+                  >
+                    <option value="current">
+                      {t('storage.version.currentOption', {
+                        name: object.original_filename ?? object.id,
+                      })}
+                    </option>
+                    {versions.map((version) => (
+                      <option key={version.id} value={version.id}>
+                        {t('storage.version.option', {
+                          number: String(version.version_number),
+                          name: version.original_filename ?? version.id,
+                        })}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <dl className="storage-detail-meta">
+                <div>
+                  <dt>{t('storage.version.timestamp')}</dt>
+                  <dd>
+                    {previewFile !== null
+                      ? formatDateTime(previewFile.updated_at)
+                      : t('time.unavailable')}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{t('storage.size')}</dt>
+                  <dd>
+                    {previewFile !== null
+                      ? formatBytes(previewFile.byte_size)
+                      : t('time.unavailable')}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{t('storage.contentType')}</dt>
+                  <dd>{previewFile?.content_type ?? t('common.none')}</dd>
+                </div>
+                <div>
+                  <dt>{t('storage.llmInput.label')}</dt>
+                  <dd>
+                    {object.llm_input_allowed
+                      ? t('storage.llmInput.allowed')
+                      : t('storage.llmInput.blocked')}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{t('storage.source.label')}</dt>
+                  <dd>{storageSourceLabel(object)}</dd>
+                </div>
+              </dl>
+              {object.source_mail !== undefined && object.source_mail !== null && (
+                <StorageSourceMailCard mail={object.source_mail} />
+              )}
+              <div
+                className={`storage-file-preview storage-version-drop-zone button-loading-dot${
+                  versionBusy ? ' is-loading' : ''
+                }${isVersionDragOver ? ' is-drag-over' : ''}`}
+                onDragEnter={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  if (Array.from(event.dataTransfer.types).includes('Files')) {
+                    setIsVersionDragOver(true)
+                  }
+                }}
+                onDragOver={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  if (Array.from(event.dataTransfer.types).includes('Files')) {
+                    event.dataTransfer.dropEffect = 'copy'
+                    setIsVersionDragOver(true)
+                  }
+                }}
+                onDragLeave={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  setIsVersionDragOver(false)
+                }}
+                onDrop={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  setIsVersionDragOver(false)
+                  const file = event.dataTransfer.files.item(0)
+                  if (file !== null) void handleVersionDrop(file)
+                }}
+              >
+                {isVersionDragOver && (
+                  <div className="storage-version-drop-overlay">
+                    <strong>{t('storage.version.dropHeading')}</strong>
+                  </div>
+                )}
+                {previewFile === null ? (
+                  <p>{t('storage.preview.unavailable')}</p>
+                ) : isPreviewableImage(previewFile) ? (
+                  <img
+                    alt={previewFile.original_filename ?? t('storage.detail.file')}
+                    className="storage-image-preview"
+                    src={previewFile.url}
+                  />
+                ) : isPreviewablePdf(previewFile) ? (
+                  <iframe
+                    className="storage-pdf-preview"
+                    src={previewFile.url}
+                    title={previewFile.original_filename ?? t('storage.detail.file')}
+                  />
+                ) : isPreviewableZip(previewFile) ? (
+                  <StorageArchivePreview
+                    status={archiveTreeStatus}
+                    text={archiveTreeText}
+                  />
+                ) : isPreviewableMarkdown(previewFile) ? (
+                  <StorageMarkdownPreview
+                    status={textPreviewStatus}
+                    text={textPreview}
+                  />
+                ) : isPreviewableDelimitedTable(previewFile) ? (
+                  <StorageDelimitedTablePreview
+                    filename={previewFile.original_filename}
+                    partial={previewFile.byte_size > textPreviewByteLimit}
+                    status={textPreviewStatus}
+                    text={textPreview}
+                  />
+                ) : isPreviewableText(previewFile) ? (
+                  <StorageTextPreview
+                    status={textPreviewStatus}
+                    text={textPreview}
+                  />
+                ) : (
+                  <p>{t('storage.preview.unavailable')}</p>
+                )}
+              </div>
+              <FileSummaryCard
+                isStale={fileSummaryIsStale}
+                staleReason={fileSummaryStaleReason}
+                status={fileSummaryStatus}
+                summary={fileSummary}
+              />
+              <FileVersionDiffCard diff={fileVersionDiff} />
+            </>
+          )}
+        </section>
+      </div>
+    </main>
+  )
+}
+
+function markdownInlineNodes(text: string, keyPrefix: string): ReactNode[] {
+  const nodes: ReactNode[] = []
+  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\((?:https?:\/\/|mailto:)[^)]+\))/g
+  let lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      nodes.push(text.slice(lastIndex, match.index))
+    }
+    const token = match[0]
+    const key = `${keyPrefix}-${match.index}`
+    if (token.startsWith('`')) {
+      nodes.push(<code key={key}>{token.slice(1, -1)}</code>)
+    } else if (token.startsWith('**')) {
+      nodes.push(<strong key={key}>{token.slice(2, -2)}</strong>)
+    } else {
+      const linkMatch = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(token)
+      if (linkMatch === null) {
+        nodes.push(token)
+      } else {
+        nodes.push(
+          <a href={linkMatch[2]} key={key} rel="noreferrer" target="_blank">
+            {linkMatch[1]}
+          </a>,
+        )
+      }
+    }
+    lastIndex = pattern.lastIndex
+  }
+  if (lastIndex < text.length) {
+    nodes.push(text.slice(lastIndex))
+  }
+  return nodes
+}
+
+function renderMarkdownBlocks(text: string) {
+  const lines = text.replace(/\r\n?/g, '\n').split('\n')
+  const blocks: ReactNode[] = []
+  let index = 0
+
+  function isBlockStart(line: string) {
+    return (
+      /^#{1,6}\s+/.test(line) ||
+      /^[-*_]{3,}\s*$/.test(line) ||
+      /^>\s?/.test(line) ||
+      /^[-*]\s+/.test(line) ||
+      /^\d+\.\s+/.test(line) ||
+      /^```/.test(line)
+    )
+  }
+
+  while (index < lines.length) {
+    const line = lines[index]
+    if (line.trim() === '') {
+      index += 1
+      continue
+    }
+
+    if (line.startsWith('```')) {
+      const codeLines: string[] = []
+      index += 1
+      while (index < lines.length && !lines[index].startsWith('```')) {
+        codeLines.push(lines[index])
+        index += 1
+      }
+      if (index < lines.length) index += 1
+      blocks.push(
+        <pre className="storage-markdown-code" key={`code-${index}`}>
+          <code>{codeLines.join('\n')}</code>
+        </pre>,
+      )
+      continue
+    }
+
+    const headingMatch = /^(#{1,6})\s+(.+)$/.exec(line)
+    if (headingMatch !== null) {
+      const level = headingMatch[1].length
+      const content = markdownInlineNodes(headingMatch[2], `heading-${index}`)
+      const key = `heading-${index}`
+      if (level === 1) blocks.push(<h2 key={key}>{content}</h2>)
+      else if (level === 2) blocks.push(<h3 key={key}>{content}</h3>)
+      else if (level === 3) blocks.push(<h4 key={key}>{content}</h4>)
+      else if (level === 4) blocks.push(<h5 key={key}>{content}</h5>)
+      else blocks.push(<h6 key={key}>{content}</h6>)
+      index += 1
+      continue
+    }
+
+    if (/^[-*_]{3,}\s*$/.test(line)) {
+      blocks.push(<hr key={`hr-${index}`} />)
+      index += 1
+      continue
+    }
+
+    if (/^>\s?/.test(line)) {
+      const quoteLines: string[] = []
+      while (index < lines.length && /^>\s?/.test(lines[index])) {
+        quoteLines.push(lines[index].replace(/^>\s?/, ''))
+        index += 1
+      }
+      blocks.push(
+        <blockquote key={`quote-${index}`}>
+          {quoteLines.map((quoteLine, quoteIndex) => (
+            <Fragment key={`quote-${index}-${quoteIndex}`}>
+              {quoteIndex > 0 && <br />}
+              {markdownInlineNodes(quoteLine, `quote-${index}-${quoteIndex}`)}
+            </Fragment>
+          ))}
+        </blockquote>,
+      )
+      continue
+    }
+
+    if (/^[-*]\s+/.test(line)) {
+      const items: string[] = []
+      while (index < lines.length && /^[-*]\s+/.test(lines[index])) {
+        items.push(lines[index].replace(/^[-*]\s+/, ''))
+        index += 1
+      }
+      blocks.push(
+        <ul key={`ul-${index}`}>
+          {items.map((item, itemIndex) => (
+            <li key={`ul-${index}-${itemIndex}`}>
+              {markdownInlineNodes(item, `ul-${index}-${itemIndex}`)}
+            </li>
+          ))}
+        </ul>,
+      )
+      continue
+    }
+
+    if (/^\d+\.\s+/.test(line)) {
+      const items: string[] = []
+      while (index < lines.length && /^\d+\.\s+/.test(lines[index])) {
+        items.push(lines[index].replace(/^\d+\.\s+/, ''))
+        index += 1
+      }
+      blocks.push(
+        <ol key={`ol-${index}`}>
+          {items.map((item, itemIndex) => (
+            <li key={`ol-${index}-${itemIndex}`}>
+              {markdownInlineNodes(item, `ol-${index}-${itemIndex}`)}
+            </li>
+          ))}
+        </ol>,
+      )
+      continue
+    }
+
+    const paragraphLines: string[] = []
+    while (
+      index < lines.length &&
+      lines[index].trim() !== '' &&
+      !isBlockStart(lines[index])
+    ) {
+      paragraphLines.push(lines[index])
+      index += 1
+    }
+    const paragraphText = paragraphLines.join(' ')
+    blocks.push(
+      <p key={`p-${index}`}>
+        {markdownInlineNodes(paragraphText, `p-${index}`)}
+      </p>,
+    )
+  }
+
+  return blocks
+}
+
+function StorageMarkdownPreview({
+  status,
+  text,
+}: {
+  status: 'idle' | 'loading' | 'loaded' | 'too-large' | 'failed'
+  text: string | null
+}) {
+  if (status === 'loading') {
+    return <p>{t('storage.preview.textLoading')}</p>
+  }
+  if (status === 'too-large') {
+    return <p>{t('storage.preview.textTooLarge')}</p>
+  }
+  if (status === 'failed') {
+    return <p>{t('storage.preview.textFailed')}</p>
+  }
+  if (status === 'loaded') {
+    return (
+      <article className="storage-markdown-preview">
+        {renderMarkdownBlocks(text ?? '')}
+      </article>
+    )
+  }
+  return <p>{t('storage.preview.unavailable')}</p>
+}
+
+function parseDelimitedTable(text: string, delimiter: ',' | '\t') {
+  const rows: string[][] = []
+  let row: string[] = []
+  let cell = ''
+  let inQuotes = false
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]
+    if (inQuotes) {
+      if (char === '"') {
+        if (text[index + 1] === '"') {
+          cell += '"'
+          index += 1
+        } else {
+          inQuotes = false
+        }
+      } else {
+        cell += char
+      }
+      continue
+    }
+
+    if (char === '"') {
+      inQuotes = true
+    } else if (char === delimiter) {
+      row.push(cell)
+      cell = ''
+    } else if (char === '\n') {
+      row.push(cell)
+      rows.push(row)
+      row = []
+      cell = ''
+    } else if (char !== '\r') {
+      cell += char
+    }
+  }
+  row.push(cell)
+  if (row.some((value) => value !== '') || rows.length === 0) {
+    rows.push(row)
+  }
+  return rows
+}
+
+function StorageDelimitedTablePreview({
+  filename,
+  partial,
+  status,
+  text,
+}: {
+  filename: string | null
+  partial: boolean
+  status: 'idle' | 'loading' | 'loaded' | 'too-large' | 'failed'
+  text: string | null
+}) {
+  if (status === 'loading') {
+    return <p>{t('storage.preview.textLoading')}</p>
+  }
+  if (status === 'too-large') {
+    return <p>{t('storage.preview.textTooLarge')}</p>
+  }
+  if (status === 'failed') {
+    return <p>{t('storage.preview.textFailed')}</p>
+  }
+  if (status !== 'loaded') {
+    return <p>{t('storage.preview.unavailable')}</p>
+  }
+
+  const delimiter = fileExtension(filename) === 'tsv' ? '\t' : ','
+  const rows = parseDelimitedTable(text ?? '', delimiter)
+  const visibleRows = rows.slice(0, 200)
+  const maxColumns = Math.min(50, Math.max(...visibleRows.map((row) => row.length), 0))
+  const isTruncated = rows.length > visibleRows.length || rows.some((row) => row.length > maxColumns)
+
+  return (
+    <div className="storage-table-preview">
+      <table>
+        <tbody>
+          {visibleRows.map((row, rowIndex) => (
+            <tr key={`row-${rowIndex}`}>
+              <th className="storage-table-row-number" scope="row">
+                {rowIndex + 1}
+              </th>
+              {Array.from({ length: maxColumns }).map((_, columnIndex) => (
+                <td key={`cell-${rowIndex}-${columnIndex}`}>
+                  {row[columnIndex] ?? ''}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {partial && (
+        <p className="storage-table-preview-note">
+          {t('storage.preview.tablePartial')}
+        </p>
+      )}
+      {isTruncated && (
+        <p className="storage-table-preview-note">
+          {t('storage.preview.tableTruncated')}
+        </p>
+      )}
+    </div>
+  )
+}
+
+function StorageTextPreview({
+  status,
+  text,
+}: {
+  status: 'idle' | 'loading' | 'loaded' | 'too-large' | 'failed'
+  text: string | null
+}) {
+  if (status === 'loading') {
+    return <p>{t('storage.preview.textLoading')}</p>
+  }
+  if (status === 'too-large') {
+    return <p>{t('storage.preview.textTooLarge')}</p>
+  }
+  if (status === 'failed') {
+    return <p>{t('storage.preview.textFailed')}</p>
+  }
+  if (status === 'loaded') {
+    return (
+      <pre className="storage-text-preview">
+        <code>{text ?? ''}</code>
+      </pre>
+    )
+  }
+  return <p>{t('storage.preview.unavailable')}</p>
+}
+
+function StorageArchivePreview({
+  status,
+  text,
+}: {
+  status: 'idle' | 'loading' | 'loaded' | 'failed'
+  text: string | null
+}) {
+  if (status === 'loading') {
+    return <p>{t('storage.preview.archiveLoading')}</p>
+  }
+  if (status === 'failed') {
+    return <p>{t('storage.preview.archiveFailed')}</p>
+  }
+  if (status === 'loaded') {
+    return (
+      <pre className="storage-text-preview">
+        <code>{text ?? ''}</code>
+      </pre>
+    )
+  }
+  return <p>{t('storage.preview.unavailable')}</p>
+}
+
+function FileSummaryCard({
+  isStale,
+  staleReason,
+  summary,
+  status,
+}: {
+  isStale: boolean
+  staleReason: string | null
+  summary: FileSummary | null
+  status: 'idle' | 'loading' | 'loaded' | 'missing' | 'failed'
+}) {
+  return (
+    <section className="storage-file-summary-card">
+      <div className="section-heading">
+        <div>
+          <h2>{t('storage.llmDigest.cardHeading')}</h2>
+        </div>
+      </div>
+      {status === 'loading' && <p>{t('storage.llmDigest.loading')}</p>}
+      {status === 'failed' && <p>{t('storage.llmDigest.loadFailed')}</p>}
+      {(status === 'idle' || status === 'missing') && (
+        <p>{t('storage.llmDigest.empty')}</p>
+      )}
+      {summary !== null && (
+        <div className="storage-file-summary-content">
+          {isStale && (
+            <p className="storage-file-summary-stale" title={staleReason ?? undefined}>
+              {t('storage.llmDigest.stale')}
+            </p>
+          )}
+          <p className="storage-file-description">{summary.file_description}</p>
+          {summary.summary_points.length > 0 ? (
+            <ul>
+              {summary.summary_points.slice(0, 5).map((point, index) => (
+                <li key={`${summary.id}-${index}`}>{point}</li>
+              ))}
+            </ul>
+          ) : (
+            <p>{t('storage.llmDigest.noSummaryPoints')}</p>
+          )}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function FileVersionDiffCard({ diff }: { diff: FileVersionDiff | null }) {
+  const [isOpen, setIsOpen] = useState(false)
+  if (diff === null) {
+    return null
+  }
+  return (
+    <section className="storage-file-summary-card storage-file-diff-card">
+      <button
+        aria-expanded={isOpen}
+        className="storage-file-diff-toggle"
+        onClick={() => setIsOpen((current) => !current)}
+        type="button"
+      >
+        <div>
+          <h2>{t('storage.diff.cardHeading')}</h2>
+          <p>{diff.summary_text}</p>
+        </div>
+        <span>{isOpen ? '−' : '+'}</span>
+      </button>
+      {isOpen && diff.display_lines.length > 0 ? (
+        <pre className="storage-file-diff-view">
+          {diff.display_lines.map((line, index) => (
+            <code
+              className={`storage-file-diff-line is-${line.kind}`}
+              key={`${diff.id}-display-${index}`}
+            >
+              <span>
+                {line.kind === 'added'
+                  ? '+'
+                  : line.kind === 'removed'
+                    ? '-'
+                    : line.kind === 'ellipsis'
+                      ? '...'
+                      : ' '}
+              </span>
+              {line.text}
+            </code>
+          ))}
+        </pre>
+      ) : isOpen ? (
+        <p className="storage-file-diff-empty">{t('storage.diff.none')}</p>
+      ) : null}
+    </section>
+  )
+}
+
+function StorageListView() {
+  const [objects, setObjects] = useState<StorageObject[]>([])
+  const [directories, setDirectories] = useState<StorageDirectory[]>([])
+  const [breadcrumbs, setBreadcrumbs] = useState<StorageDirectory[]>([])
+  const [currentDirectoryId, setCurrentDirectoryId] = useState<string | null>(
+    directoryIdFromLocation,
+  )
+  const [searchQuery, setSearchQuery] = useState('')
+  const [sortMode, setSortMode] = useState<'created_desc' | 'created_asc' | 'name'>(
+    'created_desc',
+  )
+  const [extensionFilter, setExtensionFilter] = useState<string | null>(null)
+  const [availableExtensions, setAvailableExtensions] = useState<string[]>([])
+  const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null)
+  const [contextMenu, setContextMenu] = useState<{
+    directory: StorageDirectory | null
+    object: StorageObject | null
+    x: number
+    y: number
+  } | null>(null)
+  const [isLoading, setIsLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [isDragOver, setIsDragOver] = useState(false)
+  const [downloadBusyId, setDownloadBusyId] = useState<string | null>(null)
+  const [llmBusyId, setLlmBusyId] = useState<string | null>(null)
+  const [deleteBusyId, setDeleteBusyId] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const isSearchMode = searchQuery.trim() !== '' || extensionFilter !== null
+
+  async function refreshStorage() {
+    setError(null)
+    if (isSearchMode) {
+      const [searchResult, nextDirectories] = await Promise.all([
+        searchStorageObjects({
+          query: searchQuery,
+          directory_id: currentDirectoryId,
+          recursive: true,
+          sort: sortMode,
+          extension: extensionFilter,
+          limit: 200,
+        }),
+        listStorageDirectories(currentDirectoryId),
+      ])
+      setObjects(searchResult.items)
+      setDirectories([])
+      setBreadcrumbs(nextDirectories.breadcrumbs)
+      setAvailableExtensions(searchResult.extensions)
+      return
+    }
+
+    const [nextObjects, nextDirectories, nextExtensions] = await Promise.all([
+      listStorageObjects({ directory_id: currentDirectoryId, limit: 200 }),
+      listStorageDirectories(currentDirectoryId),
+      searchStorageObjects({
+        query: searchQuery,
+        directory_id: currentDirectoryId,
+        recursive: true,
+        sort: sortMode,
+        extension: null,
+        limit: 1,
+      }),
+    ])
+    setObjects(nextObjects)
+    setDirectories(nextDirectories.items)
+    setBreadcrumbs(nextDirectories.breadcrumbs)
+    setAvailableExtensions(nextExtensions.extensions)
+  }
+
+  useEffect(() => {
+    let isMounted = true
+    setIsLoading(true)
+    refreshStorage()
+      .catch((requestError) => {
+        if (isMounted) setError(describeError(requestError))
+      })
+      .finally(() => {
+        if (isMounted) setIsLoading(false)
+      })
+    return () => {
+      isMounted = false
+    }
+  }, [currentDirectoryId, searchQuery, sortMode, extensionFilter])
+
+  useEffect(() => {
+    const syncDirectoryFromLocation = () => setCurrentDirectoryId(directoryIdFromLocation())
+    window.addEventListener('popstate', syncDirectoryFromLocation)
+    return () => window.removeEventListener('popstate', syncDirectoryFromLocation)
+  }, [])
+
+  useEffect(() => {
+    if (contextMenu === null) return undefined
+
+    const closeMenu = () => setContextMenu(null)
+    const closeMenuOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeMenu()
+    }
+
+    window.addEventListener('click', closeMenu)
+    window.addEventListener('scroll', closeMenu, true)
+    window.addEventListener('keydown', closeMenuOnEscape)
+    return () => {
+      window.removeEventListener('click', closeMenu)
+      window.removeEventListener('scroll', closeMenu, true)
+      window.removeEventListener('keydown', closeMenuOnEscape)
+    }
+  }, [contextMenu])
+
+  async function uploadFile(file: File | null) {
+    if (file === null) {
+      setError(t('storage.noFileSelected'))
+      return
+    }
+    setBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const response = await uploadManagedStorageFile(file, currentDirectoryId)
+      setNotice(t('storage.uploaded', { name: response.storage_object.original_filename ?? response.storage_object.id }))
+      await refreshStorage()
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleMoveStorageObject(objectId: string, directoryId: string | null) {
+    if (objectId === '') return
+    setBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const movedObject = await moveStorageObjectToDirectory(objectId, directoryId)
+      setSelectedObjectId((currentId) => (currentId === objectId ? null : currentId))
+      setNotice(t('storage.moved', { name: movedObject.original_filename ?? movedObject.id }))
+      await refreshStorage()
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function objectIdFromDragEvent(event: DragEvent<HTMLElement>) {
+    return (
+      event.dataTransfer.getData(storageObjectDragType) ||
+      event.dataTransfer.getData('text/plain')
+    )
+  }
+
+  function handleDirectoryDragOver(event: DragEvent<HTMLElement>) {
+    event.preventDefault()
+    event.stopPropagation()
+    event.dataTransfer.dropEffect = 'move'
+  }
+
+  function handleDirectoryDrop(event: DragEvent<HTMLElement>, directoryId: string | null) {
+    event.preventDefault()
+    event.stopPropagation()
+    const objectId = objectIdFromDragEvent(event)
+    if (objectId !== '') void handleMoveStorageObject(objectId, directoryId)
+  }
+
+  function handleDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault()
+    setIsDragOver(false)
+    if (event.dataTransfer.files.length === 0) return
+    const file = event.dataTransfer.files?.[0] ?? null
+    void uploadFile(file)
+  }
+
+  function handleDragOver(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'copy'
+    setIsDragOver(true)
+  }
+
+  function handleDragLeave(event: DragEvent<HTMLDivElement>) {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      setIsDragOver(false)
+    }
+  }
+
+  async function handleDownload(object: StorageObject) {
+    setDownloadBusyId(object.id)
+    setError(null)
+    try {
+      await downloadStorageObject(object)
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setDownloadBusyId(null)
+    }
+  }
+
+  async function handleUpdateLlmInput(object: StorageObject, allowed: boolean) {
+    setLlmBusyId(object.id)
+    setError(null)
+    try {
+      const updatedObject = await updateStorageObjectLlmInput(object.id, allowed)
+      setObjects((currentObjects) =>
+        currentObjects.map((currentObject) =>
+          currentObject.id === updatedObject.id ? updatedObject : currentObject,
+        ),
+      )
+      if (contextMenu?.object?.id === updatedObject.id) {
+        setContextMenu({ ...contextMenu, object: updatedObject })
+      }
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setLlmBusyId(null)
+    }
+  }
+
+  async function handleDelete(object: StorageObject) {
+    if (!window.confirm(t('storage.delete.confirm', { name: object.original_filename ?? object.id }))) {
+      return
+    }
+    setDeleteBusyId(object.id)
+    setError(null)
+    setNotice(null)
+    try {
+      await deleteStorageObject(object.id)
+      setObjects((currentObjects) =>
+        currentObjects.filter((currentObject) => currentObject.id !== object.id),
+      )
+      setSelectedObjectId((currentId) => (currentId === object.id ? null : currentId))
+      setNotice(t('storage.deleted', { name: object.original_filename ?? object.id }))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setDeleteBusyId(null)
+    }
+  }
+
+  function handleOpenStorageObject(object: StorageObject) {
+    setSelectedObjectId(object.id)
+    setContextMenu(null)
+    navigateTo(`/files/${encodeURIComponent(object.id)}`)
+  }
+
+  function handleOpenDirectory(directory: StorageDirectory) {
+    setSelectedObjectId(null)
+    setContextMenu(null)
+    setCurrentDirectoryId(directory.id)
+    navigateTo(`/files?directory=${encodeURIComponent(directory.id)}`)
+  }
+
+  function handleOpenRootDirectory() {
+    setSelectedObjectId(null)
+    setContextMenu(null)
+    setCurrentDirectoryId(null)
+    navigateTo('/files')
+  }
+
+  async function createDirectoryByPrompt() {
+    const name = window.prompt(t('storage.directory.namePrompt'))?.trim() ?? ''
+    if (name === '') return
+    setBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      await createStorageDirectory({ name, parent_id: currentDirectoryId })
+      await refreshStorage()
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function handleStorageObjectContextMenu(event: MouseEvent<HTMLButtonElement>, object: StorageObject) {
+    event.preventDefault()
+    event.stopPropagation()
+    setSelectedObjectId(object.id)
+    setContextMenu({
+      directory: null,
+      object,
+      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 180)),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 64)),
+    })
+  }
+
+  function handleStoragePanelContextMenu(event: MouseEvent<HTMLElement>) {
+    event.preventDefault()
+    const target = event.target instanceof Element ? event.target : null
+    if (target?.closest('.storage-object-card') !== null) {
+      return
+    }
+    setSelectedObjectId(null)
+    setContextMenu({
+      directory: null,
+      object: null,
+      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 180)),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 64)),
+    })
+  }
+
+  function handleStorageDirectoryContextMenu(
+    event: MouseEvent<HTMLButtonElement>,
+    directory: StorageDirectory,
+  ) {
+    event.preventDefault()
+    event.stopPropagation()
+    setSelectedObjectId(null)
+    setContextMenu({
+      directory,
+      object: null,
+      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 180)),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 64)),
+    })
+  }
+
+  function handleContextDownload() {
+    if (contextMenu === null || contextMenu.object === null) return
+    const object = contextMenu.object
+    setContextMenu(null)
+    void handleDownload(object)
+  }
+
+  function handleContextLlmInputToggle() {
+    if (contextMenu === null || contextMenu.object === null) return
+    const object = contextMenu.object
+    setContextMenu(null)
+    void handleUpdateLlmInput(object, !object.llm_input_allowed)
+  }
+
+  function handleContextDelete() {
+    if (contextMenu === null || contextMenu.object === null) return
+    const object = contextMenu.object
+    setContextMenu(null)
+    void handleDelete(object)
+  }
+
+  function handleContextCreateDirectory() {
+    setContextMenu(null)
+    void createDirectoryByPrompt()
+  }
+
+  async function handleDeleteDirectory(directory: StorageDirectory) {
+    if (!window.confirm(t('storage.directory.deleteConfirm', { name: directory.name }))) {
+      return
+    }
+    setBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      await deleteStorageDirectory(directory.id)
+      setDirectories((currentDirectories) =>
+        currentDirectories.filter((currentDirectory) => currentDirectory.id !== directory.id),
+      )
+      setNotice(t('storage.directory.deleted', { name: directory.name }))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function handleContextDeleteDirectory() {
+    if (contextMenu === null || contextMenu.directory === null) return
+    const directory = contextMenu.directory
+    setContextMenu(null)
+    void handleDeleteDirectory(directory)
+  }
+
+  return (
+    <main className="app-shell">
+      <div className="mail-shell storage-shell">
+        <header className="maintenance-header">
+          <div>
+            <p>{t('app.name')}</p>
+            <h1>{t('storage.heading')}</h1>
+          </div>
+          <nav aria-label={t('storage.navigation')} className="maintenance-nav">
+            <AppLink href="/">{t('top.heading')}</AppLink>
+            <AppLink href="/maintenance">{t('nav.maintenance')}</AppLink>
+          </nav>
+        </header>
+
+        {(error !== null || notice !== null) && (
+          <div className="mail-feedback">
+            {error !== null && <p role="alert">{error}</p>}
+            {notice !== null && <p>{notice}</p>}
+          </div>
+        )}
+
+        <div className="storage-top-tools">
+          <section className="storage-path-card" aria-label={t('storage.directory.path')}>
+            <h3>{t('storage.directory.path')}</h3>
+            <nav aria-label={t('storage.directory.breadcrumb')} className="storage-breadcrumb">
+              <button
+                onClick={handleOpenRootDirectory}
+                onDragOver={handleDirectoryDragOver}
+                onDrop={(event) => handleDirectoryDrop(event, null)}
+                type="button"
+              >
+                {t('storage.directory.root')}
+              </button>
+              {breadcrumbs.map((directory) => (
+                <button
+                  key={directory.id}
+                  onClick={() => handleOpenDirectory(directory)}
+                  onDragOver={handleDirectoryDragOver}
+                  onDrop={(event) => handleDirectoryDrop(event, directory.id)}
+                  type="button"
+                >
+                  {directory.name}
+                </button>
+              ))}
+            </nav>
+          </section>
+          <section className="storage-search-tools" aria-label={t('storage.search.region')}>
+            <div aria-label={t('storage.search.region')} role="search">
+              <label>
+                <span>{t('storage.search.label')}</span>
+                <input
+                  aria-label={t('storage.search.label')}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  placeholder={t('storage.search.placeholder')}
+                  type="search"
+                  value={searchQuery}
+                />
+              </label>
+            </div>
+            <label className="storage-sort-control">
+              <span>{t('storage.sort.label')}</span>
+              <select
+                aria-label={t('storage.sort.aria')}
+                onChange={(event) =>
+                  setSortMode(event.target.value as 'created_desc' | 'created_asc' | 'name')
+                }
+                value={sortMode}
+              >
+                <option value="created_desc">{t('storage.sort.createdDesc')}</option>
+                <option value="created_asc">{t('storage.sort.createdAsc')}</option>
+                <option value="name">{t('storage.sort.name')}</option>
+              </select>
+            </label>
+            <div className="storage-extension-filters" aria-label={t('storage.extension.label')}>
+              <button
+                aria-pressed={extensionFilter === null}
+                onClick={() => setExtensionFilter(null)}
+                type="button"
+              >
+                {t('common.all')}
+              </button>
+              {availableExtensions.map((extension) => (
+                <button
+                  aria-pressed={extensionFilter === extension}
+                  key={extension}
+                  onClick={() =>
+                    setExtensionFilter((current) => (current === extension ? null : extension))
+                  }
+                  type="button"
+                >
+                  .{extension}
+                </button>
+              ))}
+            </div>
+          </section>
+        </div>
+
+        <section
+          className={`mail-panel storage-objects-panel storage-drop-zone button-loading-dot${
+            busy ? ' is-loading' : ''
+          }${isDragOver ? ' is-drag-over' : ''}`}
+          onContextMenu={handleStoragePanelContextMenu}
+          onDragLeave={handleDragLeave}
+          onDragOver={handleDragOver}
+          onDrop={handleDrop}
+        >
+          <div className="section-heading">
+            <div>
+              <h2>{t('storage.objects')}</h2>
+            </div>
+            <p>{t('storage.objectsBody')}</p>
+          </div>
+          <div className="storage-object-grid">
+            {directories.map((directory) => (
+              <StorageDirectoryCard
+                directory={directory}
+                key={directory.id}
+                onContextMenu={handleStorageDirectoryContextMenu}
+                onDropObject={(objectId, directoryId) =>
+                  void handleMoveStorageObject(objectId, directoryId)
+                }
+                onOpen={handleOpenDirectory}
+              />
+            ))}
+            {objects.map((object) => (
+              <StorageObjectCard
+                busy={
+                  downloadBusyId === object.id ||
+                  llmBusyId === object.id ||
+                  deleteBusyId === object.id
+                }
+                key={object.id}
+                object={object}
+                onContextMenu={handleStorageObjectContextMenu}
+                onOpen={handleOpenStorageObject}
+                selected={selectedObjectId === object.id}
+                showPath={isSearchMode}
+              />
+            ))}
+            {objects.length === 0 && directories.length === 0 && (
+              <p>{isLoading ? t('storage.loading') : t('storage.noObjects')}</p>
+            )}
+          </div>
+          {contextMenu !== null && (
+            <div
+              aria-label={t('storage.context.menuLabel')}
+              className="storage-context-menu"
+              onClick={(event) => event.stopPropagation()}
+              role="menu"
+              style={{ left: contextMenu.x, top: contextMenu.y }}
+            >
+              {contextMenu.object === null && contextMenu.directory === null && (
+                <button onClick={handleContextCreateDirectory} role="menuitem" type="button">
+                  {t('storage.context.newDirectory')}
+                </button>
+              )}
+              {contextMenu.directory !== null && (
+                <button onClick={handleContextDeleteDirectory} role="menuitem" type="button">
+                  <ActionIconLabel
+                    iconUrl={trashIconUrl}
+                    label={t('storage.context.deleteDirectory')}
+                  />
+                </button>
+              )}
+              {contextMenu.object !== null && (
+                <>
+                  <button onClick={handleContextDownload} role="menuitem" type="button">
+                    <ActionIconLabel
+                      iconUrl={downloadIconUrl}
+                      label={t('storage.context.download')}
+                    />
+                  </button>
+                  <button onClick={handleContextLlmInputToggle} role="menuitem" type="button">
+                    {contextMenu.object.llm_input_allowed
+                      ? t('storage.llmInput.disallow')
+                      : t('storage.llmInput.allow')}
+                  </button>
+                  <button onClick={handleContextDelete} role="menuitem" type="button">
+                    <ActionIconLabel
+                      iconUrl={trashIconUrl}
+                      label={t('storage.context.delete')}
+                    />
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+        </section>
+      </div>
+    </main>
+  )
+}
+
+export default function StorageView({ storageObjectId }: { storageObjectId?: string } = {}) {
+  if (storageObjectId !== undefined) {
+    return <StorageObjectDetailView storageObjectId={storageObjectId} />
+  }
+  return <StorageListView />
+}

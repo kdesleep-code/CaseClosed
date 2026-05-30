@@ -11,6 +11,11 @@ dependencies = [
     "alembic>=1.15,<2",
     "argon2-cffi>=25.1,<26",
     "fastapi>=0.115,<1",
+    "pillow>=11,<12",
+    "pymupdf>=1.24,<2",
+    "pypdf>=5,<7",
+    "python-docx>=1.1,<2",
+    "python-multipart>=0.0.20,<1",
     "sqlalchemy>=2.0,<3",
     "uvicorn[standard]>=0.34,<1",
 ]

@@ -25,6 +25,8 @@ from caseclosed.maintenance import router as maintenance_router
 from caseclosed.services.background_worker import BackgroundWorkerSupervisor
 from caseclosed.services.gmail_auto_import import GmailAutoImportSupervisor
 from caseclosed.settings import is_background_worker_enabled
+from caseclosed.storage import router as storage_router
+from caseclosed.storage import storage_root
 
 FRONTEND_DIST = Path(__file__).resolve().parents[3] / "frontend" / "dist"
 
@@ -34,6 +36,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     rebuild_runtime_database()
     bootstrap_database()
     bootstrap_mail_drafts_database()
+    storage_root()
     background_worker = None
     gmail_auto_import = GmailAutoImportSupervisor()
     gmail_auto_import.start()
@@ -57,6 +60,7 @@ app.include_router(google_integration_router)
 app.include_router(maintenance_router)
 app.include_router(mail_drafts_router)
 app.include_router(mails_router)
+app.include_router(storage_router)
 
 if (FRONTEND_DIST / "assets").exists():
     app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")

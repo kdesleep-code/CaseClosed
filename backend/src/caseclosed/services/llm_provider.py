@@ -230,6 +230,23 @@ def build_mail_thread_summary_provider() -> LlmProvider:
     )
 
 
+def build_file_summary_provider() -> LlmProvider:
+    profile = load_llm_model_profile(FUNCTION_TYPE_FILE_SUMMARY)
+    if profile is None or profile.provider == "mock":
+        return MockFileSummaryProvider()
+
+    if profile.provider != "openai":
+        raise OpenAIProviderError(
+            f"Unsupported provider for {FUNCTION_TYPE_FILE_SUMMARY}: {profile.provider}"
+        )
+
+    return OpenAIFileSummaryProvider(
+        api_key_env=profile.api_key_env,
+        model_name=profile.model,
+        timeout_seconds=profile.timeout_seconds,
+    )
+
+
 def build_contact_ai_memo_update_provider() -> LlmProvider:
     profile = load_llm_model_profile(FUNCTION_TYPE_CONTACT_AI_MEMO_UPDATE)
     if profile is None or profile.provider == "mock":
@@ -274,6 +291,7 @@ def build_mail_draft_generation_provider(function_type: str) -> LlmProvider:
 FUNCTION_TYPE_MAIL_IMPORTANCE = "mail_importance_classification"
 FUNCTION_TYPE_MAIL_SUMMARY = "mail_summary"
 FUNCTION_TYPE_MAIL_THREAD_SUMMARY = "mail_thread_summary"
+FUNCTION_TYPE_FILE_SUMMARY = "file_summary"
 FUNCTION_TYPE_CONTACT_AI_MEMO_UPDATE = "contact_ai_memo_update"
 FUNCTION_TYPE_REPLY_DRAFT_GENERATION = "reply_draft_generation"
 FUNCTION_TYPE_NEW_MAIL_DRAFT_GENERATION = "new_mail_draft_generation"
@@ -406,6 +424,7 @@ LLM_FUNCTION_TYPES = [
     "contact_ai_memo_update",
     "mail_summary",
     "mail_thread_summary",
+    "file_summary",
     "mail_case_selection",
     "reply_draft_generation",
     "new_mail_draft_generation",
@@ -737,6 +756,63 @@ class MockMailThreadSummaryProvider:
         )
 
 
+class MockFileSummaryProvider:
+    provider_name = "mock"
+    model_name = "deterministic-file-summary-v1"
+
+    def complete_json(
+        self,
+        *,
+        function_type: str,
+        input_payload: dict[str, object],
+    ) -> LlmProviderResponse:
+        if function_type != FUNCTION_TYPE_FILE_SUMMARY:
+            raise ValueError(f"Unsupported mock function type: {function_type}")
+
+        filename = str(input_payload.get("filename") or "file")
+        content_type = str(input_payload.get("content_type") or "unknown")
+        source_text = normalized_text(str(input_payload.get("source_text") or ""))
+        excerpt = compact_text(source_text, 220)
+        points = [
+            f"File name: {filename}",
+            f"Content type: {content_type}",
+        ]
+        if excerpt:
+            points.append(f"Visible content excerpt: {excerpt}")
+        output = {
+            "schema_version": "1.0",
+            "file_description": f"{filename} prepared as an LLM input digest.",
+            "summary_points": points[:5],
+            "llm_digest": "\n".join(points),
+            "structured_digest": {
+                "document_type": content_type,
+                "facts": points,
+                "entities": [],
+                "dates": [],
+                "numbers": [],
+                "action_items": [],
+                "structure_notes": [],
+            },
+            "coverage": {
+                "source_kind": str(input_payload.get("source_kind") or "unknown"),
+                "read_scope": str(input_payload.get("read_scope") or "unknown"),
+                "truncated": bool(input_payload.get("truncated")),
+                "limitations": input_payload.get("limitations") or [],
+            },
+            "token_estimate": max(1, len("\n".join(points)) // 4),
+            "reasoning_summary": "Mock digest generated from file metadata and extracted text.",
+            "warnings": [],
+        }
+        return LlmProviderResponse(
+            output=output,
+            output_preview=str(output["file_description"]),
+            prompt_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+            estimated_cost=0.0,
+        )
+
+
 class MockContactAiMemoUpdateProvider:
     provider_name = "mock"
     model_name = "deterministic-contact-ai-memo-update-v1"
@@ -751,15 +827,33 @@ class MockContactAiMemoUpdateProvider:
             raise ValueError(f"Unsupported mock function type: {function_type}")
 
         current_memo = normalized_text(str(input_payload.get("current_ai_memo") or ""))
-        subject = compact_text(str(input_payload.get("subject") or "No subject"), 100)
-        received_at = str(input_payload.get("received_at") or "")
-        snippet = compact_text(
-            str(input_payload.get("body_text") or input_payload.get("snippet") or ""),
-            180,
-        )
-        recent_line = f"Recent activity ({received_at}): {subject}"
-        if snippet:
-            recent_line = f"{recent_line} / {snippet}"
+        messages = input_payload.get("messages")
+        if isinstance(messages, list) and messages:
+            recent_items: list[str] = []
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                subject = compact_text(str(message.get("subject") or "No subject"), 100)
+                received_at = str(message.get("received_at") or "")
+                snippet = compact_text(
+                    str(message.get("body_text") or message.get("snippet") or ""),
+                    180,
+                )
+                item = f"({received_at}) {subject}"
+                if snippet:
+                    item = f"{item} / {snippet}"
+                recent_items.append(item)
+            recent_line = "Recent activity batch: " + " | ".join(recent_items)
+        else:
+            subject = compact_text(str(input_payload.get("subject") or "No subject"), 100)
+            received_at = str(input_payload.get("received_at") or "")
+            snippet = compact_text(
+                str(input_payload.get("body_text") or input_payload.get("snippet") or ""),
+                180,
+            )
+            recent_line = f"Recent activity ({received_at}): {subject}"
+            if snippet:
+                recent_line = f"{recent_line} / {snippet}"
         memo = recent_line if current_memo == "" else f"{current_memo}\n{recent_line}"
         output = {
             "schema_version": "1.0",
@@ -899,6 +993,48 @@ class OpenAIContactAiMemoUpdateProvider:
             },
         }
         return openai_contact_ai_memo_response(
+            payload,
+            api_key=self.api_key,
+            timeout_seconds=self.timeout_seconds,
+        )
+
+
+class OpenAIFileSummaryProvider:
+    provider_name = "openai"
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        api_key_env: str | None = None,
+        model_name: str,
+        timeout_seconds: float,
+    ) -> None:
+        self.api_key = api_key or read_api_key(api_key_env)
+        if self.api_key is None or self.api_key.strip() == "":
+            raise OpenAIProviderError("OpenAI API key is not configured.")
+        self.model_name = model_name
+        self.timeout_seconds = timeout_seconds
+
+    def complete_json(
+        self,
+        *,
+        function_type: str,
+        input_payload: dict[str, object],
+    ) -> LlmProviderResponse:
+        if function_type != FUNCTION_TYPE_FILE_SUMMARY:
+            raise ValueError(f"Unsupported OpenAI function type: {function_type}")
+
+        payload = {
+            "model": self.model_name,
+            "instructions": file_summary_instructions(),
+            "input": file_summary_input_text(input_payload),
+            "max_output_tokens": 3000,
+            "text": {
+                "format": file_summary_response_format(),
+            },
+        }
+        return openai_file_summary_response(
             payload,
             api_key=self.api_key,
             timeout_seconds=self.timeout_seconds,
@@ -1082,6 +1218,111 @@ def contact_ai_memo_update_response_format() -> dict[str, object]:
     }
 
 
+def file_summary_response_format() -> dict[str, object]:
+    string_array = {"type": "array", "items": {"type": "string"}}
+    return {
+        "type": "json_schema",
+        "name": "file_summary",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "schema_version": {"type": "string"},
+                "file_description": {"type": "string"},
+                "summary_points": string_array,
+                "llm_digest": {"type": "string"},
+                "structured_digest": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "document_type": {"type": "string"},
+                        "facts": string_array,
+                        "entities": string_array,
+                        "dates": string_array,
+                        "numbers": string_array,
+                        "action_items": string_array,
+                        "structure_notes": string_array,
+                    },
+                    "required": [
+                        "document_type",
+                        "facts",
+                        "entities",
+                        "dates",
+                        "numbers",
+                        "action_items",
+                        "structure_notes",
+                    ],
+                },
+                "coverage": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "source_kind": {"type": "string"},
+                        "read_scope": {"type": "string"},
+                        "truncated": {"type": "boolean"},
+                        "limitations": string_array,
+                    },
+                    "required": [
+                        "source_kind",
+                        "read_scope",
+                        "truncated",
+                        "limitations",
+                    ],
+                },
+                "token_estimate": {"type": "integer"},
+                "reasoning_summary": {"type": "string"},
+                "warnings": string_array,
+            },
+            "required": [
+                "schema_version",
+                "file_description",
+                "summary_points",
+                "llm_digest",
+                "structured_digest",
+                "coverage",
+                "token_estimate",
+                "reasoning_summary",
+                "warnings",
+            ],
+        },
+    }
+
+
+def openai_file_summary_response(
+    payload: dict[str, object],
+    *,
+    api_key: str,
+    timeout_seconds: float,
+) -> LlmProviderResponse:
+    parsed_response = parse_openai_json_response(
+        payload,
+        api_key=api_key,
+        timeout_seconds=timeout_seconds,
+    )
+    output = parsed_response.output
+    if not isinstance(output, dict):
+        raise OpenAIProviderError("OpenAI response JSON was not an object.")
+    file_description = str(output.get("file_description") or "").strip()
+    llm_digest = str(output.get("llm_digest") or "").strip()
+    if file_description == "":
+        raise OpenAIProviderError(
+            "OpenAI file summary response did not include file_description."
+        )
+    if llm_digest == "":
+        raise OpenAIProviderError("OpenAI file summary response did not include llm_digest.")
+    output["file_description"] = file_description
+    output["llm_digest"] = llm_digest
+    return LlmProviderResponse(
+        output=output,
+        output_preview=file_description,
+        prompt_tokens=parsed_response.prompt_tokens,
+        completion_tokens=parsed_response.completion_tokens,
+        total_tokens=parsed_response.total_tokens,
+        estimated_cost=None,
+    )
+
+
 def openai_contact_ai_memo_response(
     payload: dict[str, object],
     *,
@@ -1192,7 +1433,7 @@ def contact_ai_memo_update_instructions() -> str:
     return (
         "You update an AI-owned memo for one contact in a Japanese personal "
         "work-support app. Return only JSON matching the schema. "
-        "Use the existing AI memo and the newly received email. "
+        "Use the existing AI memo and the newly received email or email batch. "
         "Focus on current, time-sensitive, and recent activity: what the person "
         "is working on, announcing, coordinating, requesting, scheduling, or "
         "recently involved in. Do not turn the memo into a static profile. "
@@ -1210,10 +1451,36 @@ def mail_thread_summary_instructions() -> str:
         "Write the summary as bullet points. "
         "Summarize the whole thread chronologically, including current status, "
         "open questions, deadlines, requests, and decisions. "
+        "If summary_scope is incremental_update, update current_thread_summary "
+        "using only the newly provided messages and return the updated full "
+        "thread summary. "
         "If summary_scope is partial, summarize only that chunk. "
+        "If summary_scope is incremental_partial, summarize only that chunk of "
+        "new messages in relation to current_thread_summary. "
         "If summary_scope is final_from_partial_summaries, integrate the provided "
         "partial summaries into one coherent thread summary. "
         "If the thread is already Japanese, set translation to null."
+    )
+
+
+def file_summary_instructions() -> str:
+    return (
+        "You prepare an LLM input digest for one stored file in a Japanese "
+        "personal work-support app. Return only JSON matching the provided schema. "
+        "The primary goal is not a pleasant explanation; it is an information-dense "
+        "intermediate representation that lets later LLM calls understand the file "
+        "without reading the full original. Minimize tokens while preserving coverage. "
+        "Do not infer unsupported facts. Preserve names, dates, numbers, conditions, "
+        "exceptions, deadlines, requirements, decisions, URLs, table columns, and file "
+        "structure when present. Write file_description and summary_points in Japanese. "
+        "file_description must be one short sentence. summary_points must contain at "
+        "most five concise bullets. Write llm_digest in Japanese unless source content "
+        "is mainly English; it may retain original technical terms. Note unread, "
+        "unsupported, or truncated content in coverage.limitations. "
+        "When generation_mode is incremental_from_digest, create the target file digest "
+        "by updating the previous digest with every supplied diff in order. Treat removed "
+        "lines as no longer present and added lines as newly present. Do not carry forward "
+        "facts contradicted by the diffs."
     )
 
 
@@ -1248,6 +1515,36 @@ def mail_draft_generation_instructions(function_type: str) -> str:
     )
 
 
+def file_summary_input_text(input_payload: dict[str, object]) -> str:
+    generation_mode = str(input_payload.get("generation_mode") or "full_source")
+    if generation_mode == "incremental_from_digest":
+        source_block = (
+            "Incremental source JSON:\n"
+            f"{truncated_text(json_text(input_payload.get('incremental_source') or {}), 60000)}"
+        )
+    else:
+        source_block = (
+            "Extracted source text or structural representation:\n"
+            f"{truncated_text(input_payload.get('source_text'), 60000)}"
+        )
+    return "\n".join(
+        [
+            f"Generation mode: {generation_mode}",
+            f"Storage object ID: {input_payload.get('storage_object_id') or ''}",
+            f"Storage object version ID: {input_payload.get('storage_object_version_id') or ''}",
+            f"Filename: {input_payload.get('filename') or ''}",
+            f"Content type: {input_payload.get('content_type') or ''}",
+            f"Byte size: {input_payload.get('byte_size') or 0}",
+            f"SHA-256: {input_payload.get('sha256_hex') or ''}",
+            f"Source kind: {input_payload.get('source_kind') or ''}",
+            f"Read scope: {input_payload.get('read_scope') or ''}",
+            f"Truncated: {input_payload.get('truncated') or False}",
+            f"Limitations JSON: {json_text(input_payload.get('limitations') or [])}",
+            source_block,
+        ]
+    )
+
+
 def mail_draft_generation_input_text(input_payload: dict[str, object]) -> str:
     return "\n".join(
         [
@@ -1255,6 +1552,10 @@ def mail_draft_generation_input_text(input_payload: dict[str, object]) -> str:
             (
                 "Standard prompt: "
                 f"{truncated_text(input_payload.get('standard_prompt'), 4000)}"
+            ),
+            (
+                "Language generation prompt: "
+                f"{input_payload.get('language_generation_prompt') or ''}"
             ),
             f"To: {input_payload.get('to_addresses') or []}",
             f"Cc: {input_payload.get('cc_addresses') or []}",
@@ -1285,11 +1586,32 @@ def mail_draft_generation_input_text(input_payload: dict[str, object]) -> str:
 
 
 def contact_ai_memo_update_input_text(input_payload: dict[str, object]) -> str:
-    return "\n".join(
+    lines = [
+        f"Contact ID: {input_payload.get('contact_id') or ''}",
+        f"Contact display name: {input_payload.get('contact_display_name') or ''}",
+        f"Current AI memo: {truncated_text(input_payload.get('current_ai_memo'), 4000)}",
+    ]
+    messages = input_payload.get("messages")
+    if isinstance(messages, list) and messages:
+        lines.append(f"New message count: {len(messages)}")
+        for index, message in enumerate(messages, start=1):
+            if not isinstance(message, dict):
+                continue
+            lines.extend(
+                [
+                    f"\nMessage {index}",
+                    f"Message ID: {message.get('message_id') or ''}",
+                    f"Gmail message ID: {message.get('gmail_message_id') or ''}",
+                    f"Received at: {message.get('received_at') or ''}",
+                    f"Subject: {message.get('subject') or ''}",
+                    f"From: {message.get('from_address') or ''}",
+                    f"Snippet: {truncated_text(message.get('snippet'), 1000)}",
+                    f"Body text: {truncated_text(message.get('body_text'), 8000)}",
+                ]
+            )
+        return "\n".join(lines)
+    lines.extend(
         [
-            f"Contact ID: {input_payload.get('contact_id') or ''}",
-            f"Contact display name: {input_payload.get('contact_display_name') or ''}",
-            f"Current AI memo: {truncated_text(input_payload.get('current_ai_memo'), 4000)}",
             f"Message ID: {input_payload.get('message_id') or ''}",
             f"Gmail message ID: {input_payload.get('gmail_message_id') or ''}",
             f"Received at: {input_payload.get('received_at') or ''}",
@@ -1299,6 +1621,7 @@ def contact_ai_memo_update_input_text(input_payload: dict[str, object]) -> str:
             f"Body text: {truncated_text(input_payload.get('body_text'), 12000)}",
         ]
     )
+    return "\n".join(lines)
 
 
 def mail_summary_input_text(input_payload: dict[str, object]) -> str:
@@ -1320,6 +1643,7 @@ def mail_summary_input_text(input_payload: dict[str, object]) -> str:
 
 def mail_thread_summary_input_text(input_payload: dict[str, object]) -> str:
     messages = input_payload.get("messages")
+    current_thread_summary = input_payload.get("current_thread_summary")
     partial_summaries = input_payload.get("partial_summaries")
     lines = [
         f"Thread ID: {input_payload.get('thread_id') or ''}",
@@ -1330,6 +1654,16 @@ def mail_thread_summary_input_text(input_payload: dict[str, object]) -> str:
     if input_payload.get("chunk_index") is not None:
         lines.append(
             f"Chunk: {input_payload.get('chunk_index')} / {input_payload.get('chunk_count')}"
+        )
+    if isinstance(current_thread_summary, dict):
+        lines.extend(
+            [
+                "\nCurrent thread summary:",
+                f"Summary: {truncated_text(current_thread_summary.get('summary'), 6000)}",
+                f"Next action: {truncated_text(current_thread_summary.get('next_action'), 1000)}",
+                f"Key points JSON: {truncated_text(json_text(current_thread_summary.get('key_points') or []), 3000)}",
+                f"Needs action: {current_thread_summary.get('needs_action')}",
+            ]
         )
     if isinstance(messages, list):
         for index, message in enumerate(messages, start=1):

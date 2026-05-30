@@ -4,6 +4,7 @@ from conftest import PHASE_1_TABLES
 from conftest import PHASE_2_TABLES
 from conftest import PHASE_3_TABLES
 from conftest import PHASE_4_TABLES
+from conftest import PHASE_6_TABLES
 from conftest import sqlite_table_names
 import sqlite3
 
@@ -55,6 +56,7 @@ def test_phase_3_migrations_add_contact_tables(
         "mail_importance_rule_action",
         "mail_importance_rule_importance",
         "mail_importance_rule_instruction",
+        "inbound_message_count",
     } <= contact_columns
 
 
@@ -148,3 +150,93 @@ def test_phase_4_migrations_add_mail_tables(
         "llm_run_id",
     } <= thread_summary_columns
     assert {"attachment_names_json", "attachment_data_json"} <= send_request_columns
+
+
+def test_phase_6_migrations_add_storage_tables(
+    migrated_database,
+) -> None:
+    table_names = sqlite_table_names(migrated_database)
+
+    assert PHASE_6_TABLES <= table_names
+
+    with sqlite3.connect(migrated_database) as connection:
+        storage_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(storage_objects)"
+            ).fetchall()
+        }
+        location_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(storage_locations)"
+            ).fetchall()
+        }
+        file_summary_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(file_summaries)"
+            ).fetchall()
+        }
+        file_version_diff_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(file_version_diffs)"
+            ).fetchall()
+        }
+        internal_location = connection.execute(
+            """
+            SELECT label, kind, root_path, status
+            FROM storage_locations
+            WHERE id = 'storage_location_internal'
+            """
+        ).fetchone()
+
+    assert {
+        "id",
+        "scope",
+        "original_filename",
+        "content_type",
+        "byte_size",
+        "sha256_hex",
+        "location_id",
+        "storage_path",
+        "status",
+    } <= storage_columns
+    assert {
+        "id",
+        "label",
+        "kind",
+        "root_path",
+        "mount_hint",
+        "marker_id",
+        "status",
+    } <= location_columns
+    assert {
+        "storage_object_id",
+        "storage_object_version_id",
+        "source_sha256_hex",
+        "file_description",
+        "summary_points_json",
+        "llm_digest",
+        "structured_digest_json",
+        "coverage_json",
+        "llm_run_id",
+    } <= file_summary_columns
+    assert {
+        "storage_object_id",
+        "previous_version_id",
+        "previous_sha256_hex",
+        "current_sha256_hex",
+        "diff_kind",
+        "summary_text",
+        "added_lines_json",
+        "removed_lines_json",
+        "coverage_json",
+    } <= file_version_diff_columns
+    assert internal_location == (
+        "Internal Storage",
+        "internal",
+        "./data/storage",
+        "active",
+    )

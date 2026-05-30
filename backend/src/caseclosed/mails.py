@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter
 from fastapi import Depends
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy import or_
@@ -21,6 +22,7 @@ from caseclosed.db.models import Contact
 from caseclosed.db.models import ContactEmailAddress
 from caseclosed.db.models import ContactTag
 from caseclosed.db.models import GmailMessage
+from caseclosed.db.models import GmailMessageAttachment
 from caseclosed.db.models import Job
 from caseclosed.db.models import LlmRun
 from caseclosed.db.models import MailAutoState
@@ -29,6 +31,7 @@ from caseclosed.db.models import MailSendRequest
 from caseclosed.db.models import MailSummary
 from caseclosed.db.models import MailThreadSummary
 from caseclosed.db.models import MailUserState
+from caseclosed.db.models import StorageObject
 from caseclosed.db.runtime import get_session
 from caseclosed.db.runtime import jst_now
 from caseclosed.db.runtime import jst_iso
@@ -42,24 +45,34 @@ from caseclosed.services.mail_ingestion import ingest_mock_mail
 from caseclosed.services.mail_ingestion import message_is_sent
 from caseclosed.services.mail_ingestion import row_matches_llm_block_query
 from caseclosed.services.background_worker import kick_job_drain
+from caseclosed.services.mail_attachment_fetch import (
+    enqueue_mail_attachment_fetch_job,
+)
 from caseclosed.services.llm_provider import LLM_FUNCTION_TYPES
 from caseclosed.services.llm_provider import (
     FUNCTION_TYPE_NEW_MAIL_DRAFT_GENERATION,
 )
 from caseclosed.services.llm_provider import FUNCTION_TYPE_REPLY_DRAFT_GENERATION
-from caseclosed.services.llm_provider import LlmProviderResponse
+from caseclosed.services.llm_provider import OpenAIProviderError
 from caseclosed.services.llm_provider import build_mail_draft_generation_provider
 from caseclosed.services.llm_provider import list_llm_model_profiles
 from caseclosed.services.llm_provider import llm_function_config_data
 from caseclosed.services.llm_provider import llm_model_profile_data
-from caseclosed.mail_drafts import delete_mail_drafts_for_reply_target
 from caseclosed.services.mail_summary import SUMMARY_TARGET_IMPORTANCE
 from caseclosed.services.mail_summary import enqueue_mail_summary_job
+from caseclosed.storage import delete_storage_object
+from caseclosed.storage import save_storage_object
+from caseclosed.storage import storage_object_data
+from caseclosed.storage import storage_object_absolute_path
 
 router = APIRouter(prefix="/api/v1/mails", tags=["mails"])
 
 LANGUAGE_ENGLISH = "english"
 LANGUAGE_JAPANESE = "japanese"
+GMAIL_ATTACHMENT_STORAGE_SCOPE = "tmp/gmail-attachments"
+MAIL_ATTACHMENT_STORAGE_SCOPES = {GMAIL_ATTACHMENT_STORAGE_SCOPE, "managed"}
+MAIL_DRAFT_GENERATION_STANDARD_PROMPT_KEY = "mail_draft_generation_standard_prompt"
+MAIL_DRAFT_GENERATION_LANGUAGE_KEY = "mail_draft_generation_language"
 
 
 class MockMailIngestRequest(BaseModel):
@@ -98,7 +111,8 @@ class MailProcessRequest(BaseModel):
 class MailSendAttachmentPayload(BaseModel):
     filename: str
     content_type: str | None = None
-    data_base64: str
+    data_base64: str | None = None
+    storage_object_id: str | None = None
     size: int | None = None
 
 
@@ -117,6 +131,7 @@ class MailSendRequestPayload(BaseModel):
 class MailDraftGenerationRequest(BaseModel):
     instruction: str | None = None
     standard_prompt: str | None = None
+    generation_language: str | None = None
     to_addresses: list[str] | None = None
     cc_addresses: list[str] | None = None
     bcc_addresses: list[str] | None = None
@@ -125,6 +140,11 @@ class MailDraftGenerationRequest(BaseModel):
     body_text: str | None = None
     reply_to_message_id: str | None = None
     related_case_summaries: list[dict[str, object]] | None = None
+
+
+class MailDraftGenerationStandardPromptPatch(BaseModel):
+    standard_prompt: str | None = None
+    generation_language: str | None = None
 
 
 class MailSendSchedulePayload(BaseModel):
@@ -163,6 +183,77 @@ SEND_REQUEST_VISIBLE_STATUSES = {
     "sending_gmail",
 }
 MOCK_FROM_ADDRESS = "caseclosed.me@example.local"
+
+
+def read_mail_draft_generation_standard_prompt(session: DatabaseSession) -> str:
+    setting = session.scalar(
+        select(AppSetting).where(AppSetting.key == MAIL_DRAFT_GENERATION_STANDARD_PROMPT_KEY)
+    )
+    if setting is None:
+        return ""
+    value = json.loads(setting.value_json)
+    return value if isinstance(value, str) else ""
+
+
+def write_mail_draft_generation_standard_prompt(
+    session: DatabaseSession,
+    standard_prompt: str,
+    now: str,
+) -> None:
+    setting = session.scalar(
+        select(AppSetting).where(AppSetting.key == MAIL_DRAFT_GENERATION_STANDARD_PROMPT_KEY)
+    )
+    value_json = json.dumps(standard_prompt, ensure_ascii=True)
+    if setting is None:
+        session.add(
+            AppSetting(
+                id=new_id("setting"),
+                key=MAIL_DRAFT_GENERATION_STANDARD_PROMPT_KEY,
+                value_json=value_json,
+                updated_at=now,
+            )
+        )
+        return
+    setting.value_json = value_json
+    setting.updated_at = now
+
+
+def normalize_generation_language(value: str | None) -> str:
+    return value if value in {LANGUAGE_JAPANESE, LANGUAGE_ENGLISH} else LANGUAGE_JAPANESE
+
+
+def read_mail_draft_generation_language(session: DatabaseSession) -> str:
+    setting = session.scalar(
+        select(AppSetting).where(AppSetting.key == MAIL_DRAFT_GENERATION_LANGUAGE_KEY)
+    )
+    if setting is None:
+        return LANGUAGE_JAPANESE
+    value = json.loads(setting.value_json)
+    return normalize_generation_language(value if isinstance(value, str) else None)
+
+
+def write_mail_draft_generation_language(
+    session: DatabaseSession,
+    generation_language: str,
+    now: str,
+) -> None:
+    normalized = normalize_generation_language(generation_language)
+    setting = session.scalar(
+        select(AppSetting).where(AppSetting.key == MAIL_DRAFT_GENERATION_LANGUAGE_KEY)
+    )
+    value_json = json.dumps(normalized, ensure_ascii=True)
+    if setting is None:
+        session.add(
+            AppSetting(
+                id=new_id("setting"),
+                key=MAIL_DRAFT_GENERATION_LANGUAGE_KEY,
+                value_json=value_json,
+                updated_at=now,
+            )
+        )
+        return
+    setting.value_json = value_json
+    setting.updated_at = now
 
 
 def new_id(prefix: str) -> str:
@@ -216,22 +307,33 @@ def attachment_payloads_json(
     values: list[dict[str, object]] = []
     for attachment in attachments:
         filename = attachment.filename.strip()
-        data_base64 = attachment.data_base64.strip()
-        if filename == "" or data_base64 == "":
-            raise json_error(422, "VALIDATION_ERROR", "Attachment data is invalid.")
-        values.append(
-            {
-                "filename": filename,
-                "content_type": (
-                    attachment.content_type.strip()
-                    if attachment.content_type is not None
-                    and attachment.content_type.strip() != ""
-                    else "application/octet-stream"
-                ),
-                "data_base64": data_base64,
-                "size": attachment.size,
-            }
+        data_base64 = (
+            attachment.data_base64.strip()
+            if attachment.data_base64 is not None
+            else ""
         )
+        storage_object_id = (
+            attachment.storage_object_id.strip()
+            if attachment.storage_object_id is not None
+            else ""
+        )
+        if filename == "" or (data_base64 == "" and storage_object_id == ""):
+            raise json_error(422, "VALIDATION_ERROR", "Attachment data is invalid.")
+        item = {
+            "filename": filename,
+            "content_type": (
+                attachment.content_type.strip()
+                if attachment.content_type is not None
+                and attachment.content_type.strip() != ""
+                else "application/octet-stream"
+            ),
+            "size": attachment.size,
+        }
+        if storage_object_id != "":
+            item["storage_object_id"] = storage_object_id
+        else:
+            item["data_base64"] = data_base64
+        values.append(item)
     return json.dumps(values, ensure_ascii=True)
 
 
@@ -568,7 +670,11 @@ def expected_reply_language(
     reply_to_message: GmailMessage | None,
     instruction: str | None,
     standard_prompt: str | None,
+    generation_language: str | None = None,
 ) -> str | None:
+    normalized_generation_language = normalize_generation_language(generation_language)
+    if normalized_generation_language in {LANGUAGE_JAPANESE, LANGUAGE_ENGLISH}:
+        return normalized_generation_language
     explicit_language = explicit_language_instruction(
         "\n".join([instruction or "", standard_prompt or ""]),
     )
@@ -585,7 +691,17 @@ def language_label(language: str | None) -> str:
     return "Unspecified"
 
 
+def generation_language_prompt(language: str | None) -> str:
+    if normalize_generation_language(language) == LANGUAGE_ENGLISH:
+        return "英語で生成してください。"
+    return "日本語で生成してください。"
+
+
 def language_policy_text(language: str | None, *, is_reply: bool) -> str:
+    if not is_reply and language == LANGUAGE_ENGLISH:
+        return "Generate the email body in English."
+    if not is_reply and language == LANGUAGE_JAPANESE:
+        return "Generate the email body in Japanese."
     if not is_reply:
         return (
             "No reply source language is available. Follow the user's explicit "
@@ -609,61 +725,6 @@ def language_policy_text(language: str | None, *, is_reply: bool) -> str:
     )
 
 
-def draft_language_mismatch(expected_language: str | None, body_text: str) -> bool:
-    actual_language = detect_draft_language(body_text)
-    return (
-        expected_language in {LANGUAGE_ENGLISH, LANGUAGE_JAPANESE}
-        and actual_language in {LANGUAGE_ENGLISH, LANGUAGE_JAPANESE}
-        and actual_language != expected_language
-    )
-
-
-def retry_language_instruction(expected_language: str) -> str:
-    return (
-        f"The previous draft was not written in {language_label(expected_language)}. "
-        f"Regenerate the subject and body in {language_label(expected_language)}. "
-        "Keep the content faithful to the same compose context."
-    )
-
-
-def combine_draft_provider_responses(
-    first_response: LlmProviderResponse,
-    retry_response: LlmProviderResponse,
-) -> LlmProviderResponse:
-    return LlmProviderResponse(
-        output=retry_response.output,
-        output_preview=retry_response.output_preview,
-        prompt_tokens=add_optional_ints(
-            first_response.prompt_tokens,
-            retry_response.prompt_tokens,
-        ),
-        completion_tokens=add_optional_ints(
-            first_response.completion_tokens,
-            retry_response.completion_tokens,
-        ),
-        total_tokens=add_optional_ints(
-            first_response.total_tokens,
-            retry_response.total_tokens,
-        ),
-        estimated_cost=add_optional_floats(
-            first_response.estimated_cost,
-            retry_response.estimated_cost,
-        ),
-    )
-
-
-def add_optional_ints(first: int | None, second: int | None) -> int | None:
-    if first is None and second is None:
-        return None
-    return (first or 0) + (second or 0)
-
-
-def add_optional_floats(first: float | None, second: float | None) -> float | None:
-    if first is None and second is None:
-        return None
-    return (first or 0.0) + (second or 0.0)
-
-
 def recipient_data(
     session: DatabaseSession,
     email_address: str,
@@ -680,6 +741,71 @@ def recipient_list_data(
     email_addresses: list[str],
 ) -> list[dict[str, object]]:
     return [recipient_data(session, email_address) for email_address in email_addresses]
+
+
+def attachment_download_url(attachment_id: str) -> str:
+    return f"/api/v1/mails/attachments/{attachment_id}/download"
+
+
+def mail_attachment_data(
+    attachment: GmailMessageAttachment,
+) -> dict[str, object]:
+    return {
+        "id": attachment.id,
+        "message_id": attachment.message_id,
+        "filename": attachment.filename,
+        "mime_type": attachment.mime_type,
+        "byte_size": attachment.byte_size,
+        "download_url": attachment_download_url(attachment.id),
+        "cached": attachment.storage_object_id is not None,
+        "storage_object_id": attachment.storage_object_id,
+    }
+
+
+def attachment_rows_by_message_id(
+    session: DatabaseSession,
+    message_ids: list[str],
+) -> dict[str, list[GmailMessageAttachment]]:
+    if not message_ids:
+        return {}
+    rows = session.scalars(
+        select(GmailMessageAttachment)
+        .where(GmailMessageAttachment.message_id.in_(message_ids))
+        .order_by(
+            GmailMessageAttachment.filename,
+            GmailMessageAttachment.id,
+        )
+    ).all()
+    grouped: dict[str, list[GmailMessageAttachment]] = {}
+    for row in rows:
+        grouped.setdefault(row.message_id, []).append(row)
+    return grouped
+
+
+def attachment_count_for_message(
+    session: DatabaseSession,
+    message_id: str,
+) -> int:
+    return session.scalar(
+        select(func.count())
+        .select_from(GmailMessageAttachment)
+        .where(GmailMessageAttachment.message_id == message_id)
+    ) or 0
+
+
+def unique_thread_attachments(
+    attachments_by_message_id: dict[str, list[GmailMessageAttachment]],
+) -> list[dict[str, object]]:
+    seen: set[tuple[str, int]] = set()
+    items: list[dict[str, object]] = []
+    for attachments in attachments_by_message_id.values():
+        for attachment in attachments:
+            key = (attachment.filename, attachment.byte_size)
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append(mail_attachment_data(attachment))
+    return items
 
 
 def message_data(
@@ -770,6 +896,15 @@ def message_data(
         data["to_recipients"] = recipient_list_data(session, to_addresses)
         data["cc_recipients"] = recipient_list_data(session, cc_addresses)
         data["bcc_recipients"] = recipient_list_data(session, bcc_addresses)
+        attachments = attachment_rows_by_message_id(session, [message.id]).get(
+            message.id,
+            [],
+        )
+        data["attachments"] = [
+            mail_attachment_data(attachment) for attachment in attachments
+        ]
+        data["attachment_count"] = len(attachments)
+        data["has_attachments"] = len(attachments) > 0
     if include_body:
         data["body_text"] = message.body_text
         data["body_html"] = message.body_html
@@ -869,6 +1004,42 @@ def combined_thread_summary_data(summaries: list[MailSummary]) -> dict[str, obje
         "summary_text": "\n".join(summary.summary_text for summary in summaries),
         "items": [mail_summary_data(summary) for summary in summaries],
     }
+
+
+def active_summary_job_status_by_message_id(
+    session: DatabaseSession,
+    message_ids: list[str],
+) -> dict[str, dict[str, object]]:
+    message_id_set = set(message_ids)
+    if len(message_id_set) == 0:
+        return {}
+    jobs = session.scalars(
+        select(Job)
+        .where(
+            Job.job_type == "mail_summary",
+            Job.status.in_(["pending", "running"]),
+        )
+        .order_by(Job.created_at.desc(), Job.id.desc())
+    ).all()
+    statuses: dict[str, dict[str, object]] = {}
+    for job in jobs:
+        try:
+            payload = json.loads(job.payload_json)
+        except json.JSONDecodeError:
+            continue
+        message_id = payload.get("message_id")
+        if not isinstance(message_id, str) or message_id not in message_id_set:
+            continue
+        statuses.setdefault(
+            message_id,
+            {
+                "job_id": job.id,
+                "status": job.status,
+                "created_at": job.created_at,
+                "updated_at": job.updated_at,
+            },
+        )
+    return statuses
 
 
 def latest_thread_summary(
@@ -1227,11 +1398,12 @@ def detail_data(
         .where(GmailMessage.thread_id == message.thread_id)
         .order_by(GmailMessage.received_at, GmailMessage.id)
     ).all()
+    thread_message_ids = [thread_message.id for thread_message in thread_messages]
     user_states = {
         state.message_id: state
         for state in session.scalars(
             select(MailUserState).where(
-                MailUserState.message_id.in_([thread_message.id for thread_message in thread_messages])
+                MailUserState.message_id.in_(thread_message_ids)
             )
         ).all()
     }
@@ -1239,16 +1411,18 @@ def detail_data(
         state.message_id: state
         for state in session.scalars(
             select(MailAutoState).where(
-                MailAutoState.message_id.in_([thread_message.id for thread_message in thread_messages])
+                MailAutoState.message_id.in_(thread_message_ids)
             )
         ).all()
     }
+    attachments_by_message_id = attachment_rows_by_message_id(
+        session,
+        thread_message_ids,
+    )
     summaries = session.scalars(
         select(MailSummary)
         .where(
-            MailSummary.message_id.in_(
-                [thread_message.id for thread_message in thread_messages]
-            )
+            MailSummary.message_id.in_(thread_message_ids)
         )
         .join(GmailMessage, GmailMessage.id == MailSummary.message_id)
         .order_by(GmailMessage.received_at.desc(), GmailMessage.id.desc())
@@ -1297,8 +1471,12 @@ def detail_data(
             if thread_summary is not None
             else combined_thread_summary_data(list(summaries))
         ),
+        "summary_jobs": active_summary_job_status_by_message_id(
+            session,
+            thread_message_ids,
+        ),
         "case_links": [],
-        "attachments": [],
+        "attachments": unique_thread_attachments(attachments_by_message_id),
         "drafts": [],
         "available_actions": available_actions(user_state, auto_state),
     }
@@ -1323,6 +1501,7 @@ def list_item_data(
     is_sent = message_is_sent(message)
     summary = latest_thread_summary(session, message.thread_id)
     thread_summary = stored_thread_summary(session, message.thread_id)
+    attachment_count = attachment_count_for_message(session, message.id)
     return {
         "id": message.id,
         "gmail_message_id": message.gmail_message_id,
@@ -1357,6 +1536,8 @@ def list_item_data(
             if contact_row is not None
             else None
         ),
+        "attachment_count": attachment_count,
+        "has_attachments": attachment_count > 0,
         "case_links": [],
         "summary": None
         if is_sent or effective_importance not in SUMMARY_TARGET_IMPORTANCE
@@ -1366,6 +1547,245 @@ def list_item_data(
             else summary.summary_text if summary is not None else None
         ),
     }
+
+
+@router.get("/attachments/{attachment_id}/download")
+def download_mail_attachment(
+    attachment_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> FileResponse:
+    attachment = session.get(GmailMessageAttachment, attachment_id)
+    if attachment is None:
+        raise json_error(404, "NOT_FOUND", "Mail attachment not found.")
+
+    cached_response = cached_mail_attachment_response(session, attachment)
+    if cached_response is not None:
+        return cached_response
+
+    raw_data = fetch_gmail_attachment_bytes(session, attachment)
+    now = jst_iso()
+    storage_object = save_storage_object(
+        session,
+        scope=GMAIL_ATTACHMENT_STORAGE_SCOPE,
+        filename=attachment.filename,
+        content_type=attachment.mime_type or "application/octet-stream",
+        data=raw_data,
+        now=now,
+        source_type="mail_attachment",
+        source_message_id=attachment.message_id,
+    )
+    attachment.storage_object_id = storage_object.id
+    attachment.byte_size = len(raw_data)
+    attachment.updated_at = now
+    attachment.version += 1
+    session.commit()
+    return storage_object_file_response(storage_object, session)
+
+
+@router.post("/attachments/{attachment_id}/move-to-storage")
+def move_mail_attachment_to_storage(
+    attachment_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    attachment = session.get(GmailMessageAttachment, attachment_id)
+    if attachment is None:
+        raise json_error(404, "NOT_FOUND", "Mail attachment not found.")
+
+    existing_storage_object = (
+        session.get(StorageObject, attachment.storage_object_id)
+        if attachment.storage_object_id is not None
+        else None
+    )
+    now = jst_iso()
+    if (
+        existing_storage_object is not None
+        and existing_storage_object.status == "active"
+        and existing_storage_object.scope == "managed"
+    ):
+        existing_storage_object.source_type = "mail_attachment"
+        existing_storage_object.source_message_id = attachment.message_id
+        existing_storage_object.updated_at = now
+        existing_storage_object.version += 1
+        session.commit()
+        return {
+            "ok": True,
+            "data": {
+                "attachment": mail_attachment_data(attachment),
+                "storage_object": storage_object_data(existing_storage_object),
+            },
+        }
+
+    raw_data: bytes | None = None
+    content_type = attachment.mime_type or "application/octet-stream"
+    if existing_storage_object is not None and existing_storage_object.status == "active":
+        existing_path = storage_object_absolute_path(existing_storage_object, session)
+        if existing_path.is_file():
+            raw_data = existing_path.read_bytes()
+            content_type = existing_storage_object.content_type or content_type
+
+    if raw_data is None:
+        raw_data = fetch_gmail_attachment_bytes(session, attachment)
+
+    storage_object = save_storage_object(
+        session,
+        scope="managed",
+        filename=attachment.filename,
+        content_type=content_type,
+        data=raw_data,
+        now=now,
+        source_type="mail_attachment",
+        source_message_id=attachment.message_id,
+    )
+    if (
+        existing_storage_object is not None
+        and existing_storage_object.status == "active"
+        and existing_storage_object.scope != "managed"
+    ):
+        delete_storage_object(existing_storage_object, session=session, now=now)
+    attachment.storage_object_id = storage_object.id
+    attachment.byte_size = len(raw_data)
+    attachment.updated_at = now
+    attachment.version += 1
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "attachment": mail_attachment_data(attachment),
+            "storage_object": storage_object_data(storage_object),
+        },
+    }
+
+
+@router.post("/attachments/{attachment_id}/fetch-job")
+def enqueue_mail_attachment_fetch(
+    attachment_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    attachment = session.get(GmailMessageAttachment, attachment_id)
+    if attachment is None:
+        raise json_error(404, "NOT_FOUND", "Mail attachment not found.")
+    now = jst_iso()
+    job_id = enqueue_mail_attachment_fetch_job(
+        session,
+        attachment,
+        now,
+        target_scope="managed",
+        reason="manual_request",
+    )
+    session.commit()
+    kick_job_drain(reason="mail_attachment_fetch_requested")
+    return {
+        "ok": True,
+        "data": {
+            "job_id": job_id,
+            "attachment": mail_attachment_data(attachment),
+        },
+    }
+
+
+def fetch_gmail_attachment_bytes(
+    session: DatabaseSession,
+    attachment: GmailMessageAttachment,
+) -> bytes:
+    from caseclosed import google_integration
+
+    connection = google_integration.read_setting_json(
+        session,
+        google_integration.GMAIL_CONNECTION_KEY,
+    ) or {}
+    access_token = google_integration.google_gmail_access_token(session, connection)
+    data = google_integration.gmail_api_get_json(
+        f"/users/me/messages/{attachment.gmail_message_id}/attachments/{attachment.gmail_attachment_id}",
+        access_token,
+    )
+    encoded_data = data.get("data")
+    if not isinstance(encoded_data, str) or encoded_data.strip() == "":
+        raise json_error(
+            502,
+            "GOOGLE_GMAIL_API_ERROR",
+            "Gmail attachment data is missing.",
+        )
+    try:
+        raw_data = base64.urlsafe_b64decode(
+            (encoded_data + "=" * (-len(encoded_data) % 4)).encode("ascii")
+        )
+    except (binascii.Error, ValueError) as error:
+        raise json_error(
+            502,
+            "GOOGLE_GMAIL_API_ERROR",
+            "Gmail attachment data is invalid.",
+        ) from error
+    return raw_data
+
+
+def cached_mail_attachment_response(
+    session: DatabaseSession,
+    attachment: GmailMessageAttachment,
+) -> FileResponse | None:
+    storage_object = (
+        session.get(StorageObject, attachment.storage_object_id)
+        if attachment.storage_object_id is not None
+        else None
+    )
+    if (
+        storage_object is None
+        or storage_object.status != "active"
+        or storage_object.scope not in MAIL_ATTACHMENT_STORAGE_SCOPES
+    ):
+        storage_object = managed_storage_object_for_attachment(session, attachment)
+        if storage_object is None:
+            return None
+    object_path = storage_object_absolute_path(storage_object, session)
+    if not object_path.is_file():
+        managed_storage_object = managed_storage_object_for_attachment(
+            session,
+            attachment,
+        )
+        if managed_storage_object is None or managed_storage_object.id == storage_object.id:
+            return None
+        object_path = storage_object_absolute_path(managed_storage_object, session)
+        if not object_path.is_file():
+            return None
+        storage_object = managed_storage_object
+    if attachment.storage_object_id != storage_object.id:
+        attachment.storage_object_id = storage_object.id
+        attachment.updated_at = jst_iso()
+        attachment.version += 1
+        session.commit()
+    return storage_object_file_response(storage_object, session)
+
+
+def managed_storage_object_for_attachment(
+    session: DatabaseSession,
+    attachment: GmailMessageAttachment,
+) -> StorageObject | None:
+    statement = (
+        select(StorageObject)
+        .where(StorageObject.status == "active")
+        .where(StorageObject.scope == "managed")
+        .where(StorageObject.source_type == "mail_attachment")
+        .where(StorageObject.source_message_id == attachment.message_id)
+        .where(StorageObject.original_filename == attachment.filename)
+        .order_by(StorageObject.created_at.desc(), StorageObject.id.desc())
+    )
+    if attachment.byte_size > 0:
+        statement = statement.where(StorageObject.byte_size == attachment.byte_size)
+    candidates = session.scalars(statement.limit(5)).all()
+    for candidate in candidates:
+        if storage_object_absolute_path(candidate, session).is_file():
+            return candidate
+    return None
+
+
+def storage_object_file_response(
+    storage_object: StorageObject,
+    session: DatabaseSession,
+) -> FileResponse:
+    return FileResponse(
+        storage_object_absolute_path(storage_object, session),
+        media_type=storage_object.content_type or "application/octet-stream",
+        filename=storage_object.original_filename,
+    )
 
 
 @router.post("/mock-ingest")
@@ -1476,8 +1896,48 @@ def send_mail(
         available_at=scheduled_at,
     )
     session.commit()
-    delete_mail_drafts_for_reply_target(payload.reply_to_message_id)
     return {"ok": True, "data": mail_send_request_data(send_request)}
+
+
+@router.get("/draft-generation-standard-prompt")
+def get_mail_draft_generation_standard_prompt(
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    return {
+        "ok": True,
+        "data": {
+            "standard_prompt": read_mail_draft_generation_standard_prompt(session),
+            "generation_language": read_mail_draft_generation_language(session),
+        },
+    }
+
+
+@router.patch("/draft-generation-standard-prompt")
+def update_mail_draft_generation_standard_prompt(
+    payload: MailDraftGenerationStandardPromptPatch,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    now = jst_iso()
+    standard_prompt = (
+        payload.standard_prompt.strip()
+        if payload.standard_prompt is not None
+        else read_mail_draft_generation_standard_prompt(session)
+    )
+    generation_language = normalize_generation_language(
+        payload.generation_language
+        if payload.generation_language is not None
+        else read_mail_draft_generation_language(session)
+    )
+    write_mail_draft_generation_standard_prompt(session, standard_prompt, now)
+    write_mail_draft_generation_language(session, generation_language, now)
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "standard_prompt": standard_prompt,
+            "generation_language": generation_language,
+        },
+    }
 
 
 @router.post("/generate-draft")
@@ -1503,16 +1963,23 @@ def generate_mail_draft(
         if reply_to_message is not None
         else FUNCTION_TYPE_NEW_MAIL_DRAFT_GENERATION
     )
+    selected_generation_language = normalize_generation_language(
+        payload.generation_language
+        if payload.generation_language is not None
+        else read_mail_draft_generation_language(session)
+    )
     expected_language = expected_reply_language(
         reply_to_message=reply_to_message,
         instruction=payload.instruction,
         standard_prompt=payload.standard_prompt,
+        generation_language=selected_generation_language,
     )
     related_case_summaries = payload.related_case_summaries or []
     provider = build_mail_draft_generation_provider(function_type)
     input_payload = {
         "instruction": payload.instruction or "",
         "standard_prompt": payload.standard_prompt or "",
+        "language_generation_prompt": generation_language_prompt(expected_language),
         "reply_language": language_label(expected_language),
         "language_policy": language_policy_text(
             expected_language,
@@ -1538,30 +2005,19 @@ def generate_mail_draft(
         "related_case_summaries": related_case_summaries,
     }
     now = jst_iso()
-    provider_response = provider.complete_json(
-        function_type=function_type,
-        input_payload=input_payload,
-    )
+    try:
+        provider_response = provider.complete_json(
+            function_type=function_type,
+            input_payload=input_payload,
+        )
+    except OpenAIProviderError as error:
+        raise json_error(
+            502,
+            "LLM_PROVIDER_ERROR",
+            f"Mail draft generation failed: {error}",
+        ) from error
     output = provider_response.output
     retry_count = 0
-    if draft_language_mismatch(expected_language, str(output.get("body") or "")):
-        retry_count = 1
-        retry_input_payload = {
-            **input_payload,
-            "language_retry_instruction": retry_language_instruction(expected_language or ""),
-        }
-        retry_response = provider.complete_json(
-            function_type=function_type,
-            input_payload=retry_input_payload,
-        )
-        retry_output = retry_response.output
-        if not draft_language_mismatch(expected_language, str(retry_output.get("body") or "")):
-            input_payload = retry_input_payload
-            provider_response = combine_draft_provider_responses(
-                provider_response,
-                retry_response,
-            )
-            output = retry_output
     llm_run = LlmRun(
         id=new_id("llm_run"),
         function_type=function_type,
@@ -1577,6 +2033,7 @@ def generate_mail_draft(
                 "bcc_addresses": bcc_addresses,
                 "has_instruction": bool((payload.instruction or "").strip()),
                 "has_standard_prompt": bool((payload.standard_prompt or "").strip()),
+                "generation_language": selected_generation_language,
                 "reply_language": language_label(expected_language),
                 "language_retry_count": retry_count,
                 "related_case_summary_count": len(related_case_summaries),
@@ -1588,6 +2045,9 @@ def generate_mail_draft(
             {
                 "instruction_length": len(payload.instruction or ""),
                 "standard_prompt_length": len(payload.standard_prompt or ""),
+                "language_generation_prompt": generation_language_prompt(
+                    expected_language
+                ),
                 "auto_body_text_length": len(payload.auto_body_text or ""),
                 "current_body_length": len(payload.body_text or ""),
                 "detected_reply_language": language_label(expected_language),

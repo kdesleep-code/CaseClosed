@@ -12,6 +12,7 @@ import type { MailTab } from './MailView'
 import MailThreadView from './MailThreadView'
 import MaintenanceView from './MaintenanceView'
 import type { MaintenanceInitialData } from './MaintenanceView'
+import StorageView from './StorageView'
 import { t } from './i18n'
 import type { MessageKey } from './i18n'
 import { AppLink } from './navigation'
@@ -675,6 +676,23 @@ function App() {
             }
             mode="pending"
           />
+        </>
+      )
+    }
+    if (path === '/files') {
+      return (
+        <>
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <StorageView />
+        </>
+      )
+    }
+    if (path.startsWith('/files/')) {
+      const storageObjectId = decodeURIComponent(path.slice('/files/'.length))
+      return (
+        <>
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <StorageView storageObjectId={storageObjectId} />
         </>
       )
     }

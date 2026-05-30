@@ -7,10 +7,12 @@ import type { Contact } from './phase3Api'
 import {
   deleteMailDraft,
   generateMailDraft,
+  getMailDraftGenerationStandardPrompt,
   listMailDrafts,
   resolveMailDraftAttachments,
   saveMailDraft,
   sendMail,
+  updateMailDraftGenerationStandardPrompt,
 } from './phase4Api'
 import type { MailDraft, MailDraftAttachmentRef } from './phase4Api'
 import settingsGearIconUrl from './assets/settings-gear.svg'
@@ -27,8 +29,11 @@ type ComposeState = {
 type ComposeAttachment = {
   id: string
   key: string
-  file: File
+  file?: File
   name: string
+  contentType: string
+  size: number
+  storageObjectId?: string | null
 }
 
 type ComposeSignature = {
@@ -46,6 +51,8 @@ type ComposeRecipientSuggestion = {
   displayName: string
   emailAddress: string
 }
+
+type LlmGenerationLanguage = 'japanese' | 'english'
 
 const noneSignature: ComposeSignature = {
   id: 'none',
@@ -73,6 +80,13 @@ function initialStateFromQuery(): ComposeState {
 
 function newSignatureId() {
   return `signature_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+}
+
+function normalizeLlmGenerationLanguage(
+  value: unknown,
+  fallback: LlmGenerationLanguage = 'japanese',
+): LlmGenerationLanguage {
+  return value === 'english' || value === 'japanese' ? value : fallback
 }
 
 function isStoredSignature(value: unknown): value is ComposeSignature {
@@ -120,7 +134,7 @@ function loadSelectedSignatureId(signatures: ComposeSignature[]) {
 }
 
 function loadLlmGenerationStandardPrompt() {
-  return window.localStorage.getItem(llmGenerationStandardPromptStorageKey) ?? ''
+  return ''
 }
 
 function signatureText(content: string) {
@@ -222,6 +236,10 @@ function fileFromBase64(
   return new File([bytes], filename, { type: contentType })
 }
 
+function bodyMentionsAttachment(bodyText: string) {
+  return /添付|送付|attach(?:ed|ment)?|enclos(?:e|ed|ure)/i.test(bodyText)
+}
+
 export default function ComposeMailView() {
   const [form, setForm] = useState<ComposeState>(() => initialStateFromQuery())
   const [signatures, setSignatures] = useState<ComposeSignature[]>(() =>
@@ -244,6 +262,8 @@ export default function ComposeMailView() {
   const [llmGenerationStandardPrompt, setLlmGenerationStandardPrompt] = useState(
     () => loadLlmGenerationStandardPrompt(),
   )
+  const [llmGenerationLanguage, setLlmGenerationLanguage] =
+    useState<LlmGenerationLanguage>('japanese')
   const [replyToMessageId] = useState<string | null>(() => replyToMessageIdFromQuery())
   const [showCcBcc, setShowCcBcc] = useState(() => {
     const params = new URLSearchParams(window.location.search)
@@ -293,6 +313,39 @@ export default function ComposeMailView() {
     resizeTextAreaToContent(llmInstructionRef.current)
   }, [llmGenerationInstruction])
 
+  useEffect(() => {
+    let canceled = false
+    void getMailDraftGenerationStandardPrompt()
+      .then(async (setting) => {
+        if (canceled) return
+        const localPrompt =
+          window.localStorage.getItem(llmGenerationStandardPromptStorageKey) ?? ''
+        if (setting.standard_prompt === '' && localPrompt.trim() !== '') {
+          const migrated = await updateMailDraftGenerationStandardPrompt(
+            localPrompt,
+            normalizeLlmGenerationLanguage(setting.generation_language),
+          )
+          if (!canceled) {
+            setLlmGenerationStandardPrompt(migrated.standard_prompt)
+            setLlmGenerationLanguage(
+              normalizeLlmGenerationLanguage(migrated.generation_language),
+            )
+          }
+          return
+        }
+        setLlmGenerationStandardPrompt(setting.standard_prompt)
+        setLlmGenerationLanguage(
+          normalizeLlmGenerationLanguage(setting.generation_language),
+        )
+      })
+      .catch((requestError) => {
+        if (!canceled) setError(describeError(requestError))
+      })
+    return () => {
+      canceled = true
+    }
+  }, [])
+
   function resizeTextAreaToContent(textarea: HTMLTextAreaElement | null) {
     if (textarea === null) {
       return
@@ -338,17 +391,45 @@ export default function ComposeMailView() {
     return value === null ? '' : value.slice(0, 16)
   }
 
-  function attachmentRefs(): MailDraftAttachmentRef[] {
-    return attachments.map((attachment) => {
+  async function attachmentRefs(): Promise<MailDraftAttachmentRef[]> {
+    return Promise.all(attachments.map(async (attachment) => {
+      if (attachment.storageObjectId !== undefined && attachment.storageObjectId !== null) {
+        return {
+          name: attachment.name,
+          path: attachment.storageObjectId,
+          content_type: attachment.contentType,
+          size: attachment.size,
+          storage_object_id: attachment.storageObjectId,
+        }
+      }
+      if (attachment.file === undefined) {
+        return {
+          name: attachment.name,
+          content_type: attachment.contentType,
+          size: attachment.size,
+        }
+      }
       const fileWithPath = attachment.file as File & { webkitRelativePath?: string }
       return {
         name: attachment.name,
         path: fileWithPath.webkitRelativePath || attachment.name,
+        content_type: attachment.contentType,
+        data_base64: await fileToBase64(attachment.file),
+        size: attachment.size,
       }
-    })
+    }))
   }
 
   async function submitMail(scheduledAtIso: string | null = null) {
+    const bodyText = composedBodyText()
+    if (
+      attachments.length === 0 &&
+      bodyMentionsAttachment(bodyText) &&
+      !window.confirm(t('mail.compose.missingAttachmentConfirm'))
+    ) {
+      return
+    }
+
     setFeedback(null)
     setError(null)
     setIsSending(true)
@@ -357,9 +438,11 @@ export default function ComposeMailView() {
       const encodedAttachments = await Promise.all(
         attachments.map(async (attachment) => ({
           filename: attachment.name,
-          content_type: attachment.file.type || 'application/octet-stream',
-          data_base64: await fileToBase64(attachment.file),
-          size: attachment.file.size,
+          content_type: attachment.contentType,
+          ...(attachment.storageObjectId !== undefined && attachment.storageObjectId !== null
+            ? { storage_object_id: attachment.storageObjectId }
+            : { data_base64: await fileToBase64(attachment.file as File) }),
+          size: attachment.size,
         })),
       )
       const sendRequest = await sendMail({
@@ -367,7 +450,7 @@ export default function ComposeMailView() {
         cc_addresses: splitAddressList(form.cc),
         bcc_addresses: splitAddressList(form.bcc),
         subject: form.subject,
-        body_text: composedBodyText(),
+        body_text: bodyText,
         attachment_names: attachments.map((attachment) => attachment.name),
         attachments: encodedAttachments,
         reply_to_message_id: replyToMessageId,
@@ -413,6 +496,8 @@ export default function ComposeMailView() {
           key: attachmentKey(file),
           file,
           name: file.name,
+          contentType: file.type || 'application/octet-stream',
+          size: file.size,
         }))
       return [...current, ...selectedAttachments]
     })
@@ -443,7 +528,7 @@ export default function ComposeMailView() {
         body_text: form.body,
         auto_body_text: form.autoBody,
         selected_signature_id: selectedSignatureId,
-        attachment_refs: attachmentRefs(),
+        attachment_refs: await attachmentRefs(),
         scheduled_at: localDateTimeToJstIso(scheduledAt),
       })
       setDrafts((current) => [draft, ...current.filter((item) => item.key !== draft.key)])
@@ -501,11 +586,17 @@ export default function ComposeMailView() {
       setAttachments(
         resolved.items.map((item, index) => {
           const file = fileFromBase64(item.filename, item.content_type, item.data_base64)
+          const storageObjectId = item.storage_object_id
           return {
             id: `${item.path}:${item.size}:${Date.now()}:${index}`,
             key: `${item.path}:${item.size}`,
-            file,
+            ...(storageObjectId === null
+              ? { file }
+              : {}),
             name: item.filename,
+            contentType: item.content_type,
+            size: item.size,
+            storageObjectId,
           }
         }),
       )
@@ -569,12 +660,41 @@ export default function ComposeMailView() {
     }
   }
 
-  function saveLlmGenerationStandardPrompt() {
+  async function saveLlmGenerationStandardPrompt() {
     const prompt = llmGenerationStandardPrompt.trimEnd()
-    setLlmGenerationStandardPrompt(prompt)
-    window.localStorage.setItem(llmGenerationStandardPromptStorageKey, prompt)
-    setFeedback(t('mail.compose.llmGeneration.standardPromptSaved'))
-    setError(null)
+    try {
+      const setting = await updateMailDraftGenerationStandardPrompt(
+        prompt,
+        llmGenerationLanguage,
+      )
+      setLlmGenerationStandardPrompt(setting.standard_prompt)
+      setLlmGenerationLanguage(
+        normalizeLlmGenerationLanguage(setting.generation_language, llmGenerationLanguage),
+      )
+      window.localStorage.removeItem(llmGenerationStandardPromptStorageKey)
+      setFeedback(t('mail.compose.llmGeneration.standardPromptSaved'))
+      setError(null)
+    } catch (requestError) {
+      setError(describeError(requestError))
+      setFeedback(null)
+    }
+  }
+
+  async function handleLlmGenerationLanguageChange(language: LlmGenerationLanguage) {
+    setLlmGenerationLanguage(language)
+    try {
+      const setting = await updateMailDraftGenerationStandardPrompt(
+        llmGenerationStandardPrompt.trimEnd(),
+        language,
+      )
+      setLlmGenerationStandardPrompt(setting.standard_prompt)
+      setLlmGenerationLanguage(
+        normalizeLlmGenerationLanguage(setting.generation_language, language),
+      )
+      setError(null)
+    } catch (requestError) {
+      setError(describeError(requestError))
+    }
   }
 
   async function handleGenerateDraft() {
@@ -586,6 +706,7 @@ export default function ComposeMailView() {
       const generated = await generateMailDraft({
         instruction: llmGenerationInstruction,
         standard_prompt: standardPrompt,
+        generation_language: llmGenerationLanguage,
         to_addresses: splitAddressList(form.to),
         cc_addresses: splitAddressList(form.cc),
         bcc_addresses: splitAddressList(form.bcc),
@@ -882,6 +1003,30 @@ export default function ComposeMailView() {
                   <img alt="" aria-hidden="true" src={settingsGearIconUrl} />
                 </button>
               </div>
+              <div
+                aria-label={t('mail.compose.llmGeneration.language')}
+                className="compose-language-segmented"
+                role="group"
+              >
+                <button
+                  aria-pressed={llmGenerationLanguage === 'japanese'}
+                  onClick={() => {
+                    void handleLlmGenerationLanguageChange('japanese')
+                  }}
+                  type="button"
+                >
+                  {t('mail.compose.llmGeneration.languageJapanese')}
+                </button>
+                <button
+                  aria-pressed={llmGenerationLanguage === 'english'}
+                  onClick={() => {
+                    void handleLlmGenerationLanguageChange('english')
+                  }}
+                  type="button"
+                >
+                  {t('mail.compose.llmGeneration.languageEnglish')}
+                </button>
+              </div>
               <label className="compose-field">
                 <span>{t('mail.compose.llmGeneration.instruction')}</span>
                 <textarea
@@ -919,7 +1064,9 @@ export default function ComposeMailView() {
                   </label>
                   <button
                     className="compose-tool-button"
-                    onClick={saveLlmGenerationStandardPrompt}
+                    onClick={() => {
+                      void saveLlmGenerationStandardPrompt()
+                    }}
                     type="button"
                   >
                     {t('mail.compose.llmGeneration.saveStandardPrompt')}

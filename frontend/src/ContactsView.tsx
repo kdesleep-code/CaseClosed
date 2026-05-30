@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { FormEvent } from 'react'
+import type { ChangeEvent, FormEvent } from 'react'
 import {
   addContactEmailAddress,
   activateContactEmailAddress,
@@ -14,6 +14,7 @@ import {
   saveContactCustomTabs,
   setContactPrimaryEmailAddress,
   updateContact,
+  uploadContactImage,
 } from './phase3Api'
 import type { Contact, ContactCustomTab, UnresolvedFromAddress } from './phase3Api'
 import { t } from './i18n'
@@ -27,6 +28,7 @@ type ContactKind = 'person' | 'mailing_list'
 type SenderResolutionMode = 'self' | 'reply_to'
 type ContactMailImportanceRuleAction = 'llm' | 'fixed' | 'llm_with_instruction'
 type ContactMailImportanceRuleValue = 'pinned' | 'high' | 'middle' | 'low'
+type ContactSortMode = 'name' | 'latest_mail' | 'mail_count'
 
 export type ContactsInitialData =
   | {
@@ -47,6 +49,10 @@ const defaultContactAvatarUrl = new URL(
 ).href
 const defaultMailingListAvatarUrl = new URL(
   './assets/default-mailing-list-avatar.svg',
+  import.meta.url,
+).href
+const defaultSpamAvatarUrl = new URL(
+  './assets/default-spam-avatar.webp',
   import.meta.url,
 ).href
 
@@ -72,10 +78,50 @@ function isMailingListContact(contact: Contact) {
   return (contact.kind ?? 'person') === 'mailing_list'
 }
 
+function formatContactDate(value: string | null | undefined) {
+  if (value === undefined || value === null || value.trim() === '') {
+    return t('common.none')
+  }
+  return value.slice(0, 10)
+}
+
+function contactSortReference(contact: Contact, sortMode: ContactSortMode) {
+  if (sortMode === 'latest_mail') {
+    return t('contacts.sort.reference.latestMail', {
+      date: formatContactDate(contact.latest_received_at),
+    })
+  }
+  if (sortMode === 'mail_count') {
+    return t('contacts.sort.reference.mailCount', {
+      count: contact.inbound_message_count ?? 0,
+    })
+  }
+  return null
+}
+
 function defaultAvatarUrlForContact(contact: Contact) {
+  if (contact.status === 'spam') {
+    return defaultSpamAvatarUrl
+  }
   return isMailingListContact(contact)
     ? defaultMailingListAvatarUrl
     : defaultContactAvatarUrl
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.addEventListener('load', () => {
+      const result = reader.result
+      if (typeof result !== 'string') {
+        reject(new Error('Failed to read file.'))
+        return
+      }
+      resolve(result.includes(',') ? result.split(',', 2)[1] : result)
+    })
+    reader.addEventListener('error', () => reject(reader.error ?? new Error('Failed to read file.')))
+    reader.readAsDataURL(file)
+  })
 }
 
 function normalizeTag(value: string) {
@@ -152,7 +198,7 @@ function ContactsView({
   const [isMergeToolOpen, setIsMergeToolOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedTagFilter, setSelectedTagFilter] = useState<string | null>(null)
-  const [sortMode, setSortMode] = useState<'name' | 'updated'>('name')
+  const [sortMode, setSortMode] = useState<ContactSortMode>('name')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('active')
   const [customTabs, setCustomTabs] = useState<ContactCustomTab[]>([])
   const [activeCustomTabId, setActiveCustomTabId] = useState<string | null>(null)
@@ -186,9 +232,11 @@ function ContactsView({
   const [mergeDestinationQuery, setMergeDestinationQuery] = useState('')
   const [busyEmailAddress, setBusyEmailAddress] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [isAvatarUploading, setIsAvatarUploading] = useState(false)
   const [hasLoadedPendingContacts, setHasLoadedPendingContacts] = useState(
     initialData?.mode === 'pending',
   )
+  const avatarFileInputRef = useRef<HTMLInputElement | null>(null)
   const [hasHadPendingContacts, setHasHadPendingContacts] = useState(
     initialData?.mode === 'pending' &&
       initialData.unresolvedFromAddresses.length > 0,
@@ -632,6 +680,41 @@ function ContactsView({
     }
   }
 
+  async function handleAvatarFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    const selectedContact = contacts.find((contact) => contact.id === selectedContactId)
+    if (file === undefined || selectedContact === undefined) {
+      return
+    }
+
+    setError(null)
+    setNotice(null)
+    setIsAvatarUploading(true)
+
+    try {
+      const dataBase64 = await fileToBase64(file)
+      const result = await uploadContactImage(selectedContact.id, {
+        filename: file.name || null,
+        content_type: file.type || 'application/octet-stream',
+        data_base64: dataBase64,
+      })
+      const updatedContact = {
+        ...selectedContact,
+        avatar_url: result.contact.avatar_url,
+        updated_at: result.contact.updated_at,
+        version: result.contact.version,
+      }
+      updateContactInState(updatedContact)
+      openContactDetail(updatedContact)
+      setNotice(t('contacts.avatar.updated'))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsAvatarUploading(false)
+    }
+  }
+
   async function handleAddEmailAddress(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const selectedContact = contacts.find((contact) => contact.id === selectedContactId)
@@ -987,8 +1070,18 @@ function ContactsView({
       return queryTerms.every((term) => searchableText.includes(term))
     })
     .toSorted((first, second) => {
-      if (sortMode === 'updated') {
-        return second.updated_at.localeCompare(first.updated_at)
+      if (sortMode === 'latest_mail') {
+        const latestCompare = (second.latest_received_at ?? '').localeCompare(
+          first.latest_received_at ?? '',
+        )
+        if (latestCompare !== 0) return latestCompare
+        return first.display_name.localeCompare(second.display_name)
+      }
+      if (sortMode === 'mail_count') {
+        const countCompare =
+          (second.inbound_message_count ?? 0) - (first.inbound_message_count ?? 0)
+        if (countCompare !== 0) return countCompare
+        return first.display_name.localeCompare(second.display_name)
       }
       return first.display_name.localeCompare(second.display_name)
     })
@@ -1234,17 +1327,18 @@ function ContactsView({
                 </div>
                 <label className="contact-sort">
                   <span>{t('contacts.sort.label')}</span>
-                  <select
-                    aria-label={t('contacts.sort.aria')}
-                    onChange={(event) =>
-                      setSortMode(event.target.value as 'name' | 'updated')
-                    }
-                    value={sortMode}
-                  >
-                    <option value="name">{t('contacts.sort.name')}</option>
-                    <option value="updated">{t('contacts.sort.updated')}</option>
-                  </select>
-                </label>
+                    <select
+                      aria-label={t('contacts.sort.aria')}
+                      onChange={(event) =>
+                      setSortMode(event.target.value as ContactSortMode)
+                      }
+                      value={sortMode}
+                    >
+                      <option value="name">{t('contacts.sort.name')}</option>
+                      <option value="latest_mail">{t('contacts.sort.latestMail')}</option>
+                      <option value="mail_count">{t('contacts.sort.mailCount')}</option>
+                    </select>
+                  </label>
                 <div className="contact-tool-actions">
                   <button
                     aria-expanded={isCreateOpen}
@@ -1510,10 +1604,13 @@ function ContactsView({
                       const email = primaryEmail(contact)
                       const isExpanded = selectedContact?.id === contact.id
                       const fixedImportance = contact.mail_importance_rule_importance
+                      const sortReference = contactSortReference(contact, sortMode)
                       return (
                         <article
                           className={`contact-row contact-expandable-row${
                             isExpanded ? ' contact-row-expanded' : ''
+                          }${
+                            sortReference !== null ? ' contact-row-with-sort-reference' : ''
                           }${
                             contact.mail_importance_rule_action === 'fixed' &&
                             fixedImportance != null
@@ -1550,6 +1647,11 @@ function ContactsView({
                                 </div>
                               </div>
                             </div>
+                            {sortReference !== null && (
+                              <div className="contact-sort-reference">
+                                {sortReference}
+                              </div>
+                            )}
                             <div className="contact-row-side">
                               <div className="contact-tags">
                                 {isMailingListContact(contact) ? (
@@ -2074,9 +2176,20 @@ function ContactsView({
                               )}
                               {isContactDetailEditing && (
                                 <div className="contact-detail-edit-buttons contact-detail-secondary">
+                                  <input
+                                    accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+                                    aria-label={t('contacts.avatar.file')}
+                                    className="visually-hidden"
+                                    onChange={handleAvatarFileChange}
+                                    ref={avatarFileInputRef}
+                                    type="file"
+                                  />
                                   <button
-                                    disabled
-                                    title={t('contacts.avatar.unimplemented')}
+                                    className={`button-loading-dot${
+                                      isAvatarUploading ? ' is-loading' : ''
+                                    }`}
+                                    disabled={isSubmitting || isAvatarUploading}
+                                    onClick={() => avatarFileInputRef.current?.click()}
                                     type="button"
                                   >
                                     {t('contacts.avatar.update')}

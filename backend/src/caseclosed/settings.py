@@ -27,6 +27,13 @@ def get_mail_drafts_database_path() -> Path:
     return Path("./data/caseclosed.drafts.sqlite3")
 
 
+def get_storage_root() -> Path:
+    configured_path = os.environ.get("CASECLOSED_STORAGE_ROOT")
+    if configured_path is not None and configured_path.strip() != "":
+        return Path(configured_path.strip())
+    return Path("./data/storage")
+
+
 def get_bootstrap_password() -> str | None:
     return os.environ.get("CASECLOSED_BOOTSTRAP_PASSWORD")
 

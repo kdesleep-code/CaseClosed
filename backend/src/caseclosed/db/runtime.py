@@ -17,7 +17,9 @@ from caseclosed.db.base import Base
 from caseclosed.db.models import AppSetting
 from caseclosed.db.models import Case
 from caseclosed.db.models import MailAutoState
+from caseclosed.db.models import StorageLocation
 from caseclosed.settings import get_database_url
+from caseclosed.settings import get_storage_root
 
 JST = timezone(timedelta(hours=9), "JST")
 SEED_TIMESTAMP = "2026-05-22T00:00:00+09:00"
@@ -68,6 +70,7 @@ def bootstrap_database() -> None:
     with SessionLocal() as session:
         seed_settings(session)
         seed_system_cases(session)
+        seed_storage_locations(session)
         normalize_llm_blocked_mail_importance(session)
         normalize_llm_skip_mail_importance(session)
         session.commit()
@@ -105,6 +108,11 @@ def ensure_runtime_schema() -> None:
         if "mail_thread_summaries" in table_names
         else set()
     )
+    storage_object_columns = (
+        {column["name"] for column in inspector.get_columns("storage_objects")}
+        if "storage_objects" in table_names
+        else set()
+    )
 
     with engine.begin() as connection:
         if "avatar_url" not in contact_columns:
@@ -132,6 +140,60 @@ def ensure_runtime_schema() -> None:
             connection.execute(
                 text("ALTER TABLE contacts ADD COLUMN mail_importance_rule_instruction TEXT")
             )
+        if "inbound_message_count" not in contact_columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE contacts "
+                    "ADD COLUMN inbound_message_count INTEGER NOT NULL DEFAULT 0"
+                )
+            )
+        if "latest_received_at" not in contact_columns:
+            connection.execute(text("ALTER TABLE contacts ADD COLUMN latest_received_at TEXT"))
+        if (
+            "gmail_messages" in table_names
+            and "contact_email_addresses" in table_names
+            and (
+                "inbound_message_count" not in contact_columns
+                or "latest_received_at" not in contact_columns
+            )
+        ):
+            if "gmail_messages" in table_names and "contact_email_addresses" in table_names:
+                connection.execute(
+                    text(
+                        """
+                        UPDATE contacts
+                        SET
+                            inbound_message_count = (
+                                SELECT COUNT(DISTINCT gmail_messages.id)
+                                FROM gmail_messages
+                                JOIN contact_email_addresses
+                                    ON contact_email_addresses.normalized_email_address
+                                        IN (
+                                            gmail_messages.from_address,
+                                            gmail_messages.reply_to_address
+                                        )
+                                WHERE contact_email_addresses.contact_id = contacts.id
+                                  AND contact_email_addresses.deleted_at IS NULL
+                                  AND COALESCE(gmail_messages.gmail_labels_json, '')
+                                      NOT LIKE '%"SENT"%'
+                            ),
+                            latest_received_at = (
+                                SELECT MAX(gmail_messages.received_at)
+                                FROM gmail_messages
+                                JOIN contact_email_addresses
+                                    ON contact_email_addresses.normalized_email_address
+                                        IN (
+                                            gmail_messages.from_address,
+                                            gmail_messages.reply_to_address
+                                        )
+                                WHERE contact_email_addresses.contact_id = contacts.id
+                                  AND contact_email_addresses.deleted_at IS NULL
+                                  AND COALESCE(gmail_messages.gmail_labels_json, '')
+                                      NOT LIKE '%"SENT"%'
+                            )
+                        """
+                    )
+                )
         if "mail_auto_state" in table_names and "llm_run_id" not in mail_auto_state_columns:
             connection.execute(text("ALTER TABLE mail_auto_state ADD COLUMN llm_run_id TEXT"))
         if "mail_auto_state" in table_names and "llm_blocked" not in mail_auto_state_columns:
@@ -268,6 +330,133 @@ def ensure_runtime_schema() -> None:
             connection.execute(
                 text("ALTER TABLE mail_thread_summaries ADD COLUMN translation_text TEXT")
             )
+        if "storage_locations" not in table_names:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE storage_locations (
+                        id TEXT PRIMARY KEY,
+                        label TEXT NOT NULL,
+                        kind TEXT NOT NULL DEFAULT 'internal',
+                        root_path TEXT NOT NULL,
+                        mount_hint TEXT,
+                        marker_id TEXT,
+                        status TEXT NOT NULL DEFAULT 'active',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+            )
+        if "storage_objects" in table_names and "location_id" not in storage_object_columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE storage_objects "
+                    "ADD COLUMN location_id TEXT NOT NULL "
+                    "DEFAULT 'storage_location_internal'"
+                )
+            )
+        if (
+            "storage_objects" in table_names
+            and "llm_input_allowed" not in storage_object_columns
+        ):
+            connection.execute(
+                text(
+                    "ALTER TABLE storage_objects "
+                    "ADD COLUMN llm_input_allowed INTEGER NOT NULL DEFAULT 0"
+                )
+            )
+        if "storage_objects" in table_names and "source_type" not in storage_object_columns:
+            connection.execute(text("ALTER TABLE storage_objects ADD COLUMN source_type TEXT"))
+        if (
+            "storage_objects" in table_names
+            and "source_message_id" not in storage_object_columns
+        ):
+            connection.execute(
+                text("ALTER TABLE storage_objects ADD COLUMN source_message_id TEXT")
+            )
+        if "storage_objects" in table_names and "file_summaries" not in table_names:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE file_summaries (
+                        id TEXT PRIMARY KEY,
+                        storage_object_id TEXT NOT NULL REFERENCES storage_objects(id),
+                        storage_object_version_id TEXT REFERENCES storage_object_versions(id),
+                        source_sha256_hex TEXT NOT NULL,
+                        source_filename TEXT,
+                        source_content_type TEXT,
+                        source_byte_size INTEGER NOT NULL DEFAULT 0,
+                        summary_type TEXT NOT NULL DEFAULT 'llm_digest',
+                        file_description TEXT NOT NULL,
+                        summary_points_json TEXT NOT NULL,
+                        llm_digest TEXT NOT NULL,
+                        structured_digest_json TEXT NOT NULL,
+                        coverage_json TEXT NOT NULL,
+                        token_estimate INTEGER,
+                        llm_run_id TEXT REFERENCES llm_runs(id),
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+            )
+        if "storage_objects" in table_names and "file_version_diffs" not in table_names:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE file_version_diffs (
+                        id TEXT PRIMARY KEY,
+                        storage_object_id TEXT NOT NULL REFERENCES storage_objects(id),
+                        previous_version_id TEXT NOT NULL REFERENCES storage_object_versions(id),
+                        previous_sha256_hex TEXT NOT NULL,
+                        current_sha256_hex TEXT NOT NULL,
+                        diff_kind TEXT NOT NULL,
+                        summary_text TEXT NOT NULL,
+                        added_lines_json TEXT NOT NULL,
+                        removed_lines_json TEXT NOT NULL,
+                        coverage_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+            )
+        if "storage_objects" in table_names:
+            connection.execute(
+                text(
+                    """
+                    UPDATE storage_objects
+                    SET source_type = 'direct_upload'
+                    WHERE source_type IS NULL AND scope = 'managed'
+                    """
+                )
+            )
+            if "gmail_message_attachments" in table_names:
+                connection.execute(
+                    text(
+                        """
+                        UPDATE storage_objects
+                        SET
+                            source_type = 'mail_attachment',
+                            source_message_id = (
+                                SELECT gmail_message_attachments.message_id
+                                FROM gmail_message_attachments
+                                WHERE gmail_message_attachments.storage_object_id
+                                    = storage_objects.id
+                                LIMIT 1
+                            )
+                        WHERE id IN (
+                            SELECT storage_object_id
+                            FROM gmail_message_attachments
+                            WHERE storage_object_id IS NOT NULL
+                        )
+                        """
+                    )
+                )
 
 
 def seed_settings(session: Session) -> None:
@@ -283,6 +472,31 @@ def seed_settings(session: Session) -> None:
                 updated_at=SEED_TIMESTAMP,
             )
         )
+
+
+def seed_storage_locations(session: Session) -> None:
+    existing = session.get(StorageLocation, "storage_location_internal")
+    root_path = get_storage_root().as_posix()
+    if existing is None:
+        session.add(
+            StorageLocation(
+                id="storage_location_internal",
+                label="Internal Storage",
+                kind="internal",
+                root_path=root_path,
+                mount_hint=None,
+                marker_id="caseclosed-internal-storage",
+                status="active",
+                created_at=SEED_TIMESTAMP,
+                updated_at=SEED_TIMESTAMP,
+                version=1,
+            )
+        )
+        return
+    if existing.root_path != root_path:
+        existing.root_path = root_path
+        existing.updated_at = jst_iso()
+        existing.version += 1
 
 
 def seed_system_cases(session: Session) -> None:

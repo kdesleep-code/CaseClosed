@@ -4,6 +4,8 @@ export type MaintenanceStatus = {
   action_required_jobs?: number
   pending_write_requests: number
   external_unknown_count: number
+  llm_cost_month_used?: number
+  llm_cost_month_remaining?: number | null
   backup_status: string
 }
 
@@ -58,6 +60,59 @@ export type PendingMailRefreshResult = {
   reason: string
   queued_job_id: string | null
   mail: PendingMail
+}
+
+export type LlmCostHistory = {
+  currency: string
+  source: string
+  monthly_budget: number | null
+  month_used: number
+  month_remaining: number | null
+  today_used: number
+  total_used: number
+  by_function: Array<{
+    function_type: string
+    run_count: number
+    prompt_tokens: number
+    completion_tokens: number
+    total_tokens: number
+    estimated_cost: number
+  }>
+  daily: Array<{
+    date: string
+    run_count: number
+    estimated_cost: number
+  }>
+  recent_runs: Array<{
+    id: string
+    function_type: string
+    provider_name: string
+    model_name: string
+    status: string
+    prompt_tokens: number | null
+    completion_tokens: number | null
+    total_tokens: number | null
+    estimated_cost: number | null
+    created_at: string
+    finished_at: string | null
+  }>
+}
+
+export type StorageOperationHistoryItem = {
+  id: string
+  storage_object_id: string | null
+  operation_type: string
+  actor: string
+  scope: string | null
+  original_filename: string | null
+  content_type: string | null
+  byte_size: number | null
+  storage_path: string | null
+  source_type: string | null
+  source_message_id: string | null
+  directory_id: string | null
+  details: Record<string, unknown> | null
+  created_at: string
 }
 
 type ListResponse<T> = {
@@ -134,6 +189,27 @@ export function readMaintenanceStatus(): Promise<MaintenanceStatus> {
   return request<MaintenanceStatus>('/api/v1/maintenance/status')
 }
 
+export function readLlmCostHistory(): Promise<LlmCostHistory> {
+  return request<LlmCostHistory>('/api/v1/maintenance/llm-cost-history')
+}
+
+export function updateLlmCostSettings(
+  monthlyBudget: number | null,
+): Promise<LlmCostHistory> {
+  return request<LlmCostHistory>('/api/v1/maintenance/llm-cost-settings', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ monthly_budget: monthlyBudget }),
+  })
+}
+
+export async function listStorageOperationHistory(): Promise<StorageOperationHistoryItem[]> {
+  const data = await request<ListResponse<StorageOperationHistoryItem>>(
+    '/api/v1/maintenance/storage-operation-history',
+  )
+  return data.items
+}
+
 export async function listJobs(): Promise<Job[]> {
   const data = await request<ListResponse<Job>>('/api/v1/jobs')
   return data.items
@@ -141,6 +217,10 @@ export async function listJobs(): Promise<Job[]> {
 
 export function retryJob(jobId: string): Promise<Job> {
   return request<Job>(`/api/v1/jobs/${jobId}/retry`, { method: 'POST' })
+}
+
+export function discardJob(jobId: string): Promise<Job> {
+  return request<Job>(`/api/v1/jobs/${jobId}/discard`, { method: 'POST' })
 }
 
 export async function listExternalOperations(): Promise<ExternalOperation[]> {

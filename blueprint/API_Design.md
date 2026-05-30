@@ -1733,108 +1733,226 @@ POST /api/v1/follow-up-watches/{watch_id}/create-reminder-task
 
 # 13. File / Storage API
 
-## 13.1 Caseファイル一覧
+Phase 6時点の現行実装は、`files` テーブルを分けず `storage_objects` をファイル系列として扱う。Case連携APIはPhase 7で拡張する。
+
+## 13.1 Storage一覧
 
 ```http
-GET /api/v1/cases/{case_id}/files
+GET /api/v1/storage/objects
+```
+
+Query:
+
+```text
+directory_id
+limit
 ```
 
 仕様:
 
-- ファイルカード表示ログを記録する。
-- Mail添付由来ファイルは、添付元メールのCase表示に連動する。
+- `scope = managed` かつ `status = active` のStorage objectを返す。
+- Storage一覧からのダウンロードは常に最新版を対象とする。
 
-## 13.2 ファイルアップロード
+フロントルート:
 
 ```http
-POST /api/v1/cases/{case_id}/files
+GET /files
+```
+
+## 13.2 Storage詳細
+
+```http
+GET /api/v1/storage/objects/{storage_object_id}
+```
+
+仕様:
+
+- 添付元メールがあれば `source_mail` を返す。
+- `url` / `download_url` は最新版を指す。
+
+フロントルート:
+
+```http
+GET /files/{storage_object_id}
+```
+
+## 13.3 ファイルアップロード
+
+```http
+POST /api/v1/storage/objects/upload
 Content-Type: multipart/form-data
 ```
 
-Fields:
+仕様:
 
-```text
-file
-origin=upload
-memo
-llm_policy=allowed|confirm_required|forbidden
-```
+- `storage_objects` を作成する。
+- 物理保存パスはID/hashベースとし、元ファイル名とは分離する。
+- 操作履歴に `uploaded` を残す。
 
-処理:
-
-- storage objectを作成する。
-- files / file_links をWrite Requestで登録する。
-
-## 13.3 ファイル詳細
+## 13.4 Storage object作成
 
 ```http
-GET /api/v1/files/{file_id}
-```
-
-## 13.4 ファイルダウンロード
-
-```http
-GET /api/v1/files/{file_id}/download
-```
-
-監査ログ:
-
-- ファイルダウンロードを記録する。
-
-## 13.5 ファイルをゴミ箱へ移動
-
-```http
-POST /api/v1/files/{file_id}/trash
-```
-
-## 13.6 ファイル復元
-
-```http
-POST /api/v1/files/{file_id}/restore
-```
-
-## 13.7 ファイル物理削除
-
-```http
-POST /api/v1/files/{file_id}/purge
+POST /api/v1/storage/objects
 ```
 
 仕様:
 
-- 重要操作確認対象。
-- 保守・運用画面からのみ利用する。
-- 物理削除後もDBメタ情報は残す。
+- 内部処理からStorage objectを作成する場合のAPI。
 
-## 13.8 LLM Policy変更
+## 13.5 内容表示・ダウンロード
 
 ```http
-POST /api/v1/files/{file_id}/llm-policy
+GET /api/v1/storage/objects/{storage_object_id}/content
+GET /api/v1/storage/objects/{storage_object_id}/download
+```
+
+仕様:
+
+- `content` はプレビュー用inline表示。
+- `download` はattachment表示。
+- 表示・ダウンロードは `storage_operation_history` に `viewed` / `downloaded` として記録する。
+
+## 13.6 バージョン一覧・旧版表示
+
+```http
+GET /api/v1/storage/objects/{storage_object_id}/versions
+GET /api/v1/storage/objects/{storage_object_id}/versions/{version_id}/content
+GET /api/v1/storage/objects/{storage_object_id}/versions/{version_id}/download
+```
+
+仕様:
+
+- `storage_object_versions` をversion_number降順で返す。
+- 旧版content/downloadは選択バージョンの物理ファイルを返す。
+
+## 13.7 ファイル更新
+
+```http
+POST /api/v1/storage/objects/{storage_object_id}/versions/upload
+Content-Type: multipart/form-data
+```
+
+仕様:
+
+- Storage詳細画面のドラッグ&ドロップ更新で利用する。
+- 更新前の最新版を `storage_object_versions` に退避し、`storage_objects` を新しい最新版に更新する。
+- 拡張子が異なる場合はフロント側で確認を挟む。
+- sha256とサイズが同一の場合は更新せず `update_skipped` を履歴に残す。
+- 更新時にLLMなしで抽出テキスト差分を作成し、`file_version_diffs` に保存する。
+
+## 13.8 LLM input許可変更
+
+```http
+PATCH /api/v1/storage/objects/{storage_object_id}/llm-input
 ```
 
 Request:
 
 ```json
 {
-  "llm_policy": "allowed|confirm_required|forbidden",
-  "confirm": true
+  "llm_input_allowed": true
 }
 ```
 
 仕様:
 
-- `forbidden` からの変更は重要操作確認対象。
+- `llm_input_allowed = false` のファイルは後続File LLM入力対象から除外する。
+- 変更は `llm_input_updated` として操作履歴に残す。
 
-## 13.9 ファイル要約生成
+## 13.9 ディレクトリ
 
 ```http
-POST /api/v1/files/{file_id}/summarize
+GET /api/v1/storage/directories
+POST /api/v1/storage/directories
+DELETE /api/v1/storage/directories/{directory_id}
+PATCH /api/v1/storage/objects/{storage_object_id}/directory
 ```
 
 仕様:
 
-- `forbidden` は不可。
-- `confirm_required` はユーザー確認後のみ。
+- 通常ディレクトリを作成・削除する。
+- Storage objectをディレクトリへ移動できる。
+
+## 13.10 検索
+
+```http
+GET /api/v1/storage/search/objects
+```
+
+Query:
+
+```text
+query
+directory_id
+recursive
+sort=created_desc|created_asc|name
+extension
+limit
+```
+
+## 13.11 ファイル削除
+
+```http
+DELETE /api/v1/storage/objects/{storage_object_id}
+```
+
+仕様:
+
+- 現時点では物理削除を正とする。
+- 最新版と旧版の物理ファイルを削除する。
+- `storage_objects.status = deleted` としてDBメタ情報は残す。
+- `deleted` を操作履歴に残す。
+
+## 13.12 選択版以前の削除
+
+```http
+DELETE /api/v1/storage/objects/{storage_object_id}/versions/{version_id}/older
+```
+
+仕様:
+
+- 選択した旧版を含め、それ以前のバージョンを物理削除する。
+- 削除後は最新版表示へ戻る。
+
+## 13.13 LLM Digest
+
+```http
+GET /api/v1/storage/objects/{storage_object_id}/llm-digest
+POST /api/v1/storage/objects/{storage_object_id}/llm-digest
+```
+
+仕様:
+
+- `version_id` queryまたはbodyで対象バージョンを指定できる。
+- GETは対象版のDigest、旧Digest由来のstale表示情報、Version Differenceを返す。
+- POSTは対象版のDigestを生成する。
+- 対象版のDigestがなく、過去版にDigestがある場合は、最新の過去Digestと差分チェーンから増分Digestを生成する。
+- 対象版に既にDigestがあり、ユーザーが明示的に再生成する場合は全文抽出から再生成する。
 - LLM入力ログには全文を保存しない。
+
+## 13.14 メール添付取得・Storage移動
+
+```http
+GET /api/v1/mails/attachments/{attachment_id}/download
+POST /api/v1/mails/attachments/{attachment_id}/fetch-job
+POST /api/v1/mails/attachments/{attachment_id}/move-to-storage
+```
+
+仕様:
+
+- メール取得時は添付メタ情報を保存する。
+- 添付実体取得はJob化し、`jobs.job_type = mail_attachment_fetch` で扱う。
+- Storage移動時は添付元メール参照をStorage objectに保持する。
+
+## 13.15 Maintenance / Debug
+
+```http
+GET /api/v1/maintenance/storage-operation-history
+```
+
+仕様:
+
+- Storage操作履歴を直近順で表示する。
 
 ---
 
@@ -2442,7 +2560,7 @@ Closedにする              POST /cases/{id}/close
 アーカイブ                POST /cases/{id}/archive
 メール一覧                GET /cases/{id}/mails
 Task作成                  POST /tasks
-ファイルアップロード      POST /cases/{id}/files
+ファイル連携              Phase 7でStorage object連携として設計
 Context更新               POST /cases/{id}/update-context
 引継ぎログ生成            後続: POST /cases/{id}/handover-report
 ```
@@ -2527,9 +2645,10 @@ Rules:
   POST /mail-importance-rules
 
 Files:
-  GET /cases/{id}/files
-  POST /cases/{id}/files
-  GET /files/{id}/download
+  GET /api/v1/storage/objects
+  POST /api/v1/storage/objects/upload
+  GET /api/v1/storage/objects/{id}/download
+  GET /api/v1/storage/objects/{id}/llm-digest
 
 Maintenance:
   GET /maintenance/status

@@ -1,16 +1,20 @@
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { MouseEvent, ReactNode } from 'react'
 import { t } from './i18n'
 import type { MessageKey } from './i18n'
 import { AppLink, navigateTo } from './navigation'
 import defaultContactAvatarUrl from './assets/default-contact-avatar.svg'
 import defaultMailingListAvatarUrl from './assets/default-mailing-list-avatar.svg'
+import defaultSpamAvatarUrl from './assets/default-spam-avatar.webp'
 import gmailIconUrl from './assets/gmail-icon-2020.svg'
+import paperclipDiagonalUrl from './assets/paperclip-diagonal.svg'
 import unknownContactAvatarUrl from './assets/default-unknown-contact-avatar.svg'
 import {
   cancelMailSendRequest,
+  enqueueMailAttachmentFetchJob,
   getMailDetail,
   markMailRead,
+  moveMailAttachmentToStorage,
   processMail,
   requestMailSummary,
   rescheduleMailRequest,
@@ -18,7 +22,7 @@ import {
   unprocessMail,
   updateMailImportance,
 } from './phase4Api'
-import type { MailDetail, MailSendRequest, MailThreadMessage } from './phase4Api'
+import type { MailAttachment, MailDetail, MailSendRequest, MailThreadMessage } from './phase4Api'
 import type { MailRecipient } from './phase4Api'
 
 type MailThreadViewProps = {
@@ -63,12 +67,7 @@ function senderRecipient(message: MailThreadMessage): MailRecipient {
   if (shouldUseReplyTo) {
     return {
       email_address: message.reply_to_address ?? message.from_address,
-      contact:
-        message.sender_contact !== null &&
-        message.sender_contact !== undefined &&
-        message.sender_contact.id !== message.from_contact?.id
-          ? message.sender_contact
-          : null,
+      contact: message.sender_contact ?? null,
     }
   }
 
@@ -115,6 +114,54 @@ function latestReceivedMailDate(threadMessages: MailThreadMessage[]) {
 
 function mailBody(message: MailThreadMessage) {
   return message.body_text ?? message.snippet ?? ''
+}
+
+function formatFileSize(byteSize: number) {
+  if (byteSize < 1024) {
+    return `${byteSize} B`
+  }
+  const kib = byteSize / 1024
+  if (kib < 1024) {
+    return `${kib.toFixed(kib >= 10 ? 0 : 1)} KB`
+  }
+  const mib = kib / 1024
+  return `${mib.toFixed(mib >= 10 ? 0 : 1)} MB`
+}
+
+function AttachmentBadges({
+  attachments,
+  movingAttachmentId,
+  onContextMenu,
+}: {
+  attachments: MailAttachment[]
+  movingAttachmentId: string | null
+  onContextMenu: (event: MouseEvent<HTMLAnchorElement>, attachment: MailAttachment) => void
+}) {
+  if (attachments.length === 0) {
+    return null
+  }
+  return (
+    <div className="mail-attachment-badges">
+      {attachments.map((attachment) => (
+        <a
+          aria-label={t('mail.thread.downloadAttachment', {
+            name: attachment.filename,
+          })}
+          className="mail-attachment-badge"
+          href={attachment.download_url}
+          key={attachment.id}
+          onContextMenu={(event) => onContextMenu(event, attachment)}
+          title={`${attachment.filename} (${formatFileSize(attachment.byte_size)})`}
+        >
+          <img alt="" src={paperclipDiagonalUrl} />
+          <span>{attachment.filename}</span>
+          {movingAttachmentId === attachment.id && (
+            <span aria-hidden="true" className="mail-attachment-moving-dot" />
+          )}
+        </a>
+      ))}
+    </div>
+  )
 }
 
 const urlPattern = /(https?:\/\/[^\s<>"']+|www\.[^\s<>"']+)/gi
@@ -425,6 +472,9 @@ function splitQuotedReply(text: string): SplitBody {
 
 function MailBodyContent({ html, text }: { html?: string | null; text: string }) {
   const body = text || t('mail.thread.noBody')
+  if (bodyContainsMarkdownTable(body)) {
+    return <MarkdownMailBody text={body} />
+  }
   const splitBody = splitQuotedReply(body)
   if (
     splitBody.quotedText === null &&
@@ -459,8 +509,230 @@ function MailBodyContent({ html, text }: { html?: string | null; text: string })
   )
 }
 
+function MarkdownMailBody({ text }: { text: string }) {
+  return (
+    <article className="mail-thread-markdown-body">
+      {renderMailMarkdownBlocks(text)}
+    </article>
+  )
+}
+
+function renderMailMarkdownBlocks(text: string) {
+  const lines = text.replace(/\r\n?/g, '\n').split('\n')
+  const blocks: ReactNode[] = []
+  let index = 0
+
+  function isBlockStart(line: string) {
+    return (
+      /^#{1,6}\s+/.test(line) ||
+      /^>\s?/.test(line) ||
+      /^[-*]\s+/.test(line) ||
+      /^\d+\.\s+/.test(line) ||
+      isMarkdownTableStart(lines, index)
+    )
+  }
+
+  while (index < lines.length) {
+    const line = lines[index]
+    if (line.trim() === '') {
+      index += 1
+      continue
+    }
+
+    if (isMarkdownTableStart(lines, index)) {
+      const headerCells = splitMarkdownTableRow(lines[index])
+      index += 2
+      const rows: string[][] = []
+      while (index < lines.length && splitMarkdownTableRow(lines[index]).length > 1) {
+        rows.push(splitMarkdownTableRow(lines[index]))
+        index += 1
+      }
+      blocks.push(
+        <div className="mail-thread-markdown-table-wrap" key={`table-${index}`}>
+          <table>
+            <thead>
+              <tr>
+                {headerCells.map((cell, cellIndex) => (
+                  <th key={`table-${index}-head-${cellIndex}`} scope="col">
+                    {markdownInlineNodes(cell, `table-${index}-head-${cellIndex}`)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, rowIndex) => (
+                <tr key={`table-${index}-row-${rowIndex}`}>
+                  {headerCells.map((_, cellIndex) => (
+                    <td key={`table-${index}-row-${rowIndex}-${cellIndex}`}>
+                      {markdownInlineNodes(
+                        row[cellIndex] ?? '',
+                        `table-${index}-row-${rowIndex}-${cellIndex}`,
+                      )}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      )
+      continue
+    }
+
+    const headingMatch = /^(#{1,6})\s+(.+)$/.exec(line)
+    if (headingMatch !== null) {
+      const level = headingMatch[1].length
+      const content = markdownInlineNodes(headingMatch[2], `heading-${index}`)
+      const key = `heading-${index}`
+      if (level === 1) blocks.push(<h2 key={key}>{content}</h2>)
+      else if (level === 2) blocks.push(<h3 key={key}>{content}</h3>)
+      else if (level === 3) blocks.push(<h4 key={key}>{content}</h4>)
+      else if (level === 4) blocks.push(<h5 key={key}>{content}</h5>)
+      else blocks.push(<h6 key={key}>{content}</h6>)
+      index += 1
+      continue
+    }
+
+    if (/^>\s?/.test(line)) {
+      const quoteLines: string[] = []
+      while (index < lines.length && /^>\s?/.test(lines[index])) {
+        quoteLines.push(lines[index].replace(/^>\s?/, ''))
+        index += 1
+      }
+      blocks.push(
+        <blockquote key={`quote-${index}`}>
+          {quoteLines.map((quoteLine, quoteIndex) => (
+            <Fragment key={`quote-${index}-${quoteIndex}`}>
+              {quoteIndex > 0 && <br />}
+              {markdownInlineNodes(quoteLine, `quote-${index}-${quoteIndex}`)}
+            </Fragment>
+          ))}
+        </blockquote>,
+      )
+      continue
+    }
+
+    if (/^[-*]\s+/.test(line)) {
+      const items: string[] = []
+      while (index < lines.length && /^[-*]\s+/.test(lines[index])) {
+        items.push(lines[index].replace(/^[-*]\s+/, ''))
+        index += 1
+      }
+      blocks.push(
+        <ul key={`ul-${index}`}>
+          {items.map((item, itemIndex) => (
+            <li key={`ul-${index}-${itemIndex}`}>
+              {markdownInlineNodes(item, `ul-${index}-${itemIndex}`)}
+            </li>
+          ))}
+        </ul>,
+      )
+      continue
+    }
+
+    if (/^\d+\.\s+/.test(line)) {
+      const items: string[] = []
+      while (index < lines.length && /^\d+\.\s+/.test(lines[index])) {
+        items.push(lines[index].replace(/^\d+\.\s+/, ''))
+        index += 1
+      }
+      blocks.push(
+        <ol key={`ol-${index}`}>
+          {items.map((item, itemIndex) => (
+            <li key={`ol-${index}-${itemIndex}`}>
+              {markdownInlineNodes(item, `ol-${index}-${itemIndex}`)}
+            </li>
+          ))}
+        </ol>,
+      )
+      continue
+    }
+
+    const paragraphLines: string[] = []
+    while (
+      index < lines.length &&
+      lines[index].trim() !== '' &&
+      !isBlockStart(lines[index])
+    ) {
+      paragraphLines.push(lines[index])
+      index += 1
+    }
+    blocks.push(
+      <p key={`p-${index}`}>
+        {markdownInlineNodes(paragraphLines.join(' '), `p-${index}`)}
+      </p>,
+    )
+  }
+
+  return blocks
+}
+
+function markdownInlineNodes(text: string, keyPrefix: string): ReactNode[] {
+  const nodes: ReactNode[] = []
+  const pattern =
+    /(`[^`]+`|\*\*[^*]+\*\*|_[^_\n]+_|\[[^\]]+\]\((?:https?:\/\/|mailto:)[^)]+\))/g
+  let lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      nodes.push(text.slice(lastIndex, match.index))
+    }
+    const token = match[0]
+    const key = `${keyPrefix}-${match.index}`
+    if (token.startsWith('`')) {
+      nodes.push(<code key={key}>{token.slice(1, -1)}</code>)
+    } else if (token.startsWith('**')) {
+      nodes.push(<strong key={key}>{token.slice(2, -2)}</strong>)
+    } else if (token.startsWith('_')) {
+      nodes.push(<em key={key}>{token.slice(1, -1)}</em>)
+    } else {
+      const linkMatch = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(token)
+      if (linkMatch === null) {
+        nodes.push(token)
+      } else {
+        nodes.push(
+          <a href={linkMatch[2]} key={key} rel="noreferrer" target="_blank">
+            {linkMatch[1]}
+          </a>,
+        )
+      }
+    }
+    lastIndex = pattern.lastIndex
+  }
+  if (lastIndex < text.length) {
+    nodes.push(text.slice(lastIndex))
+  }
+  return nodes
+}
+
+function bodyContainsMarkdownTable(text: string) {
+  const lines = text.replace(/\r\n?/g, '\n').split('\n')
+  return lines.some((_, index) => isMarkdownTableStart(lines, index))
+}
+
+function isMarkdownTableStart(lines: string[], index: number) {
+  const headerCells = splitMarkdownTableRow(lines[index] ?? '')
+  const separatorCells = splitMarkdownTableRow(lines[index + 1] ?? '')
+  return (
+    headerCells.length > 1 &&
+    separatorCells.length === headerCells.length &&
+    separatorCells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()))
+  )
+}
+
+function splitMarkdownTableRow(line: string) {
+  const trimmed = line.trim()
+  if (!trimmed.includes('|')) {
+    return []
+  }
+  const withoutOuterPipes = trimmed.replace(/^\|/, '').replace(/\|$/, '')
+  return withoutOuterPipes.split('|').map((cell) => cell.trim())
+}
+
 function htmlRepresentsPlainText(html: string, text: string) {
   const plainLines = meaningfulBodyLines(text)
+    .map(plainTextLineForHtmlComparison)
+    .filter((line) => line.length >= 3)
   if (plainLines.length < 4) {
     return true
   }
@@ -482,6 +754,17 @@ function htmlRepresentsPlainText(html: string, text: string) {
     .some((line) => htmlText.includes(normalizedInlineText(line)))
 
   return !(missingLeadingLines.length >= 3 && laterRepresented)
+}
+
+function plainTextLineForHtmlComparison(line: string) {
+  return normalizedInlineText(
+    line
+      .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+      .replace(/<https?:\/\/[^>]+>/gi, '')
+      .replace(/https?:\/\/[^\s)]+/gi, '')
+      .replace(/www\.[^\s)]+/gi, ''),
+  )
 }
 
 function meaningfulBodyLines(text: string) {
@@ -664,9 +947,11 @@ function contactAvatarUrl(contact: MailRecipient['contact']) {
   }
   return (
     contact.avatar_url ??
-    (contact.kind === 'mailing_list'
-      ? defaultMailingListAvatarUrl
-      : defaultContactAvatarUrl)
+    (contact.status === 'spam'
+      ? defaultSpamAvatarUrl
+      : contact.kind === 'mailing_list'
+        ? defaultMailingListAvatarUrl
+        : defaultContactAvatarUrl)
   )
 }
 
@@ -768,6 +1053,12 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
   const [notice, setNotice] = useState<string | null>(null)
   const [busyAction, setBusyAction] = useState<string | null>(null)
   const [importanceMenuId, setImportanceMenuId] = useState<string | null>(null)
+  const [movingAttachmentId, setMovingAttachmentId] = useState<string | null>(null)
+  const [attachmentMenu, setAttachmentMenu] = useState<{
+    attachment: MailAttachment
+    x: number
+    y: number
+  } | null>(null)
   const targetRef = useRef<HTMLDivElement | null>(null)
   const didScrollToTargetRef = useRef(false)
   const pendingInboxNavigationRef = useRef<{
@@ -813,10 +1104,52 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
   }, [detail])
 
   useEffect(() => {
+    if (
+      detail === null ||
+      Object.keys(detail.summary_jobs ?? {}).length === 0
+    ) {
+      return
+    }
+    let canceled = false
+    const timeoutId = window.setTimeout(() => {
+      void getMailDetail(messageId)
+        .then((nextDetail) => {
+          if (!canceled) {
+            setDetail(nextDetail)
+          }
+        })
+        .catch(() => {
+          // Keep the current detail visible; the normal action path reports errors.
+        })
+    }, 2000)
+    return () => {
+      canceled = true
+      window.clearTimeout(timeoutId)
+    }
+  }, [detail, messageId])
+
+  useEffect(() => {
     return () => {
       cancelPendingInboxNavigation()
     }
   }, [])
+
+  useEffect(() => {
+    if (attachmentMenu === null) return undefined
+
+    const closeMenu = () => setAttachmentMenu(null)
+    const closeMenuOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeMenu()
+    }
+    window.addEventListener('click', closeMenu)
+    window.addEventListener('scroll', closeMenu, true)
+    window.addEventListener('keydown', closeMenuOnEscape)
+    return () => {
+      window.removeEventListener('click', closeMenu)
+      window.removeEventListener('scroll', closeMenu, true)
+      window.removeEventListener('keydown', closeMenuOnEscape)
+    }
+  }, [attachmentMenu])
 
   function cancelPendingInboxNavigation() {
     const pendingNavigation = pendingInboxNavigationRef.current
@@ -873,6 +1206,53 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
     }
   }
 
+  function handleAttachmentContextMenu(
+    event: MouseEvent<HTMLAnchorElement>,
+    attachment: MailAttachment,
+  ) {
+    event.preventDefault()
+    setAttachmentMenu({
+      attachment,
+      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 220)),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 64)),
+    })
+  }
+
+  async function handleMoveAttachmentToStorage() {
+    if (attachmentMenu === null) return
+    const attachment = attachmentMenu.attachment
+    setAttachmentMenu(null)
+    setMovingAttachmentId(attachment.id)
+    setError(null)
+    setNotice(null)
+    try {
+      await moveMailAttachmentToStorage(attachment.id)
+      setDetail(await getMailDetail(messageId))
+      setNotice(t('mail.thread.attachmentMovedToStorage', { name: attachment.filename }))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setMovingAttachmentId(null)
+    }
+  }
+
+  async function handleEnqueueAttachmentFetchJob() {
+    if (attachmentMenu === null) return
+    const attachment = attachmentMenu.attachment
+    setAttachmentMenu(null)
+    setMovingAttachmentId(attachment.id)
+    setError(null)
+    setNotice(null)
+    try {
+      const result = await enqueueMailAttachmentFetchJob(attachment.id)
+      setNotice(t('mail.thread.attachmentFetchJobQueued', { jobId: result.job_id }))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setMovingAttachmentId(null)
+    }
+  }
+
   async function refreshUntilMailSummary(messageIdToSummarize: string) {
     for (let attempt = 0; attempt < 30; attempt += 1) {
       const nextDetail = await getMailDetail(messageId)
@@ -910,6 +1290,8 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
     const hasSummary = detail?.summary?.items?.some(
       (summary) => summary.message_id === message.id,
     ) === true
+    const hasActiveSummaryJob =
+      detail?.summary_jobs?.[message.id] !== undefined
     return [
       {
         id: 'done',
@@ -960,14 +1342,20 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
           !['mail.thread.action.reply', 'mail.thread.action.summary'].includes(key) ||
           busyAction !== null ||
           (key === 'mail.thread.action.summary' && isPinned) ||
-          (key === 'mail.thread.action.summary' && hasSummary),
-        className: 'mail-thread-action-quiet',
+          (key === 'mail.thread.action.summary' && hasSummary) ||
+          (key === 'mail.thread.action.summary' && hasActiveSummaryJob),
+        className:
+          key === 'mail.thread.action.summary' && hasActiveSummaryJob
+            ? 'mail-thread-action-quiet mail-thread-action-loading button-loading-dot is-loading'
+            : 'mail-thread-action-quiet',
         title:
           key === 'mail.thread.action.summary'
             ? isPinned
               ? t('mail.thread.summaryPinnedTitle')
               : hasSummary
               ? t('mail.thread.summaryExistsTitle')
+              : hasActiveSummaryJob
+              ? t('mail.thread.summaryInProgress')
               : t('mail.thread.summaryMockTitle')
             : key === 'mail.thread.action.reply'
               ? t('mail.thread.action.reply')
@@ -1167,6 +1555,39 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
           </div>
         )}
 
+        {attachmentMenu !== null && (
+          <div
+            aria-label={t('mail.thread.attachmentMenu')}
+            className="mail-attachment-context-menu"
+            onClick={(event) => event.stopPropagation()}
+            role="menu"
+            style={{ left: attachmentMenu.x, top: attachmentMenu.y }}
+          >
+            <button
+              className={`button-loading-dot${
+                movingAttachmentId === attachmentMenu.attachment.id ? ' is-loading' : ''
+              }`}
+              disabled={movingAttachmentId !== null}
+              onClick={() => void handleMoveAttachmentToStorage()}
+              role="menuitem"
+              type="button"
+            >
+              {t('mail.thread.moveAttachmentToStorage')}
+            </button>
+            <button
+              className={`button-loading-dot${
+                movingAttachmentId === attachmentMenu.attachment.id ? ' is-loading' : ''
+              }`}
+              disabled={movingAttachmentId !== null}
+              onClick={() => void handleEnqueueAttachmentFetchJob()}
+              role="menuitem"
+              type="button"
+            >
+              {t('mail.thread.fetchAttachmentInBackground')}
+            </button>
+          </div>
+        )}
+
         {isBugImportance(detail.auto_state.effective_importance) && (
           <section className="mail-thread-bug">
             <strong>{t('mail.importance.bug')}</strong>
@@ -1188,6 +1609,11 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
           ) : (
             <p>{detail.summary.summary_text}</p>
           )}
+          <AttachmentBadges
+            attachments={detail.attachments ?? []}
+            movingAttachmentId={movingAttachmentId}
+            onContextMenu={handleAttachmentContextMenu}
+          />
         </section>
 
         <section className="mail-thread-list" aria-label={t('mail.thread.messages')}>
@@ -1277,6 +1703,8 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
             const messageSummary = summaryItems.find(
               (summary) => summary.message_id === message.id,
             )
+            const hasActiveSummaryJob =
+              detail.summary_jobs?.[message.id] !== undefined
             const replyToAddress = message.reply_to_address
             return (
               <Fragment key={message.id}>
@@ -1446,6 +1874,17 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                     </dl>
                   </details>
 
+                  {(message.attachments ?? []).length > 0 && (
+                    <section className="mail-thread-section">
+                      <h3>{t('mail.thread.attachments')}</h3>
+                      <AttachmentBadges
+                        attachments={message.attachments ?? []}
+                        movingAttachmentId={movingAttachmentId}
+                        onContextMenu={handleAttachmentContextMenu}
+                      />
+                    </section>
+                  )}
+
                   {messageSummary !== undefined && (
                     <section className="mail-thread-section mail-thread-mail-summary">
                       <h3>{t('mail.thread.mailSummary')}</h3>
@@ -1453,7 +1892,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                     </section>
                   )}
 
-                  {busyAction === `${message.id}-summary` && (
+                  {(busyAction === `${message.id}-summary` || hasActiveSummaryJob) && (
                     <section
                       aria-live="polite"
                       className="mail-thread-section mail-thread-mail-summary mail-thread-summary-progress"

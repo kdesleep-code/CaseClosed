@@ -58,6 +58,14 @@ PHASE_4_TABLES = {
     "mail_user_state",
 }
 
+PHASE_6_TABLES = {
+    "file_version_diffs",
+    "file_summaries",
+    "gmail_message_attachments",
+    "storage_locations",
+    "storage_objects",
+}
+
 
 @pytest.fixture
 def database_path(tmp_path: Path) -> Path:
@@ -96,6 +104,10 @@ def migrated_database(database_path: Path, database_url: str) -> Path:
 def app(monkeypatch: pytest.MonkeyPatch, database_url: str):
     monkeypatch.syspath_prepend(str(BACKEND_SRC))
     monkeypatch.setenv("CASECLOSED_DATABASE_URL", database_url)
+    monkeypatch.setenv(
+        "CASECLOSED_STORAGE_ROOT",
+        str(Path(database_url.removeprefix("sqlite:///")).parent / "storage"),
+    )
     monkeypatch.setenv("CASECLOSED_BOOTSTRAP_PASSWORD", TEST_PASSWORD)
     monkeypatch.setenv("CASECLOSED_BACKGROUND_WORKER_ENABLED", "false")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)

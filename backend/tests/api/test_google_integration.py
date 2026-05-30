@@ -337,6 +337,388 @@ def test_google_gmail_import_unloaded_by_date_imports_matching_received_and_sent
     assert sent_auto_row == ("processed", "read", "sent")
 
 
+def test_google_gmail_auto_import_stops_at_latest_loaded_message(
+    client,
+    database_path,
+    monkeypatch,
+) -> None:
+    client.post(
+        "/api/v1/mails/mock-ingest",
+        json={
+            "gmail_message_id": "gmail_auto_latest_loaded",
+            "gmail_thread_id": "thread_auto_latest_loaded",
+            "from_address": "loaded.sender@example.com",
+            "received_at": "2026-05-28T12:00:00+09:00",
+            "subject": "Already loaded latest",
+        },
+    )
+    client.post(
+        "/api/v1/mails/mock-ingest",
+        json={
+            "gmail_message_id": "gmail_auto_older_loaded",
+            "gmail_thread_id": "thread_auto_older_loaded",
+            "from_address": "loaded.sender@example.com",
+            "received_at": "2026-05-28T10:00:00+09:00",
+            "subject": "Already loaded older",
+        },
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings (id, key, value_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "setting_google_gmail_oauth_connection",
+                "google_gmail_oauth_connection",
+                json.dumps(
+                    {
+                        "access_token": "test-access-token",
+                        "token_expires_at": "2099-05-26T23:00:00+09:00",
+                        "connected_at": "2026-05-26T08:00:00+09:00",
+                    }
+                ),
+                "2026-05-26T08:00:00+09:00",
+            ),
+        )
+        connection.commit()
+
+    def gmail_message(message_id, thread_id, internal_date, subject):
+        return {
+            "id": message_id,
+            "threadId": thread_id,
+            "internalDate": internal_date,
+            "labelIds": ["INBOX"],
+            "snippet": subject,
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    {"name": "From", "value": f"{subject} <{message_id}@example.com>"},
+                    {"name": "To", "value": "Me <me@example.com>"},
+                    {"name": "Subject", "value": subject},
+                    {"name": "Message-ID", "value": f"<{message_id}@example.com>"},
+                ],
+                "body": {
+                    "data": base64.urlsafe_b64encode(
+                        f"{subject} body".encode("utf-8")
+                    ).decode("ascii").rstrip("=")
+                },
+            },
+        }
+
+    def fake_gmail_api_get_json(path, access_token, params=None):
+        assert access_token == "test-access-token"
+        if path == "/users/me/messages":
+            return {
+                "messages": [
+                    {"id": "gmail_auto_latest_loaded"},
+                    {"id": "gmail_auto_gap"},
+                    {"id": "gmail_auto_older_loaded"},
+                ],
+            }
+        if path == "/users/me/messages/gmail_auto_latest_loaded":
+            return gmail_message(
+                "gmail_auto_latest_loaded",
+                "thread_auto_latest_loaded",
+                "1779951600000",
+                "Already loaded latest",
+            )
+        if path == "/users/me/messages/gmail_auto_gap":
+            return gmail_message(
+                "gmail_auto_gap",
+                "thread_auto_gap",
+                "1779937200000",
+                "Auto import gap",
+            )
+        if path == "/users/me/messages/gmail_auto_older_loaded":
+            return gmail_message(
+                "gmail_auto_older_loaded",
+                "thread_auto_older_loaded",
+                "1779904800000",
+                "Already loaded older",
+            )
+        raise AssertionError(f"unexpected Gmail API path: {path}")
+
+    from caseclosed import google_integration
+    from caseclosed.db import runtime
+
+    monkeypatch.setattr(
+        google_integration,
+        "gmail_api_get_json",
+        fake_gmail_api_get_json,
+    )
+
+    with runtime.SessionLocal() as session:
+        result = google_integration.run_google_gmail_auto_import_once(session)
+
+    assert result["imported_count"] == 0
+    with sqlite3.connect(database_path) as connection:
+        imported = connection.execute(
+            "SELECT subject FROM gmail_messages WHERE gmail_message_id = ?",
+            ("gmail_auto_gap",),
+        ).fetchone()
+        settings = json.loads(
+            connection.execute(
+                "SELECT value_json FROM app_settings WHERE key = ?",
+                ("google_gmail_auto_import_settings",),
+            ).fetchone()[0]
+        )
+
+    assert imported is None
+    assert settings["last_imported_count"] == 0
+    assert settings["last_error"] is None
+
+
+def test_google_gmail_auto_import_skips_future_dated_loaded_message(
+    client,
+    database_path,
+    monkeypatch,
+) -> None:
+    client.post(
+        "/api/v1/mails/mock-ingest",
+        json={
+            "gmail_message_id": "gmail_auto_future_loaded",
+            "gmail_thread_id": "thread_auto_future_loaded",
+            "from_address": "loaded.sender@example.com",
+            "received_at": "2026-05-28T12:00:00+09:00",
+            "subject": "Future loaded",
+        },
+    )
+    client.post(
+        "/api/v1/mails/mock-ingest",
+        json={
+            "gmail_message_id": "gmail_auto_older_loaded",
+            "gmail_thread_id": "thread_auto_older_loaded",
+            "from_address": "loaded.sender@example.com",
+            "received_at": "2026-05-28T10:00:00+09:00",
+            "subject": "Already loaded older",
+        },
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings (id, key, value_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "setting_google_gmail_oauth_connection",
+                "google_gmail_oauth_connection",
+                json.dumps(
+                    {
+                        "access_token": "test-access-token",
+                        "token_expires_at": "2099-05-26T23:00:00+09:00",
+                        "connected_at": "2026-05-26T08:00:00+09:00",
+                    }
+                ),
+                "2026-05-26T08:00:00+09:00",
+            ),
+        )
+        connection.commit()
+
+    def gmail_message(message_id, thread_id, internal_date, subject):
+        return {
+            "id": message_id,
+            "threadId": thread_id,
+            "internalDate": internal_date,
+            "labelIds": ["INBOX"],
+            "snippet": subject,
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    {"name": "From", "value": f"{subject} <{message_id}@example.com>"},
+                    {"name": "To", "value": "Me <me@example.com>"},
+                    {"name": "Subject", "value": subject},
+                    {"name": "Message-ID", "value": f"<{message_id}@example.com>"},
+                ],
+                "body": {
+                    "data": base64.urlsafe_b64encode(
+                        f"{subject} body".encode("utf-8")
+                    ).decode("ascii").rstrip("=")
+                },
+            },
+        }
+
+    def fake_gmail_api_get_json(path, access_token, params=None):
+        assert access_token == "test-access-token"
+        if path == "/users/me/messages":
+            return {
+                "messages": [
+                    {"id": "gmail_auto_future_loaded"},
+                    {"id": "gmail_auto_gap"},
+                    {"id": "gmail_auto_older_loaded"},
+                ],
+            }
+        if path == "/users/me/messages/gmail_auto_future_loaded":
+            return gmail_message(
+                "gmail_auto_future_loaded",
+                "thread_auto_future_loaded",
+                "4102444800000",
+                "Future loaded",
+            )
+        if path == "/users/me/messages/gmail_auto_gap":
+            return gmail_message(
+                "gmail_auto_gap",
+                "thread_auto_gap",
+                "1779937200000",
+                "Auto import gap",
+            )
+        if path == "/users/me/messages/gmail_auto_older_loaded":
+            return gmail_message(
+                "gmail_auto_older_loaded",
+                "thread_auto_older_loaded",
+                "1779904800000",
+                "Already loaded older",
+            )
+        raise AssertionError(f"unexpected Gmail API path: {path}")
+
+    from caseclosed import google_integration
+    from caseclosed.db import runtime
+
+    monkeypatch.setattr(
+        google_integration,
+        "gmail_api_get_json",
+        fake_gmail_api_get_json,
+    )
+    monkeypatch.setattr(
+        google_integration,
+        "jst_now",
+        lambda: datetime(2026, 5, 28, 12, 0, tzinfo=runtime.JST),
+    )
+
+    with runtime.SessionLocal() as session:
+        result = google_integration.run_google_gmail_auto_import_once(session)
+
+    assert result["imported_count"] == 1
+    with sqlite3.connect(database_path) as connection:
+        imported = connection.execute(
+            "SELECT subject FROM gmail_messages WHERE gmail_message_id = ?",
+            ("gmail_auto_gap",),
+        ).fetchone()
+
+    assert imported == ("Auto import gap",)
+
+
+def test_google_gmail_auto_import_stops_after_three_day_lookback(
+    client,
+    database_path,
+    monkeypatch,
+) -> None:
+    del client
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings (id, key, value_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "setting_google_gmail_oauth_connection",
+                "google_gmail_oauth_connection",
+                json.dumps(
+                    {
+                        "access_token": "test-access-token",
+                        "token_expires_at": "2099-05-26T23:00:00+09:00",
+                        "connected_at": "2026-05-26T08:00:00+09:00",
+                    }
+                ),
+                "2026-05-26T08:00:00+09:00",
+            ),
+        )
+        connection.commit()
+
+    from caseclosed import google_integration
+    from caseclosed.db import runtime
+
+    def internal_date(year, month, day, hour):
+        return str(
+            int(
+                datetime(year, month, day, hour, 0, tzinfo=runtime.JST).timestamp()
+                * 1000
+            )
+        )
+
+    def gmail_message(message_id, thread_id, internal_date_value, subject):
+        return {
+            "id": message_id,
+            "threadId": thread_id,
+            "internalDate": internal_date_value,
+            "labelIds": ["INBOX"],
+            "snippet": subject,
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    {"name": "From", "value": f"{subject} <{message_id}@example.com>"},
+                    {"name": "To", "value": "Me <me@example.com>"},
+                    {"name": "Subject", "value": subject},
+                    {"name": "Message-ID", "value": f"<{message_id}@example.com>"},
+                ],
+                "body": {
+                    "data": base64.urlsafe_b64encode(
+                        f"{subject} body".encode("utf-8")
+                    ).decode("ascii").rstrip("=")
+                },
+            },
+        }
+
+    requested_queries = []
+
+    def fake_gmail_api_get_json(path, access_token, params=None):
+        assert access_token == "test-access-token"
+        if path == "/users/me/messages":
+            requested_queries.append(params["q"])
+            return {
+                "messages": [
+                    {"id": "gmail_auto_recent"},
+                    {"id": "gmail_auto_too_old"},
+                    {"id": "gmail_auto_not_reached"},
+                ],
+            }
+        if path == "/users/me/messages/gmail_auto_recent":
+            return gmail_message(
+                "gmail_auto_recent",
+                "thread_auto_recent",
+                internal_date(2026, 5, 27, 12),
+                "Recent auto import",
+            )
+        if path == "/users/me/messages/gmail_auto_too_old":
+            return gmail_message(
+                "gmail_auto_too_old",
+                "thread_auto_too_old",
+                internal_date(2026, 5, 24, 23),
+                "Too old auto import",
+            )
+        if path == "/users/me/messages/gmail_auto_not_reached":
+            raise AssertionError("auto import should stop before this message")
+        raise AssertionError(f"unexpected Gmail API path: {path}")
+
+    monkeypatch.setattr(
+        google_integration,
+        "gmail_api_get_json",
+        fake_gmail_api_get_json,
+    )
+    monkeypatch.setattr(
+        google_integration,
+        "jst_now",
+        lambda: datetime(2026, 5, 28, 12, 0, tzinfo=runtime.JST),
+    )
+
+    with runtime.SessionLocal() as session:
+        result = google_integration.run_google_gmail_auto_import_once(session)
+
+    assert result["imported_count"] == 1
+    assert requested_queries == ["after:2026/05/24 -in:drafts"]
+    with sqlite3.connect(database_path) as connection:
+        imported_rows = connection.execute(
+            """
+            SELECT gmail_message_id, subject
+            FROM gmail_messages
+            WHERE gmail_message_id IN ('gmail_auto_recent', 'gmail_auto_too_old')
+            ORDER BY gmail_message_id
+            """
+        ).fetchall()
+
+    assert imported_rows == [("gmail_auto_recent", "Recent auto import")]
+
+
 def test_mail_day_stats_reports_loaded_received_and_sent_counts(client) -> None:
     client.post(
         "/api/v1/mails/mock-ingest",

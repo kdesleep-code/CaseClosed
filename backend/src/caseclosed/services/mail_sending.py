@@ -12,7 +12,11 @@ from caseclosed.db import runtime
 from caseclosed.db.models import GmailMessage
 from caseclosed.db.models import Job
 from caseclosed.db.models import MailSendRequest
+from caseclosed.db.models import StorageObject
+from caseclosed.mail_drafts import MAIL_DRAFT_ATTACHMENT_STORAGE_SCOPES
+from caseclosed.mail_drafts import delete_mail_drafts_for_reply_target
 from caseclosed.services.mail_ingestion import ingest_mock_mail
+from caseclosed.storage import storage_object_absolute_path
 
 
 def new_id(prefix: str) -> str:
@@ -144,6 +148,7 @@ def send_request_via_gmail(
 
     try:
         raw_message = build_gmail_raw_message(
+            session,
             send_request,
             from_address=from_address.strip().lower(),
             reply_target=reply_target,
@@ -177,6 +182,7 @@ def send_request_via_gmail(
     send_request.updated_at = runtime.jst_iso()
     send_request.version += 1
     session.commit()
+    delete_mail_drafts_for_reply_target(send_request.reply_to_message_id)
     return {
         "send_request_id": send_request.id,
         "sent_message_id": result.message_id,
@@ -187,6 +193,7 @@ def send_request_via_gmail(
 
 
 def build_gmail_raw_message(
+    session,
     send_request: MailSendRequest,
     *,
     from_address: str,
@@ -213,13 +220,7 @@ def build_gmail_raw_message(
     for attachment in json_dict_list(send_request.attachment_data_json):
         filename = attachment_filename(attachment)
         content_type = attachment_content_type(attachment, filename)
-        data_base64 = attachment.get("data_base64")
-        if not isinstance(data_base64, str) or data_base64.strip() == "":
-            raise RuntimeError(f"Attachment data is missing: {filename}")
-        try:
-            content = base64.b64decode(data_base64, validate=True)
-        except ValueError as error:
-            raise RuntimeError(f"Attachment data is invalid: {filename}") from error
+        content = attachment_content(session, attachment, filename)
         maintype, subtype = content_type.split("/", 1)
         message.add_attachment(
             content,
@@ -243,3 +244,31 @@ def attachment_content_type(attachment: dict[str, object], filename: str) -> str
         return content_type.strip()
     guessed_type, _ = guess_type(filename)
     return guessed_type or "application/octet-stream"
+
+
+def attachment_content(
+    session,
+    attachment: dict[str, object],
+    filename: str,
+) -> bytes:
+    storage_object_id = attachment.get("storage_object_id")
+    if isinstance(storage_object_id, str) and storage_object_id.strip() != "":
+        storage_object = session.get(StorageObject, storage_object_id.strip())
+        if (
+            storage_object is None
+            or storage_object.status != "active"
+            or storage_object.scope not in MAIL_DRAFT_ATTACHMENT_STORAGE_SCOPES
+        ):
+            raise RuntimeError(f"Attachment storage object is missing: {filename}")
+        object_path = storage_object_absolute_path(storage_object, session)
+        if not object_path.is_file():
+            raise RuntimeError(f"Attachment storage file is missing: {filename}")
+        return object_path.read_bytes()
+
+    data_base64 = attachment.get("data_base64")
+    if not isinstance(data_base64, str) or data_base64.strip() == "":
+        raise RuntimeError(f"Attachment data is missing: {filename}")
+    try:
+        return base64.b64decode(data_base64, validate=True)
+    except ValueError as error:
+        raise RuntimeError(f"Attachment data is invalid: {filename}") from error

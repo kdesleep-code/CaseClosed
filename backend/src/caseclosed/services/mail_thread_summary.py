@@ -123,9 +123,37 @@ def handle_mail_thread_summary(
                 "reason": "no_summary_target_messages",
             }
 
+        existing_summary = session.scalar(
+            select(MailThreadSummary).where(MailThreadSummary.thread_id == thread.id)
+        )
+        covered_message_ids = thread_summary_covered_message_ids(
+            session,
+            existing_summary,
+        )
+        all_summary_message_ids = [message.id for message, _ in summary_messages]
+        if existing_summary is not None and set(all_summary_message_ids).issubset(
+            covered_message_ids
+        ):
+            return {
+                "thread_id": thread.id,
+                "summary_id": existing_summary.id,
+                "skipped": True,
+                "reason": "thread_summary_up_to_date",
+            }
+
+        incremental_mode = existing_summary is not None and bool(covered_message_ids)
+        input_summary_messages = (
+            [
+                (message, auto_state)
+                for message, auto_state in summary_messages
+                if message.id not in covered_message_ids
+            ]
+            if incremental_mode
+            else summary_messages
+        )
         message_payloads = [
             thread_summary_message_payload(message, auto_state)
-            for message, auto_state in summary_messages
+            for message, auto_state in input_summary_messages
         ]
         provider_response, chunk_count = complete_thread_summary(
             llm_provider,
@@ -133,6 +161,11 @@ def handle_mail_thread_summary(
             gmail_thread_id=thread.gmail_thread_id,
             subject=thread.subject_snapshot,
             messages=message_payloads,
+            current_thread_summary=(
+                thread_summary_snapshot(existing_summary)
+                if incremental_mode and existing_summary is not None
+                else None
+            ),
         )
         output = provider_response.output
         llm_run = LlmRun(
@@ -148,7 +181,14 @@ def handle_mail_thread_summary(
                     "gmail_thread_id": thread.gmail_thread_id,
                     "subject": thread.subject_snapshot,
                     "message_count": len(summary_messages),
-                    "message_ids": [message.id for message, _ in summary_messages],
+                    "message_ids": all_summary_message_ids,
+                    "input_message_count": len(input_summary_messages),
+                    "input_message_ids": [
+                        message.id for message, _ in input_summary_messages
+                    ],
+                    "summary_scope": "incremental_update"
+                    if incremental_mode
+                    else "full",
                     "chunk_count": chunk_count,
                 },
                 ensure_ascii=True,
@@ -188,9 +228,7 @@ def handle_mail_thread_summary(
         )
         session.add(llm_run)
 
-        summary = session.scalar(
-            select(MailThreadSummary).where(MailThreadSummary.thread_id == thread.id)
-        )
+        summary = existing_summary
         if summary is None:
             summary = MailThreadSummary(
                 id=new_id("mail_thread_summary"),
@@ -246,6 +284,37 @@ def should_include_message(message: GmailMessage, auto_state: MailAutoState) -> 
     )
 
 
+def thread_summary_covered_message_ids(
+    session,
+    summary: MailThreadSummary | None,
+) -> set[str]:
+    if summary is None or summary.llm_run_id is None:
+        return set()
+    llm_run = session.get(LlmRun, summary.llm_run_id)
+    if llm_run is None:
+        return set()
+    try:
+        source = json.loads(llm_run.input_source_json or "{}")
+    except json.JSONDecodeError:
+        return set()
+    message_ids = source.get("message_ids")
+    if not isinstance(message_ids, list):
+        return set()
+    return {message_id for message_id in message_ids if isinstance(message_id, str)}
+
+
+def thread_summary_snapshot(summary: MailThreadSummary) -> dict[str, object]:
+    return {
+        "summary": summary.summary_text,
+        "next_action": summary.next_action,
+        "key_points": json_list(summary.key_points_json),
+        "needs_action": bool(summary.action_required),
+        "translation": summary.translation_text,
+        "updated_at": summary.updated_at,
+        "version": summary.version,
+    }
+
+
 def thread_summary_message_payload(
     message: GmailMessage,
     auto_state: MailAutoState,
@@ -262,6 +331,16 @@ def thread_summary_message_payload(
         "body_text": strip_quoted_reply_sections(message.body_text or ""),
         "importance": auto_state.effective_importance,
     }
+
+
+def json_list(value: str | None) -> list[object]:
+    if value is None:
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    return parsed if isinstance(parsed, list) else []
 
 
 def strip_quoted_reply_sections(body_text: str) -> str:
@@ -288,12 +367,17 @@ def complete_thread_summary(
     gmail_thread_id: str,
     subject: str | None,
     messages: list[dict[str, object]],
+    current_thread_summary: dict[str, object] | None = None,
 ) -> tuple[LlmProviderResponse, int]:
     base_payload = thread_summary_payload(
         thread_id=thread_id,
         gmail_thread_id=gmail_thread_id,
         subject=subject,
         messages=messages,
+        summary_scope="incremental_update"
+        if current_thread_summary is not None
+        else "full",
+        current_thread_summary=current_thread_summary,
     )
     if thread_summary_payload_size(base_payload) <= THREAD_SUMMARY_INPUT_CHAR_LIMIT:
         return (
@@ -313,9 +397,12 @@ def complete_thread_summary(
             gmail_thread_id=gmail_thread_id,
             subject=subject,
             messages=chunk,
-            summary_scope="partial",
+            summary_scope="incremental_partial"
+            if current_thread_summary is not None
+            else "partial",
             chunk_index=index,
             chunk_count=len(chunks),
+            current_thread_summary=current_thread_summary,
         )
         partial_response = provider.complete_json(
             function_type=FUNCTION_TYPE,
@@ -339,6 +426,7 @@ def complete_thread_summary(
         messages=[],
         summary_scope="final_from_partial_summaries",
         partial_summaries=partial_summaries,
+        current_thread_summary=current_thread_summary,
     )
     final_response = provider.complete_json(
         function_type=FUNCTION_TYPE,
@@ -356,6 +444,7 @@ def thread_summary_payload(
     summary_scope: str = "full",
     chunk_index: int | None = None,
     chunk_count: int | None = None,
+    current_thread_summary: dict[str, object] | None = None,
     partial_summaries: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
@@ -369,6 +458,8 @@ def thread_summary_payload(
         payload["chunk_index"] = chunk_index
     if chunk_count is not None:
         payload["chunk_count"] = chunk_count
+    if current_thread_summary is not None:
+        payload["current_thread_summary"] = current_thread_summary
     if partial_summaries is not None:
         payload["partial_summaries"] = partial_summaries
     return payload

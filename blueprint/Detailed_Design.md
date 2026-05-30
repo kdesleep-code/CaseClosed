@@ -1096,32 +1096,72 @@ closed
 
 ## 16.2 物理保存
 
-物理配置はIDベース。UI表示はCaseベース。ダウンロード時は元のファイル名に戻す。
+物理配置はIDベース。UI表示はStorage objectベース。ダウンロード時は元のファイル名に戻す。
+
+Phase 6時点では `files` テーブルを分けず、`storage_objects.id` をファイル系列IDとして扱う。Case連携時に `file_links` を拡張する。
 
 ## 16.3 添付ファイル
 
 メール取得時は添付メタ情報のみ保存する。
 
-重要度・Case判定後に以下を満たすものだけ実体を取得する。
+添付実体は必要時に取得する。
 
-- High / Middleメールの添付
-- Caseが推定できたメールの添付
+- 画面からの明示ダウンロード
+- Storageへの移動
+- 添付取得Job
+
+添付取得Jobは専用テーブルではなく、既存 `jobs` に `job_type = mail_attachment_fetch` として載せる。失敗はMaintenanceのJob一覧で確認する。
 
 ## 16.4 LLM Policy
 
 ```text
-allowed
-confirm_required
-forbidden
+llm_input_allowed = true
+llm_input_allowed = false
 ```
 
-`forbidden` は完全禁止。手動でポリシー変更しない限り、LLM本文投入不可。
+Phase 6では `storage_objects.llm_input_allowed` を正とする。`false` のファイルはFile LLM入力対象から除外し、Digest生成ボタンも非活性にする。
+
+`file_security_meta_classification` は保留し、LLM Policy本格化時に拡張する。
 
 ## 16.5 ファイル削除
 
-通常削除は論理削除、つまりゴミ箱。保守・運用画面から物理削除できる余地は残す。
+現時点では物理削除を正とする。
 
-物理削除後もDBメタ情報は残す。
+削除後も `storage_objects.status = deleted` としてDBメタ情報は残す。`trash / restore / purge` の3段階モデルは採用しない。必要になった時点で再検討する。
+
+## 16.6 バージョン管理
+
+Storage詳細画面へファイルをドロップすると、同じ `storage_objects.id` のまま最新版を更新する。
+
+- 更新前の最新版は `storage_object_versions` に退避する。
+- 更新後の最新版は `storage_objects` に保持する。
+- 内容hashとサイズが同一なら更新をスキップする。
+- 拡張子が異なる場合はフロント側で確認する。
+- `file_updated_at` はファイル本文の更新時刻を表し、LLM input設定変更などのメタ更新とは分離する。
+
+旧版選択中は、選択版を含めてそれ以前のバージョンを削除できる。削除後は最新版表示へ戻る。
+
+## 16.7 LLM Digest
+
+Prepare LLM Digestは、人間向け要約ではなく、後続LLM入力用の圧縮済み中間表現を作る機能である。
+
+保存内容:
+
+- 1行程度の `file_description`
+- 最大5項目の `summary_points_json`
+- 後続LLM入力用 `llm_digest`
+- 構造化情報 `structured_digest_json`
+- 抽出範囲と制約 `coverage_json`
+
+本文抽出は拡張子/形式ごとの抽出ブロックを通す。現状はテキスト、ZIP構造、PDF本文、DOCX本文を扱う。未対応形式はmetadata中心とし、制約をcoverageに残す。
+
+ファイル更新後も旧Digestは維持し、旧バージョンのDigestであることをUIに表示する。対象版にDigestがなく、過去版にDigestがある場合は、過去側の最も新しいDigestとそこから対象版までの差分チェーンから増分Digestを生成する。対象版に既にDigestがあり、ユーザーが明示的に再生成する場合は、対象版の本文抽出から全文ベースで再生成する。
+
+## 16.8 Version Difference
+
+ファイル更新時にLLMを使わず、前後の抽出テキスト差分を `file_version_diffs` に保存する。
+
+Storage詳細では、表示中バージョンに至る差分をLLM Digestの下に表示する。最初のアップロード版にはDifferenceを表示しない。Differenceはデフォルト折りたたみとし、展開時は前バージョンのテキストを基準に `+` / `-` で差分を表示する。長い無変更部分は `...` で省略する。
 
 ---
 
@@ -1221,7 +1261,7 @@ POST /tasks/{task_id}/complete
 POST /tasks/{task_id}/delete
 POST /mails/{mail_id}/process
 POST /drafts/{draft_id}/send
-POST /files/{file_id}/trash
+POST /api/v1/storage/objects/{storage_object_id}/versions/upload
 ```
 
 ## 18.3 optimistic_state
@@ -1820,11 +1860,14 @@ MVPという用語は用いない。以下の順に段階的に実装する。
 
 ## File
 
-- files
 - storage_objects
-- file_links
-- file_versions
-- file_security_rules
+- storage_locations
+- storage_directories
+- storage_object_versions
+- storage_operation_history
+- file_version_diffs
+- file_links（Phase 7で拡張）
+- file_security_rules（LLM Policy本格化時）
 - file_summaries
 
 ## LLM
