@@ -57,6 +57,8 @@ export type StorageObject = {
   byte_size: number
   sha256_hex: string
   llm_input_allowed: boolean
+  file_icon_setting_id?: string | null
+  file_icon_url?: string | null
   source_type: 'direct_upload' | 'mail_attachment' | string | null
   source_message_id: string | null
   source_mail?: StorageSourceMail | null
@@ -252,6 +254,19 @@ export type ContactCustomTab = {
   id: string
   label: string
   expression: string
+}
+
+export type FileIconSetting = {
+  id: string
+  storage_object_id: string | null
+  icon_filename: string | null
+  icon_content_type: string
+  icon_url: string | null
+  icon_data_url?: string | null
+  extensions: string[]
+  created_at: string
+  updated_at: string
+  version: number
 }
 
 export type ContactCreatePayload = {
@@ -651,6 +666,52 @@ export function prepareStorageObjectLlmDigest(
 export async function listStorageLocations(): Promise<StorageLocation[]> {
   const data = await request<ListResponse<StorageLocation>>('/api/v1/storage/locations')
   return data.items
+}
+
+export async function listFileIconSettings(): Promise<FileIconSetting[]> {
+  const data = await request<ListResponse<FileIconSetting>>('/api/v1/storage/file-icons')
+  return data.items
+}
+
+export async function createFileIconSetting(payload: {
+  icon_filename: string | null
+  icon_content_type: string
+  icon_data_base64: string
+  extensions: string[]
+}): Promise<FileIconSetting> {
+  const data = await request<{ file_icon: FileIconSetting }>('/api/v1/storage/file-icons', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  return data.file_icon
+}
+
+export async function updateFileIconSetting(
+  fileIconId: string,
+  payload: {
+    icon_filename?: string | null
+    icon_content_type?: string
+    icon_data_base64?: string
+    extensions?: string[]
+  },
+): Promise<FileIconSetting> {
+  const data = await request<{ file_icon: FileIconSetting }>(
+    `/api/v1/storage/file-icons/${encodeURIComponent(fileIconId)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  )
+  return data.file_icon
+}
+
+export function deleteFileIconSetting(fileIconId: string): Promise<{ deleted: boolean }> {
+  return request<{ deleted: boolean }>(
+    `/api/v1/storage/file-icons/${encodeURIComponent(fileIconId)}`,
+    { method: 'DELETE' },
+  )
 }
 
 export function uploadManagedStorageObject(payload: {

@@ -55,6 +55,77 @@ def simple_pdf_bytes(text_lines: list[str]) -> bytes:
     return b"".join(chunks)
 
 
+def test_file_icon_settings_can_be_managed(client, database_path: Path) -> None:
+    svg_base64 = (
+        "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz4="
+    )
+    create_response = client.post(
+        "/api/v1/storage/file-icons",
+        json={
+            "icon_filename": "doc.svg",
+            "icon_content_type": "image/svg+xml",
+            "icon_data_base64": svg_base64,
+            "extensions": [".docx", "pdf, txt", "*.md"],
+        },
+    )
+
+    assert create_response.status_code == 200
+    created = create_response.json()["data"]["file_icon"]
+    assert created["icon_filename"] == "doc.svg"
+    assert created["icon_content_type"] == "image/svg+xml"
+    assert created["storage_object_id"].startswith("storage_object_")
+    assert created["icon_url"] == f"/api/v1/storage/objects/{created['storage_object_id']}/content"
+    assert created["extensions"] == [".docx", ".pdf", ".txt", ".md"]
+    with sqlite3.connect(database_path) as connection:
+        icon_row = connection.execute(
+            "SELECT scope, storage_path FROM storage_objects WHERE id = ?",
+            (created["storage_object_id"],),
+        ).fetchone()
+    assert icon_row == ("file-icons", f"file-icons/{created['storage_object_id'][15:17]}/{created['storage_object_id']}.svg")
+
+    update_response = client.patch(
+        f"/api/v1/storage/file-icons/{created['id']}",
+        json={
+            "icon_filename": "doc.png",
+            "icon_content_type": "image/png",
+            "icon_data_base64": base64.b64encode(png_bytes(96, 96)).decode("ascii"),
+            "extensions": ["xlsx csv"],
+        },
+    )
+    assert update_response.status_code == 200
+    updated = update_response.json()["data"]["file_icon"]
+    assert updated["icon_content_type"] == "image/webp"
+    assert updated["storage_object_id"] != created["storage_object_id"]
+    assert updated["extensions"] == [".xlsx", ".csv"]
+    assert client.get(created["icon_url"]).status_code == 404
+
+    list_response = client.get("/api/v1/storage/file-icons")
+    assert list_response.status_code == 200
+    assert [item["id"] for item in list_response.json()["data"]["items"]] == [
+        created["id"]
+    ]
+
+    upload_response = client.post(
+        "/api/v1/storage/objects",
+        json={
+            "filename": "sheet.xlsx",
+            "content_type": "application/octet-stream",
+            "data_base64": base64.b64encode(b"file with custom icon").decode("ascii"),
+        },
+    )
+    listed_objects = client.get("/api/v1/storage/objects").json()["data"]["items"]
+    listed_object = next(
+        item for item in listed_objects if item["id"] == upload_response.json()["data"]["storage_object"]["id"]
+    )
+    assert listed_object["file_icon_setting_id"] == created["id"]
+    assert listed_object["file_icon_url"] == updated["icon_url"]
+
+    delete_response = client.delete(f"/api/v1/storage/file-icons/{created['id']}")
+    assert delete_response.status_code == 200
+    assert client.get(updated["icon_url"]).status_code == 404
+    assert client.get("/api/v1/storage/file-icons").json()["data"]["items"] == []
+
+
 def test_temporary_object_upload_stores_file(
     client,
     database_path: Path,
@@ -907,9 +978,10 @@ def test_storage_directories_scope_list_and_uploads(
 
     root_directories = client.get("/api/v1/storage/directories")
     assert root_directories.status_code == 200
-    assert [item["id"] for item in root_directories.json()["data"]["items"]] == [
-        directory["id"]
-    ]
+    root_items = root_directories.json()["data"]["items"]
+    assert directory["id"] in [item["id"] for item in root_items]
+    case_directories = [item for item in root_items if item["directory_kind"] == "case"]
+    assert any(item["case_id"] == "case_system_inbox" for item in case_directories)
 
     child_directories = client.get(
         f"/api/v1/storage/directories?parent_id={directory['id']}"
@@ -941,6 +1013,35 @@ def test_storage_directories_scope_list_and_uploads(
     assert [item["id"] for item in child_objects.json()["data"]["items"]] == [
         storage_object["id"]
     ]
+
+
+def test_case_storage_directory_is_listed_and_protected(
+    client,
+) -> None:
+    root_directories = client.get("/api/v1/storage/directories")
+
+    assert root_directories.status_code == 200
+    case_directory = next(
+        item
+        for item in root_directories.json()["data"]["items"]
+        if item["case_id"] == "case_system_inbox"
+    )
+    assert case_directory["name"] == "Bucket"
+    assert case_directory["directory_kind"] == "case"
+
+    upload_response = client.post(
+        f"/api/v1/storage/objects/upload?directory_id={case_directory['id']}",
+        files={"file": ("case-note.txt", b"case note", "text/plain")},
+    )
+    assert upload_response.status_code == 200
+    assert (
+        upload_response.json()["data"]["storage_object"]["directory_id"]
+        == case_directory["id"]
+    )
+
+    delete_response = client.delete(f"/api/v1/storage/directories/{case_directory['id']}")
+    assert delete_response.status_code == 409
+    assert delete_response.json()["error"]["code"] == "CASE_DIRECTORY_PROTECTED"
 
 
 def test_storage_object_can_move_between_directories(

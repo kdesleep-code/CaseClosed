@@ -700,6 +700,7 @@ DB:
 - case_candidate_rules
 - case_mail_links
 - case_file_links
+- case_tool_links（Case右ガジェットの外部ツールリンク。Phase 7ではUI先行でもよい）
 - contact_case_links
 - case_context_versions
 
@@ -713,17 +714,24 @@ API:
 - `DELETE /cases/{id}/mails/{message_id}`
 - `GET /cases/{id}/files`（Phase 7でStorage object連携として設計）
 - `POST /cases/{id}/files`（Phase 7でStorage object連携として設計）
+- `GET /cases/{id}/tools`
+- `POST /cases/{id}/tools`
+- `PATCH /cases/{id}/tools/{tool_id}`
+- `DELETE /cases/{id}/tools/{tool_id}`
 
 画面:
 
 - Mail詳細のCase候補表示
 - Case詳細内Mail一覧
 - Case詳細内File一覧
-- Inbox Case表示
+- Case詳細内Stored Files Window（Case専用Storage Directory配下を表示）
+- Case詳細Overview / Current Situation / Case Tools / Calendarガジェット
+- Bucket Case表示
 
 LLM:
 
 - mail_case_selection
+- case_current_situation_summary（初期はUI枠のみでも可）
 
 ### 完了条件
 
@@ -735,6 +743,9 @@ LLM:
 - ユーザーが手動でCaseリンクを修正できる
 - Case判定がユーザー確定値を上書きしない
 - 関連ファイルもCaseに紐づけられる
+- 各Caseが専用Storage Directoryを持ち、Caseが存在する限り削除できない
+- Case詳細が「案件の基地」として機能し、Overview / 状況説明 / Mail入口 / Task入口 / Files / Calendar / Toolsが見える
+- Case Toolsは「アイコン + URL」の単純な外部リンクとして扱い、Caseごとに並べ替え・追加・削除できる
 
 ### レビュー観点
 
@@ -742,6 +753,9 @@ LLM:
 - Inbox required / no_case_neededの判断が自然か
 - Case詳細が案件の基地として機能しているか
 - メールとファイルを辿りやすいか
+- Overviewが「このCaseの意図・完了条件」を思い出す場所として機能しているか
+- Current Situationが、久しぶりに開いたCaseの状況把握に役立つか
+- Toolsガジェットが邪魔にならず、外部ツールへ素早く飛べるか
 
 ---
 
@@ -755,11 +769,18 @@ LLM:
 
 DB:
 
+- case_series
 - tasks
 - task_links
 - task_suggestions
 - task_work_blocks
 - case_tags
+- cases.series_id
+- cases.series_label
+- cases.previous_case_id
+- cases.next_case_id
+- cases.recurrence_kind
+- cases.done_criteria
 
 API:
 
@@ -768,6 +789,10 @@ API:
 - `PATCH /cases/{id}`
 - `POST /cases/{id}/close`
 - `POST /cases/{id}/archive`
+- `POST /cases/{id}/create-next`
+- `GET /case-series`
+- `POST /case-series`
+- `PATCH /case-series/{id}`
 - `GET /tasks`
 - `POST /tasks`
 - `PATCH /tasks/{id}`
@@ -781,6 +806,7 @@ API:
 
 - Case一覧
 - Case詳細
+- Case Series表示 / 次回Case作成導線
 - Task一覧
 - Task詳細
 - メールからTask作成画面/モーダル
@@ -796,6 +822,10 @@ LLM:
 - Case削除APIがない
 - Case Closedできる
 - 未完了TaskがあるCaseはClosed不可
+- Caseを単発案件 / 系列案件として扱える
+- 系列案件では、前年・前回Caseをテンプレートとして次回Caseを作成できる
+- 前回Caseと次回Caseが相互に辿れる
+- 年1などの繰り返し案件は「同一Caseにタスクを自動追加」ではなく、「次回Caseを作成して前回CaseをClosedする」運用を基本とする
 - Task作成・完了・キャンセル・論理削除できる
 - Task削除はdeleted_at
 - メールからTask化したら原則processedになる
@@ -804,6 +834,9 @@ LLM:
 ### レビュー観点
 
 - Case一覧で「今止まっているもの」が分かるか
+- 単発案件 / 系列案件の違いがUIで自然に理解できるか
+- `Create next Case`が、年次案件の締め作業として自然か
+- 次回Case作成時に、Overview / Done when / Tools / 初期Task案など、何をコピーするかが怖くないか
 - Task化の手数が少ないか
 - Task削除が実削除になっていないか
 - ClosedとArchiveの違いがUIで分かるか
@@ -1029,7 +1062,8 @@ API:
 ### 候補
 
 - Google Tasksエクスポート
-- Recurring Task
+- Case Series高度化（次回Case作成提案、系列テンプレート管理、周期リマインド）
+- Recurring Task（原則はCase Seriesで扱い、単独Taskの周期化が必要になった場合のみ追加）
 - ポモドーロタイマー
 - 高度な日程調整
 - ファイル全文検索
@@ -1304,9 +1338,13 @@ Gmail本文をDB保存できる
 Pending中はLLM自動処理が止まる
 ```
 
-現状はPhase 4を越えて、Phase 5のMail Intelligence、Phase 6のStorage基盤、Phase 10のGmail送信機能の一部まで先行実装済みである。
+現状はPhase 4を越えて、Phase 5のMail Intelligence、Phase 6のStorage基盤、Phase 7のCase詳細UI基盤、Phase 10のGmail送信機能の一部まで先行実装済みである。
 
 Phase 6のStorage基盤は、手元ファイル・メール添付・Contact画像・Storage一覧/詳細/検索/ディレクトリ・添付元メール参照・LLM input許可切替・物理削除・Storage操作履歴・ファイル更新バージョン管理・LLM Digest・Version Differenceまで実装済みである。
+
+Phase 7のCase UI基盤は、Case一覧/詳細、Case Genre、Case専用Storage Directory、Overview、Current Situation枠、Mail/Task入口カード、右ガジェットCalendar、Case ToolsアイコンランチャーまでUI先行で実装済みである。Case Toolsは「アイコン + URL」の単純なリンク集合として扱い、通常表示はアイコンのみ、設定時に追加・削除・ドラッグ並べ替えを行う方針とする。
+
+Caseの繰り返し案件は、同一Caseへ毎年Taskを自動追加する方式ではなく、`case_series` に属する「同系列の別Case」として扱う。前年・前回Caseをテンプレートに次回Caseを作成し、元Caseは次回Case作成後にClosedへ進める運用を基本とする。
 
 Phase 6で未実装として残すもの:
 
@@ -1318,7 +1356,7 @@ Phase 6で未実装として残すもの:
 □ Phase 7のCase連携に合わせたfile_links拡張
 ```
 
-次の主目標はPhase 6残件のうち、`file_security_meta_classification` を保留したままPhase 7: Case連携へ進むこと、またはPhase 9でStorage設定UI・Maintenance表示を強化することとする。
+次の主目標はPhase 7/8として、CaseへのMail/Task/Calendar実データ接続、Case Series / Create next Case、Current Situation生成を段階的に実装することとする。`file_security_meta_classification` は引き続き保留し、Storage設定UI・Maintenance表示強化はPhase 9以降で扱う。
 
 Phase 6開始時に特に確認する:
 

@@ -1,0 +1,386 @@
+export type CaseItem = {
+  id: string
+  genre_id: string | null
+  name: string
+  description: string | null
+  open_when_text: string | null
+  closed_when_text: string | null
+  progress_status: string
+  ball_status: string
+  closed_at: string | null
+  archived_at: string | null
+  is_system_case: boolean
+  system_case_key: string | null
+  tags: string[]
+  mail_count: number
+  open_task_count: number
+  overdue_task_count: number
+  file_count: number
+  storage_directory_id: string
+  next_task: {
+    title: string
+    due_at: string | null
+  } | null
+  next_calendar_event: {
+    title: string
+    starts_at: string | null
+  } | null
+  created_at: string
+  updated_at: string
+  version: number
+}
+
+export type CaseGenre = {
+  id: string
+  title: string
+  color_hex: string
+  created_at: string
+  updated_at: string
+  version: number
+}
+
+export type CaseEventItem = {
+  id: string
+  case_id: string
+  event_type: string
+  title: string
+  summary: string | null
+  source_type: string | null
+  source_id: string | null
+  occurred_at: string
+  created_at: string
+  metadata: Record<string, unknown>
+}
+
+export type CaseStakeholder = {
+  id: string
+  case_id: string
+  contact_id: string
+  contact_display_name: string
+  contact_avatar_url: string | null
+  role: 'owner' | 'collaborator' | 'reviewer' | 'stakeholder' | string
+  sort_order: number
+  created_at: string
+  updated_at: string
+  version: number
+}
+
+export type CaseToolLink = {
+  id: string
+  case_id: string
+  url: string
+  icon_label: string
+  sort_order: number
+  created_at: string
+  updated_at: string
+  version: number
+}
+
+export type CaseMailLink = {
+  id: string
+  case_id: string
+  message_id: string
+  gmail_message_id: string
+  thread_id: string
+  received_at: string
+  subject: string | null
+  from_address: string
+  from_name: string | null
+  processed_status: string
+  read_status: string
+  effective_importance: string
+  summary: string | null
+  mail_url: string
+  created_at: string
+  updated_at: string
+  version: number
+}
+
+export type CaseDetail = {
+  case: CaseItem
+  related_mails: CaseMailLink[]
+  tasks: unknown[]
+  calendar_events: unknown[]
+  contacts: unknown[]
+  files: unknown[]
+  stakeholders?: CaseStakeholder[]
+  tool_links?: CaseToolLink[]
+  recent_events: CaseEventItem[]
+}
+
+export type CaseListStatus = 'user_ball' | 'waiting' | 'completed'
+
+type ListResponse<T> = {
+  items: T[]
+}
+
+type ApiError = {
+  code: string
+  message: string
+}
+
+type SuccessResponse<T> = {
+  ok: true
+  data: T
+}
+
+type ErrorResponse = {
+  ok: false
+  error: ApiError
+}
+
+function hasApiError(payload: unknown): payload is ErrorResponse {
+  if (typeof payload !== 'object' || payload === null) {
+    return false
+  }
+  const candidate = payload as Partial<ErrorResponse>
+  return (
+    candidate.ok === false &&
+    typeof candidate.error?.code === 'string' &&
+    typeof candidate.error.message === 'string'
+  )
+}
+
+function isSuccessResponse<T>(payload: unknown): payload is SuccessResponse<T> {
+  return (
+    typeof payload === 'object' &&
+    payload !== null &&
+    (payload as Partial<SuccessResponse<T>>).ok === true &&
+    'data' in payload
+  )
+}
+
+export class Phase7ApiError extends Error {
+  code: string
+  status: number
+
+  constructor(status: number, error: ApiError) {
+    super(error.message)
+    this.name = 'Phase7ApiError'
+    this.code = error.code
+    this.status = status
+  }
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, {
+    credentials: 'include',
+    ...init,
+  })
+  const payload = (await response.json()) as unknown
+
+  if (!response.ok || !isSuccessResponse<T>(payload)) {
+    const error = hasApiError(payload)
+      ? payload.error
+      : { code: 'PHASE_7_REQUEST_FAILED', message: 'Request failed.' }
+    throw new Phase7ApiError(response.status, error)
+  }
+
+  return payload.data
+}
+
+export async function listCases(status: CaseListStatus = 'user_ball'): Promise<CaseItem[]> {
+  const params = new URLSearchParams({ status })
+  const data = await request<ListResponse<CaseItem>>(`/api/v1/cases?${params.toString()}`)
+  return data.items
+}
+
+export async function listCaseGenres(): Promise<CaseGenre[]> {
+  const data = await request<ListResponse<CaseGenre>>('/api/v1/cases/genres')
+  return data.items
+}
+
+export async function createCaseGenre(payload: {
+  title: string
+  color_hex: string
+}): Promise<CaseGenre> {
+  const data = await request<{ genre: CaseGenre }>('/api/v1/cases/genres', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  return data.genre
+}
+
+export async function updateCaseGenre(
+  genreId: string,
+  payload: { title?: string; color_hex?: string },
+): Promise<CaseGenre> {
+  const data = await request<{ genre: CaseGenre }>(
+    `/api/v1/cases/genres/${encodeURIComponent(genreId)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  )
+  return data.genre
+}
+
+export function deleteCaseGenre(genreId: string): Promise<{ deleted: boolean }> {
+  return request<{ deleted: boolean }>(`/api/v1/cases/genres/${encodeURIComponent(genreId)}`, {
+    method: 'DELETE',
+  })
+}
+
+export async function listCaseMailLinks(caseId: string): Promise<CaseMailLink[]> {
+  const data = await request<ListResponse<CaseMailLink>>(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/mail-links`,
+  )
+  return data.items
+}
+
+export function getCase(caseId: string): Promise<CaseDetail> {
+  return request<CaseDetail>(`/api/v1/cases/${encodeURIComponent(caseId)}`)
+}
+
+export async function updateCase(
+  caseId: string,
+  payload: {
+    description: string | null
+    open_when_text: string | null
+    closed_when_text: string | null
+    tags?: string[]
+  },
+): Promise<CaseItem> {
+  const data = await request<{ case: CaseItem }>(
+    `/api/v1/cases/${encodeURIComponent(caseId)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  )
+  return data.case
+}
+
+export async function createCase(payload: {
+  name: string
+  description: string | null
+  progress_status: string
+  ball_status: string
+  genre_id?: string | null
+}): Promise<CaseItem> {
+  const data = await request<{ case: CaseItem }>('/api/v1/cases', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  return data.case
+}
+
+export async function listCaseStakeholders(caseId: string): Promise<CaseStakeholder[]> {
+  const data = await request<ListResponse<CaseStakeholder>>(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/stakeholders`,
+  )
+  return data.items
+}
+
+export async function createCaseStakeholder(
+  caseId: string,
+  payload: { contact_id: string; role: string },
+): Promise<CaseStakeholder> {
+  const data = await request<{ stakeholder: CaseStakeholder }>(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/stakeholders`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  )
+  return data.stakeholder
+}
+
+export async function updateCaseStakeholder(
+  caseId: string,
+  stakeholderId: string,
+  payload: { role: string },
+): Promise<CaseStakeholder> {
+  const data = await request<{ stakeholder: CaseStakeholder }>(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/stakeholders/${encodeURIComponent(
+      stakeholderId,
+    )}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  )
+  return data.stakeholder
+}
+
+export async function reorderCaseStakeholders(
+  caseId: string,
+  stakeholderIds: string[],
+): Promise<CaseStakeholder[]> {
+  const data = await request<ListResponse<CaseStakeholder>>(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/stakeholders/reorder`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stakeholder_ids: stakeholderIds }),
+    },
+  )
+  return data.items
+}
+
+export async function deleteCaseStakeholder(
+  caseId: string,
+  stakeholderId: string,
+): Promise<void> {
+  await request<{ deleted: boolean }>(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/stakeholders/${encodeURIComponent(
+      stakeholderId,
+    )}`,
+    { method: 'DELETE' },
+  )
+}
+
+export async function listCaseToolLinks(caseId: string): Promise<CaseToolLink[]> {
+  const data = await request<ListResponse<CaseToolLink>>(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/tool-links`,
+  )
+  return data.items
+}
+
+export async function createCaseToolLink(
+  caseId: string,
+  payload: { url: string; icon_label?: string | null },
+): Promise<CaseToolLink> {
+  const data = await request<{ tool_link: CaseToolLink }>(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/tool-links`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  )
+  return data.tool_link
+}
+
+export async function reorderCaseToolLinks(
+  caseId: string,
+  toolLinkIds: string[],
+): Promise<CaseToolLink[]> {
+  const data = await request<ListResponse<CaseToolLink>>(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/tool-links/reorder`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tool_link_ids: toolLinkIds }),
+    },
+  )
+  return data.items
+}
+
+export async function deleteCaseToolLink(
+  caseId: string,
+  toolLinkId: string,
+): Promise<void> {
+  await request<{ deleted: boolean }>(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/tool-links/${encodeURIComponent(
+      toolLinkId,
+    )}`,
+    { method: 'DELETE' },
+  )
+}

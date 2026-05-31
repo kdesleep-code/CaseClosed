@@ -533,4 +533,6 @@ def string_or_none(value: object) -> str | None:
     if value is None:
         return None
     text = str(value).strip()
+    if text.lower() in {"null", "none"}:
+        return None
     return text if text else None

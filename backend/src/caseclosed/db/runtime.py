@@ -17,6 +17,7 @@ from caseclosed.db.base import Base
 from caseclosed.db.models import AppSetting
 from caseclosed.db.models import Case
 from caseclosed.db.models import MailAutoState
+from caseclosed.db.models import StorageDirectory
 from caseclosed.db.models import StorageLocation
 from caseclosed.settings import get_database_url
 from caseclosed.settings import get_storage_root
@@ -70,6 +71,7 @@ def bootstrap_database() -> None:
     with SessionLocal() as session:
         seed_settings(session)
         seed_system_cases(session)
+        ensure_case_storage_directories(session)
         seed_storage_locations(session)
         normalize_llm_blocked_mail_importance(session)
         normalize_llm_skip_mail_importance(session)
@@ -79,6 +81,97 @@ def bootstrap_database() -> None:
 def ensure_runtime_schema() -> None:
     inspector = inspect(engine)
     table_names = inspector.get_table_names()
+    if "cases" in table_names:
+        case_columns = {column["name"] for column in inspector.get_columns("cases")}
+        with engine.begin() as connection:
+            if "genre_id" not in case_columns:
+                connection.execute(text("ALTER TABLE cases ADD COLUMN genre_id TEXT"))
+            if "open_when_text" not in case_columns:
+                connection.execute(text("ALTER TABLE cases ADD COLUMN open_when_text TEXT"))
+            if "closed_when_text" not in case_columns:
+                connection.execute(text("ALTER TABLE cases ADD COLUMN closed_when_text TEXT"))
+            if "tags_json" not in case_columns:
+                connection.execute(text("ALTER TABLE cases ADD COLUMN tags_json TEXT"))
+    if "case_stakeholders" not in table_names and "cases" in table_names and "contacts" in table_names:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE case_stakeholders (
+                        id TEXT PRIMARY KEY,
+                        case_id TEXT NOT NULL REFERENCES cases(id),
+                        contact_id TEXT NOT NULL REFERENCES contacts(id),
+                        role TEXT NOT NULL DEFAULT 'stakeholder',
+                        sort_order INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+            )
+    if "case_mail_links" not in table_names and "cases" in table_names and "gmail_messages" in table_names:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE case_mail_links (
+                        id TEXT PRIMARY KEY,
+                        case_id TEXT NOT NULL REFERENCES cases(id),
+                        message_id TEXT NOT NULL REFERENCES gmail_messages(id),
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+            )
+    if "case_tool_links" not in table_names and "cases" in table_names:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE case_tool_links (
+                        id TEXT PRIMARY KEY,
+                        case_id TEXT NOT NULL REFERENCES cases(id),
+                        url TEXT NOT NULL,
+                        icon_label TEXT NOT NULL,
+                        sort_order INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+            )
+    if "file_icon_settings" not in table_names:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE file_icon_settings (
+                        id TEXT PRIMARY KEY,
+                        storage_object_id TEXT,
+                        icon_filename TEXT,
+                        icon_content_type TEXT NOT NULL,
+                        icon_data_url TEXT,
+                        extensions_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+            )
+    else:
+        file_icon_columns = {
+            column["name"] for column in inspector.get_columns("file_icon_settings")
+        }
+        if "storage_object_id" not in file_icon_columns:
+            with engine.begin() as connection:
+                connection.execute(
+                    text("ALTER TABLE file_icon_settings ADD COLUMN storage_object_id TEXT")
+                )
     if "contacts" not in table_names:
         return
 
@@ -499,6 +592,62 @@ def seed_storage_locations(session: Session) -> None:
         existing.version += 1
 
 
+def case_storage_directory_id(case_id: str) -> str:
+    return f"storage_directory_case_{case_id}"
+
+
+def ensure_case_storage_directory(
+    session: Session,
+    case: Case,
+    *,
+    now: str | None = None,
+) -> StorageDirectory:
+    timestamp = now or jst_iso()
+    directory = session.scalar(
+        select(StorageDirectory)
+        .where(StorageDirectory.directory_kind == "case")
+        .where(StorageDirectory.case_id == case.id)
+        .order_by(StorageDirectory.created_at.asc(), StorageDirectory.id.asc())
+        .limit(1)
+    )
+    if directory is None:
+        directory = StorageDirectory(
+            id=case_storage_directory_id(case.id),
+            parent_id=None,
+            directory_kind="case",
+            case_id=case.id,
+            name=case.name,
+            status="active",
+            created_at=timestamp,
+            updated_at=timestamp,
+            version=1,
+        )
+        session.add(directory)
+        return directory
+
+    changed = False
+    if directory.parent_id is not None:
+        directory.parent_id = None
+        changed = True
+    if directory.name != case.name:
+        directory.name = case.name
+        changed = True
+    if directory.status != "active":
+        directory.status = "active"
+        changed = True
+    if changed:
+        directory.updated_at = timestamp
+        directory.version += 1
+    return directory
+
+
+def ensure_case_storage_directories(session: Session) -> None:
+    cases = session.scalars(select(Case)).all()
+    now = jst_iso()
+    for case in cases:
+        ensure_case_storage_directory(session, case, now=now)
+
+
 def seed_system_cases(session: Session) -> None:
     existing_keys = set(
         session.scalars(
@@ -506,15 +655,15 @@ def seed_system_cases(session: Session) -> None:
         ).all()
     )
     seeds = (
-        ("case_system_inbox", "Inbox / なんでも箱", "inbox"),
-        (
-            "case_system_maintenance",
-            "システムメンテナンス",
-            "system_maintenance",
-        ),
+        ("case_system_inbox", "Bucket", "inbox"),
     )
     for case_id, name, key in seeds:
         if key in existing_keys:
+            existing_case = session.get(Case, case_id)
+            if existing_case is not None and existing_case.name != name:
+                existing_case.name = name
+                existing_case.updated_at = jst_iso()
+                existing_case.version += 1
             continue
         session.add(
             Case(

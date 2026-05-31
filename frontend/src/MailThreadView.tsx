@@ -1047,6 +1047,12 @@ function RecipientList({ recipients }: { recipients: MailRecipient[] }) {
   )
 }
 
+function focusMessageIdFromLocation() {
+  const value = new URLSearchParams(window.location.search).get('focus_message')
+  const trimmed = value?.trim() ?? ''
+  return trimmed === '' ? null : trimmed
+}
+
 function MailThreadView({ messageId }: MailThreadViewProps) {
   const [detail, setDetail] = useState<MailDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -1065,6 +1071,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
     cleanup: () => void
     timeoutId: number
   } | null>(null)
+  const focusMessageId = focusMessageIdFromLocation() ?? messageId
 
   useEffect(() => {
     let isMounted = true
@@ -1098,7 +1105,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
 
   useEffect(() => {
     if (detail !== null && !didScrollToTargetRef.current) {
-      targetRef.current?.scrollIntoView?.({ block: 'start', inline: 'nearest' })
+      targetRef.current?.scrollIntoView?.({ block: 'center', inline: 'nearest' })
       didScrollToTargetRef.current = true
     }
   }, [detail])
@@ -1495,6 +1502,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
   })
   const summaryItems = detail.summary?.items ?? []
   const focusedMessage =
+    detail.thread_messages.find((threadMessage) => threadMessage.id === focusMessageId) ??
     detail.thread_messages.find((threadMessage) => threadMessage.id === messageId) ??
     detail.message
   const mailListHref = mailListHrefFor(focusedMessage)
@@ -1694,7 +1702,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
               )
             }
             const message = entry.message
-            const isTarget = message.id === messageId
+            const isTarget = message.id === focusMessageId
             const isSent = isSentMessage(message)
             const sender = senderRecipient(message)
             const fromSender = fromRecipient(message)

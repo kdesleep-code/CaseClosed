@@ -29,7 +29,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session as DatabaseSession
 
 from caseclosed.auth import json_error
+from caseclosed.db.models import Case
 from caseclosed.db.models import Contact
+from caseclosed.db.models import FileIconSetting
 from caseclosed.db.models import FileSummary
 from caseclosed.db.models import FileVersionDiff
 from caseclosed.db.models import GmailMessage
@@ -66,6 +68,8 @@ CONTACT_IMAGE_CONTENT_TYPES = {
     "image/webp",
     "image/svg+xml",
 }
+FILE_ICON_CONTENT_TYPES = CONTACT_IMAGE_CONTENT_TYPES
+MAX_FILE_ICON_BYTES = 512 * 1024
 CONTENT_TYPE_EXTENSIONS = {
     "image/png": ".png",
     "image/jpeg": ".jpg",
@@ -76,6 +80,7 @@ CONTENT_TYPE_EXTENSIONS = {
 INTERNAL_STORAGE_LOCATION_ID = "storage_location_internal"
 GMAIL_ATTACHMENT_STORAGE_SCOPE = "tmp/gmail-attachments"
 NO_STORE_FILE_HEADERS = {"Cache-Control": "no-store"}
+ACTIVE_STORAGE_DIRECTORY_KINDS = ("normal", "case")
 
 
 class ContactImageUpload(BaseModel):
@@ -95,6 +100,20 @@ class ManagedObjectUpload(BaseModel):
     content_type: str | None = None
     data_base64: str
     directory_id: str | None = None
+
+
+class FileIconSettingCreate(BaseModel):
+    icon_filename: str | None = None
+    icon_content_type: str
+    icon_data_base64: str
+    extensions: list[str]
+
+
+class FileIconSettingUpdate(BaseModel):
+    icon_filename: str | None = None
+    icon_content_type: str | None = None
+    icon_data_base64: str | None = None
+    extensions: list[str] | None = None
 
 
 class StorageObjectLlmInputPatch(BaseModel):
@@ -138,6 +157,96 @@ def format_bytes(value: int) -> str:
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex}"
+
+
+def normalize_file_icon_extensions(values: list[str]) -> list[str]:
+    extensions: list[str] = []
+    seen: set[str] = set()
+    for raw_value in values:
+        for part in re.split(r"[,\s]+", raw_value):
+            value = part.strip().lower()
+            if value == "":
+                continue
+            if value.startswith("*."):
+                value = value[1:]
+            if not value.startswith("."):
+                value = f".{value}"
+            if not re.fullmatch(r"\.[a-z0-9][a-z0-9_-]{0,31}", value):
+                raise json_error(422, "VALIDATION_ERROR", "Invalid file extension.")
+            if value not in seen:
+                seen.add(value)
+                extensions.append(value)
+    if len(extensions) == 0:
+        raise json_error(422, "VALIDATION_ERROR", "At least one extension is required.")
+    return extensions
+
+
+def normalized_optional_filename(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped if stripped != "" else None
+
+
+def file_icon_setting_data(setting: FileIconSetting) -> dict[str, object]:
+    try:
+        extensions = json.loads(setting.extensions_json)
+    except json.JSONDecodeError:
+        extensions = []
+    if not isinstance(extensions, list):
+        extensions = []
+    icon_url = (
+        storage_object_url(setting.storage_object_id)
+        if setting.storage_object_id is not None
+        else setting.icon_data_url
+    )
+    return {
+        "id": setting.id,
+        "storage_object_id": setting.storage_object_id,
+        "icon_filename": setting.icon_filename,
+        "icon_content_type": setting.icon_content_type,
+        "icon_url": icon_url,
+        "icon_data_url": setting.icon_data_url,
+        "extensions": [str(extension) for extension in extensions],
+        "created_at": setting.created_at,
+        "updated_at": setting.updated_at,
+        "version": setting.version,
+    }
+
+
+def prepare_file_icon_image(*, content_type: str, data_base64: str) -> tuple[str, bytes]:
+    content_type = content_type.strip().lower()
+    if content_type not in FILE_ICON_CONTENT_TYPES:
+        raise json_error(422, "VALIDATION_ERROR", "Unsupported file icon image type.")
+    data = decode_base64_payload(data_base64)
+    if len(data) == 0:
+        raise json_error(422, "VALIDATION_ERROR", "File icon image is empty.")
+    if len(data) > MAX_FILE_ICON_BYTES:
+        raise json_error(413, "PAYLOAD_TOO_LARGE", "File icon image is too large.")
+    return resize_contact_image(content_type=content_type, data=data)
+
+
+def file_icon_for_filename(
+    session: DatabaseSession,
+    filename: str | None,
+) -> FileIconSetting | None:
+    extension = normalized_file_extension(filename)
+    if extension == "":
+        return None
+    settings = session.scalars(
+        select(FileIconSetting).order_by(
+            FileIconSetting.created_at.asc(),
+            FileIconSetting.id.asc(),
+        )
+    ).all()
+    for setting in settings:
+        try:
+            extensions = json.loads(setting.extensions_json)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(extensions, list) and extension in {str(item) for item in extensions}:
+            return setting
+    return None
 
 
 def storage_source_mail_data(
@@ -209,6 +318,13 @@ def storage_object_data(
             storage_object.source_message_id,
         )
         data["directory_path"] = storage_directory_path(session, storage_object.directory_id)
+        file_icon = file_icon_for_filename(session, storage_object.original_filename)
+        data["file_icon_setting_id"] = file_icon.id if file_icon is not None else None
+        data["file_icon_url"] = (
+            storage_object_url(file_icon.storage_object_id)
+            if file_icon is not None and file_icon.storage_object_id is not None
+            else file_icon.icon_data_url if file_icon is not None else None
+        )
     return data
 
 
@@ -331,7 +447,7 @@ def ensure_storage_directory(
     if (
         directory is None
         or directory.status != "active"
-        or directory.directory_kind != "normal"
+        or directory.directory_kind not in ACTIVE_STORAGE_DIRECTORY_KINDS
     ):
         raise json_error(404, "NOT_FOUND", "Storage directory not found.")
     return directory
@@ -371,7 +487,7 @@ def storage_directory_descendant_ids(
     directories = session.scalars(
         select(StorageDirectory).where(
             StorageDirectory.status == "active",
-            StorageDirectory.directory_kind == "normal",
+            StorageDirectory.directory_kind.in_(ACTIVE_STORAGE_DIRECTORY_KINDS),
         )
     ).all()
     if directory_id is None:
@@ -441,6 +557,7 @@ def storage_root() -> Path:
     root.mkdir(parents=True, exist_ok=True)
     (root / "tmp").mkdir(parents=True, exist_ok=True)
     (root / "contact-images").mkdir(parents=True, exist_ok=True)
+    (root / "file-icons").mkdir(parents=True, exist_ok=True)
     return root
 
 
@@ -960,6 +1077,54 @@ def delete_previous_contact_image(
         storage_object is None
         or storage_object.status != "active"
         or storage_object.scope != "contact-images"
+    ):
+        return
+    delete_storage_object(storage_object, session=session, now=now)
+
+
+def save_file_icon_storage_object(
+    session: DatabaseSession,
+    *,
+    filename: str | None,
+    content_type: str,
+    data_base64: str,
+    now: str,
+) -> StorageObject:
+    resized_content_type, resized_data = prepare_file_icon_image(
+        content_type=content_type,
+        data_base64=data_base64,
+    )
+    return save_storage_object(
+        session,
+        scope="file-icons",
+        filename=filename,
+        content_type=resized_content_type,
+        data=resized_data,
+        now=now,
+    )
+
+
+def delete_file_icon_storage_object_if_unused(
+    session: DatabaseSession,
+    *,
+    storage_object_id: str | None,
+    setting_id: str | None = None,
+    now: str,
+) -> None:
+    if storage_object_id is None:
+        return
+    statement = select(func.count(FileIconSetting.id)).where(
+        FileIconSetting.storage_object_id == storage_object_id
+    )
+    if setting_id is not None:
+        statement = statement.where(FileIconSetting.id != setting_id)
+    if session.scalar(statement) != 0:
+        return
+    storage_object = session.get(StorageObject, storage_object_id)
+    if (
+        storage_object is None
+        or storage_object.status != "active"
+        or storage_object.scope != "file-icons"
     ):
         return
     delete_storage_object(storage_object, session=session, now=now)
@@ -2233,6 +2398,120 @@ def list_storage_locations(
     }
 
 
+@router.get("/file-icons")
+def list_file_icon_settings(
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    settings = session.scalars(
+        select(FileIconSetting).order_by(
+            FileIconSetting.created_at.asc(),
+            FileIconSetting.id.asc(),
+        )
+    ).all()
+    return {"ok": True, "data": {"items": [file_icon_setting_data(item) for item in settings]}}
+
+
+@router.post("/file-icons")
+def create_file_icon_setting(
+    payload: FileIconSettingCreate,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    extensions = normalize_file_icon_extensions(payload.extensions)
+    now = jst_iso()
+    icon_object = save_file_icon_storage_object(
+        session,
+        filename=normalized_optional_filename(payload.icon_filename),
+        content_type=payload.icon_content_type,
+        data_base64=payload.icon_data_base64,
+        now=now,
+    )
+    setting = FileIconSetting(
+        id=new_id("file_icon_setting"),
+        icon_filename=normalized_optional_filename(payload.icon_filename),
+        storage_object_id=icon_object.id,
+        icon_content_type=icon_object.content_type or payload.icon_content_type.strip().lower(),
+        icon_data_url="",
+        extensions_json=json.dumps(extensions, ensure_ascii=True),
+        created_at=now,
+        updated_at=now,
+        version=1,
+    )
+    session.add(setting)
+    session.commit()
+    return {"ok": True, "data": {"file_icon": file_icon_setting_data(setting)}}
+
+
+@router.patch("/file-icons/{file_icon_id}")
+def update_file_icon_setting(
+    file_icon_id: str,
+    payload: FileIconSettingUpdate,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    setting = session.get(FileIconSetting, file_icon_id)
+    if setting is None:
+        raise json_error(404, "NOT_FOUND", "File icon setting not found.")
+    now = jst_iso()
+    previous_storage_object_id: str | None = None
+    if payload.extensions is not None:
+        setting.extensions_json = json.dumps(
+            normalize_file_icon_extensions(payload.extensions),
+            ensure_ascii=True,
+        )
+    if payload.icon_content_type is not None and payload.icon_data_base64 is not None:
+        previous_storage_object_id = setting.storage_object_id
+        icon_object = save_file_icon_storage_object(
+            session,
+            filename=normalized_optional_filename(payload.icon_filename),
+            content_type=payload.icon_content_type,
+            data_base64=payload.icon_data_base64,
+            now=now,
+        )
+        setting.storage_object_id = icon_object.id
+        setting.icon_content_type = (
+            icon_object.content_type or payload.icon_content_type.strip().lower()
+        )
+        setting.icon_data_url = ""
+        setting.icon_filename = normalized_optional_filename(payload.icon_filename)
+    elif payload.icon_content_type is not None or payload.icon_data_base64 is not None:
+        raise json_error(
+            422,
+            "VALIDATION_ERROR",
+            "Icon content type and image data must be updated together.",
+        )
+    setting.updated_at = now
+    setting.version += 1
+    delete_file_icon_storage_object_if_unused(
+        session,
+        storage_object_id=previous_storage_object_id,
+        setting_id=setting.id,
+        now=now,
+    )
+    session.commit()
+    return {"ok": True, "data": {"file_icon": file_icon_setting_data(setting)}}
+
+
+@router.delete("/file-icons/{file_icon_id}")
+def delete_file_icon_setting(
+    file_icon_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    setting = session.get(FileIconSetting, file_icon_id)
+    if setting is None:
+        raise json_error(404, "NOT_FOUND", "File icon setting not found.")
+    storage_object_id = setting.storage_object_id
+    now = jst_iso()
+    session.delete(setting)
+    session.flush()
+    delete_file_icon_storage_object_if_unused(
+        session,
+        storage_object_id=storage_object_id,
+        setting_id=file_icon_id,
+        now=now,
+    )
+    session.commit()
+    return {"ok": True, "data": {"deleted": True}}
+
+
 @router.get("/directories")
 def list_storage_directories(
     parent_id: str = "root",
@@ -2243,7 +2522,7 @@ def list_storage_directories(
     statement = (
         select(StorageDirectory)
         .where(StorageDirectory.status == "active")
-        .where(StorageDirectory.directory_kind == "normal")
+        .where(StorageDirectory.directory_kind.in_(ACTIVE_STORAGE_DIRECTORY_KINDS))
         .order_by(StorageDirectory.name, StorageDirectory.id)
     )
     if normalized_parent_id is None:
@@ -2275,7 +2554,6 @@ def create_storage_directory(
     duplicate_statement = (
         select(StorageDirectory)
         .where(StorageDirectory.status == "active")
-        .where(StorageDirectory.directory_kind == "normal")
         .where(StorageDirectory.name == name)
     )
     if parent_id is None:
@@ -2309,6 +2587,14 @@ def delete_storage_directory(
     directory = ensure_storage_directory(session, directory_id)
     if directory is None:
         raise json_error(404, "NOT_FOUND", "Storage directory not found.")
+    if directory.directory_kind == "case" and directory.case_id is not None:
+        case = session.get(Case, directory.case_id)
+        if case is not None:
+            raise json_error(
+                409,
+                "CASE_DIRECTORY_PROTECTED",
+                "Case directory cannot be deleted while the Case exists.",
+            )
 
     to_visit = [directory]
     directories: list[StorageDirectory] = []

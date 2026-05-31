@@ -23,8 +23,11 @@ class Case(Base):
     __tablename__ = "cases"
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
+    genre_id: Mapped[str | None] = mapped_column(ForeignKey("case_genres.id"))
     name: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
+    open_when_text: Mapped[str | None] = mapped_column(Text)
+    closed_when_text: Mapped[str | None] = mapped_column(Text)
     progress_status: Mapped[str] = mapped_column(
         Text,
         nullable=False,
@@ -35,6 +38,29 @@ class Case(Base):
     archived_at: Mapped[str | None] = mapped_column(Text)
     is_system_case: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     system_case_key: Mapped[str | None] = mapped_column(Text, unique=True)
+    tags_json: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class CaseGenre(Base):
+    __tablename__ = "case_genres"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    color_hex: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class CaseMailLink(Base):
+    __tablename__ = "case_mail_links"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), nullable=False)
+    message_id: Mapped[str] = mapped_column(ForeignKey("gmail_messages.id"), nullable=False)
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
@@ -53,6 +79,46 @@ class CaseEvent(Base):
     occurred_at: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     metadata_json: Mapped[str | None] = mapped_column(Text)
+
+
+class CaseStakeholder(Base):
+    __tablename__ = "case_stakeholders"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), nullable=False)
+    contact_id: Mapped[str] = mapped_column(ForeignKey("contacts.id"), nullable=False)
+    role: Mapped[str] = mapped_column(Text, nullable=False, default="stakeholder")
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class CaseToolLink(Base):
+    __tablename__ = "case_tool_links"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    icon_label: Mapped[str] = mapped_column(Text, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class FileIconSetting(Base):
+    __tablename__ = "file_icon_settings"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    storage_object_id: Mapped[str | None] = mapped_column(ForeignKey("storage_objects.id"))
+    icon_filename: Mapped[str | None] = mapped_column(Text)
+    icon_content_type: Mapped[str] = mapped_column(Text, nullable=False)
+    icon_data_url: Mapped[str | None] = mapped_column(Text)
+    extensions_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
 
 class ClientCertificate(Base):

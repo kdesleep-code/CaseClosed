@@ -51,6 +51,43 @@ def test_maintenance_debug_lists_storage_operation_history(client) -> None:
     assert items[0]["byte_size"] == len(b"history")
 
 
+def test_maintenance_storage_operation_history_hides_contact_images(client) -> None:
+    contact_response = client.post(
+        "/api/v1/contacts",
+        json={
+            "display_name": "Avatar Person",
+            "avatar_url": None,
+            "user_memo": "",
+            "ai_memo": None,
+            "status": "active",
+            "kind": "person",
+            "sender_resolution_mode": "self",
+            "tags": [],
+            "email_addresses": [
+                {"email_address": "avatar-person@example.com", "is_primary": True}
+            ],
+        },
+    )
+    contact_id = contact_response.json()["data"]["id"]
+
+    image_response = client.post(
+        f"/api/v1/storage/contacts/{contact_id}/image",
+        json={
+            "filename": "avatar.svg",
+            "content_type": "image/svg+xml",
+            "data_base64": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz4=",
+        },
+    )
+    assert image_response.status_code == 200
+
+    response = client.get("/api/v1/maintenance/storage-operation-history")
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert all(item["scope"] == "managed" for item in items)
+    assert all(item["original_filename"] != "avatar.svg" for item in items)
+
+
 def test_maintenance_status_counts_phase_2_work(
     client,
     database_path: Path,

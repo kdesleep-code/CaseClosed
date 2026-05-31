@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+﻿import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { AuthApiError, login, readSession } from './authApi'
 import type { SessionData } from './authApi'
 import loginDoorTanuki from './assets/login-door-tanuki.png'
+import CaseView from './CaseView'
 import ComposeMailView from './ComposeMailView'
 import ContactsView from './ContactsView'
 import type { ContactsInitialData } from './ContactsView'
@@ -22,8 +23,20 @@ import {
   listPendingMails,
   readMaintenanceStatus,
 } from './phase2Api'
-import { listContacts, listUnresolvedFromAddresses } from './phase3Api'
+import {
+  createFileIconSetting,
+  deleteFileIconSetting,
+  listContacts,
+  listFileIconSettings,
+  listUnresolvedFromAddresses,
+  updateFileIconSetting,
+} from './phase3Api'
+import type { FileIconSetting } from './phase3Api'
 import { listMailDates, listMailPage } from './phase4Api'
+import {
+  pendingContactRedirectEventName,
+  type PendingContactRedirectEvent,
+} from './pendingContactRedirect'
 import './App.css'
 
 type LinkItem = {
@@ -61,6 +74,11 @@ type NavigationRequestEvent = CustomEvent<{
   path: string
   replace: boolean
 }>
+
+type PendingContactNotice = {
+  count: number
+  deadlineAt: number
+}
 
 function formatJstDateTime(value: string | null) {
   if (value === null) {
@@ -486,6 +504,306 @@ function TopView({
   )
 }
 
+function CaseToolIconsView() {
+  return (
+    <main className="app-shell">
+      <div className="case-shell">
+        <header className="maintenance-header">
+          <div>
+            <p>{t('app.name')}</p>
+            <h1>{t('cases.toolIcons.heading')}</h1>
+          </div>
+          <nav aria-label={t('cases.navigation')} className="maintenance-nav">
+            <AppLink href="/cases">{t('cases.heading')}</AppLink>
+            <AppLink href="/">{t('top.heading')}</AppLink>
+          </nav>
+        </header>
+        <section className="case-tool-icons-empty">
+          <p>{t('cases.toolIcons.body')}</p>
+        </section>
+      </div>
+    </main>
+  )
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : ''
+      resolve(result.includes(',') ? result.slice(result.indexOf(',') + 1) : result)
+    }
+    reader.onerror = () => reject(reader.error ?? new Error(t('app.requestFailed')))
+    reader.readAsDataURL(file)
+  })
+}
+
+function FileIconsView() {
+  const [items, setItems] = useState<FileIconSetting[]>([])
+  const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [extensions, setExtensions] = useState('')
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editingExtensions, setEditingExtensions] = useState('')
+  const [editingFile, setEditingFile] = useState<File | null>(null)
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const [isSubmitting, setIsSubmitting] = useState(false)
+
+  useEffect(() => {
+    let isMounted = true
+    listFileIconSettings()
+      .then((nextItems) => {
+        if (isMounted) setItems(nextItems)
+      })
+      .catch((requestError) => {
+        if (isMounted) {
+          setError(requestError instanceof Error ? requestError.message : t('app.requestFailed'))
+        }
+      })
+      .finally(() => {
+        if (isMounted) setIsLoading(false)
+      })
+    return () => {
+      isMounted = false
+    }
+  }, [])
+
+  function startEdit(item: FileIconSetting) {
+    setEditingId(item.id)
+    setEditingExtensions(item.extensions.join(' '))
+    setEditingFile(null)
+    setError(null)
+    setNotice(null)
+  }
+
+  async function handleCreate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (selectedFile === null || extensions.trim() === '') return
+    setIsSubmitting(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const created = await createFileIconSetting({
+        icon_filename: selectedFile.name,
+        icon_content_type: selectedFile.type || 'image/png',
+        icon_data_base64: await fileToBase64(selectedFile),
+        extensions: extensions.split(/[\s,]+/).filter(Boolean),
+      })
+      setItems((current) => [...current, created])
+      setSelectedFile(null)
+      setExtensions('')
+      setNotice(t('storage.fileIcons.created'))
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : t('app.requestFailed'))
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  async function handleUpdate(item: FileIconSetting) {
+    setBusyId(item.id)
+    setError(null)
+    setNotice(null)
+    try {
+      const payload: Parameters<typeof updateFileIconSetting>[1] = {
+        extensions: editingExtensions.split(/[\s,]+/).filter(Boolean),
+      }
+      if (editingFile !== null) {
+        payload.icon_filename = editingFile.name
+        payload.icon_content_type = editingFile.type || item.icon_content_type
+        payload.icon_data_base64 = await fileToBase64(editingFile)
+      }
+      const updated = await updateFileIconSetting(item.id, payload)
+      setItems((current) => current.map((candidate) => (
+        candidate.id === updated.id ? updated : candidate
+      )))
+      setEditingId(null)
+      setEditingFile(null)
+      setNotice(t('storage.fileIcons.updated'))
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : t('app.requestFailed'))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function handleDelete(item: FileIconSetting) {
+    setBusyId(item.id)
+    setError(null)
+    setNotice(null)
+    try {
+      await deleteFileIconSetting(item.id)
+      setItems((current) => current.filter((candidate) => candidate.id !== item.id))
+      setNotice(t('storage.fileIcons.deleted'))
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : t('app.requestFailed'))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  return (
+    <main className="app-shell">
+      <div className="case-shell">
+        <header className="maintenance-header">
+          <div>
+            <p>{t('app.name')}</p>
+            <h1>{t('storage.fileIcons.heading')}</h1>
+          </div>
+          <nav aria-label={t('storage.navigation')} className="maintenance-nav">
+            <AppLink href="/files">{t('nav.files')}</AppLink>
+            <AppLink href="/cases">{t('cases.heading')}</AppLink>
+            <AppLink href="/">{t('top.heading')}</AppLink>
+          </nav>
+          </header>
+          <section className="file-icons-panel">
+            {error !== null && <p className="contact-error" role="alert">{error}</p>}
+            {notice !== null && <p className="contact-notice">{notice}</p>}
+            <div className="file-icons-table">
+              <div className="file-icons-header" role="row">
+                <span>{t('storage.fileIcons.icon')}</span>
+                <span>{t('storage.fileIcons.extensions')}</span>
+                <span>{t('storage.fileIcons.actions')}</span>
+              </div>
+              {isLoading ? (
+                <p className="mail-empty">{t('session.checking.label')}</p>
+              ) : items.length === 0 ? (
+                <p className="mail-empty">{t('storage.fileIcons.empty')}</p>
+              ) : (
+                items.map((item) => (
+                  <div className="file-icons-row" key={item.id} role="row">
+                    <div className="file-icon-preview-cell">
+                      {item.icon_url != null && item.icon_url !== '' && (
+                        <img alt="" aria-hidden="true" src={item.icon_url} />
+                      )}
+                      {editingId === item.id && (
+                        <input
+                          accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+                          onChange={(event) => setEditingFile(event.target.files?.[0] ?? null)}
+                          type="file"
+                        />
+                      )}
+                    </div>
+                    <div>
+                      {editingId === item.id ? (
+                        <input
+                          onChange={(event) => setEditingExtensions(event.target.value)}
+                          value={editingExtensions}
+                        />
+                      ) : (
+                        <span>{item.extensions.join(', ')}</span>
+                      )}
+                    </div>
+                    <div className="file-icons-actions">
+                      {editingId === item.id ? (
+                        <>
+                          <button
+                            disabled={busyId === item.id}
+                            onClick={() => void handleUpdate(item)}
+                            type="button"
+                          >
+                            {t('common.save')}
+                          </button>
+                          <button
+                            disabled={busyId === item.id}
+                            onClick={() => setEditingId(null)}
+                            type="button"
+                          >
+                            {t('common.cancel')}
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button onClick={() => startEdit(item)} type="button">
+                            {t('storage.fileIcons.edit')}
+                          </button>
+                          <button
+                            disabled={busyId === item.id}
+                            onClick={() => void handleDelete(item)}
+                            type="button"
+                          >
+                            {t('storage.fileIcons.delete')}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ))
+              )}
+              <form className="file-icons-row file-icons-create-row" onSubmit={handleCreate}>
+                <div>
+                  <input
+                    accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+                    onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
+                    type="file"
+                  />
+                </div>
+                <div>
+                  <input
+                    onChange={(event) => setExtensions(event.target.value)}
+                    placeholder=".pdf .docx txt"
+                    value={extensions}
+                  />
+                </div>
+                <div className="file-icons-actions">
+                  <button
+                    disabled={selectedFile === null || extensions.trim() === '' || isSubmitting}
+                    type="submit"
+                  >
+                    {t('storage.fileIcons.register')}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </section>
+        </div>
+      </main>
+  )
+}
+
+function shouldSuppressPendingContactNotice(path: string) {
+  return path === '/' || path === '/contacts/pending'
+}
+
+function PendingContactRedirectNotice({
+  notice,
+  secondsLeft,
+  onDismiss,
+  onGoNow,
+}: {
+  notice: PendingContactNotice
+  secondsLeft: number
+  onDismiss: () => void
+  onGoNow: () => void
+}) {
+  return (
+    <aside
+      aria-live="assertive"
+      className="pending-contact-redirect-notice"
+      role="alertdialog"
+    >
+      <div>
+        <h2>{t('pendingContactRedirect.heading')}</h2>
+        <p>{t('pendingContactRedirect.body')}</p>
+        <strong>
+          {t('mail.blocked.count', { count: String(notice.count) })} /{' '}
+          {t('pendingContactRedirect.countdown', { seconds: secondsLeft })}
+        </strong>
+      </div>
+      <div className="pending-contact-redirect-actions">
+        <button onClick={onDismiss} type="button">
+          {t('pendingContactRedirect.stay')}
+        </button>
+        <button onClick={onGoNow} type="button">
+          {t('pendingContactRedirect.goNow')}
+        </button>
+      </div>
+    </aside>
+  )
+}
+
 function App() {
   const [password, setPassword] = useState('')
   const [session, setSession] = useState<SessionData | null>(null)
@@ -497,6 +815,9 @@ function App() {
   const [path, setPath] = useState(window.location.pathname)
   const [routePreload, setRoutePreload] = useState<RoutePreload | null>(null)
   const [navigationError, setNavigationError] = useState<string | null>(null)
+  const [pendingContactNotice, setPendingContactNotice] =
+    useState<PendingContactNotice | null>(null)
+  const [pendingContactSecondsLeft, setPendingContactSecondsLeft] = useState(30)
   const routeTransitionId = useRef(0)
 
   function transitionToPreparedRoute(
@@ -579,6 +900,62 @@ function App() {
     }
   }, [])
 
+  useEffect(() => {
+    function handlePendingContactRedirect(event: Event) {
+      if (shouldSuppressPendingContactNotice(window.location.pathname)) {
+        return
+      }
+      const pendingEvent = event as PendingContactRedirectEvent
+      if (pendingEvent.detail.count <= 0) {
+        return
+      }
+      setPendingContactNotice({
+        count: pendingEvent.detail.count,
+        deadlineAt: Date.now() + 30000,
+      })
+      setPendingContactSecondsLeft(30)
+    }
+
+    window.addEventListener(pendingContactRedirectEventName, handlePendingContactRedirect)
+    return () => {
+      window.removeEventListener(pendingContactRedirectEventName, handlePendingContactRedirect)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (pendingContactNotice === null) {
+      return undefined
+    }
+    const timerId = window.setInterval(() => {
+      const nextSecondsLeft = Math.max(
+        0,
+        Math.ceil((pendingContactNotice.deadlineAt - Date.now()) / 1000),
+      )
+      setPendingContactSecondsLeft(nextSecondsLeft)
+      if (nextSecondsLeft === 0) {
+        setPendingContactNotice(null)
+        transitionToPreparedRoute('/', 'replace')
+      }
+    }, 250)
+
+    return () => {
+      window.clearInterval(timerId)
+    }
+  }, [pendingContactNotice])
+
+  const pendingContactNoticeElement =
+    pendingContactNotice === null ? null : (
+      <PendingContactRedirectNotice
+        notice={pendingContactNotice}
+        onDismiss={() => setPendingContactNotice(null)}
+        onGoNow={() => {
+          setPendingContactNotice(null)
+          transitionToPreparedRoute('/', 'replace')
+        }}
+        secondsLeft={pendingContactSecondsLeft}
+      />
+    )
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setError(null)
@@ -611,6 +988,7 @@ function App() {
     if (path === '/maintenance') {
       return (
         <>
+          {pendingContactNoticeElement}
           {navigationError !== null && <p className="route-error">{navigationError}</p>}
           <MaintenanceView
             initialData={
@@ -625,6 +1003,7 @@ function App() {
     if (path === '/mail' || path === '/mail/action-needed') {
       return (
         <>
+          {pendingContactNoticeElement}
           {navigationError !== null && <p className="route-error">{navigationError}</p>}
           <PreloadedMailRoute
             preload={routePreload ?? undefined}
@@ -636,6 +1015,7 @@ function App() {
     if (path === '/mail/compose') {
       return (
         <>
+          {pendingContactNoticeElement}
           {navigationError !== null && <p className="route-error">{navigationError}</p>}
           <ComposeMailView />
         </>
@@ -644,14 +1024,71 @@ function App() {
     if (path.startsWith('/mail/')) {
       return (
         <>
+          {pendingContactNoticeElement}
           {navigationError !== null && <p className="route-error">{navigationError}</p>}
           <MailThreadView messageId={decodeURIComponent(path.slice('/mail/'.length))} />
+        </>
+      )
+    }
+    if (path === '/cases') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <CaseView />
+        </>
+      )
+    }
+    if (path === '/cases/new') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <CaseView mode="new" />
+        </>
+      )
+    }
+    if (path.startsWith('/cases/') && path.endsWith('/mails')) {
+      const caseId = path.slice('/cases/'.length, -'/mails'.length)
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <CaseView caseId={decodeURIComponent(caseId)} mode="mail-list" />
+        </>
+      )
+    }
+    if (path === '/case-tool-icons') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <CaseToolIconsView />
+        </>
+      )
+    }
+    if (path === '/file-icons') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <FileIconsView />
+        </>
+      )
+    }
+    if (path.startsWith('/cases/')) {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <CaseView caseId={decodeURIComponent(path.slice('/cases/'.length))} mode="detail" />
         </>
       )
     }
     if (path === '/contacts') {
       return (
         <>
+          {pendingContactNoticeElement}
           {navigationError !== null && <p className="route-error">{navigationError}</p>}
           <ContactsView
             initialData={
@@ -667,6 +1104,7 @@ function App() {
     if (path === '/contacts/pending') {
       return (
         <>
+          {pendingContactNoticeElement}
           {navigationError !== null && <p className="route-error">{navigationError}</p>}
           <ContactsView
             initialData={
@@ -682,6 +1120,7 @@ function App() {
     if (path === '/files') {
       return (
         <>
+          {pendingContactNoticeElement}
           {navigationError !== null && <p className="route-error">{navigationError}</p>}
           <StorageView />
         </>
@@ -691,6 +1130,7 @@ function App() {
       const storageObjectId = decodeURIComponent(path.slice('/files/'.length))
       return (
         <>
+          {pendingContactNoticeElement}
           {navigationError !== null && <p className="route-error">{navigationError}</p>}
           <StorageView storageObjectId={storageObjectId} />
         </>
@@ -699,6 +1139,7 @@ function App() {
 
     return (
       <>
+        {pendingContactNoticeElement}
         {navigationError !== null && <p className="route-error">{navigationError}</p>}
         <TopView
           initialPendingCount={
@@ -757,3 +1198,4 @@ function App() {
 }
 
 export default App
+

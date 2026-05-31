@@ -7,6 +7,7 @@ import defaultContactAvatarUrl from './assets/default-contact-avatar.svg'
 import downloadIconUrl from './assets/download-icon.svg'
 import folderDirectoryIconUrl from './assets/folder-directory-icon.svg'
 import paperclipDiagonalUrl from './assets/paperclip-diagonal.svg'
+import settingsGearIconUrl from './assets/settings-gear.svg'
 import trashIconUrl from './assets/trash-icon.svg'
 import {
   fileExtension,
@@ -173,7 +174,7 @@ function decodePreviewText(buffer: ArrayBuffer, contentType: string | null) {
   return bestText
 }
 
-async function downloadStorageObject(object: StoragePreviewFile | StorageObject) {
+export async function downloadStorageObject(object: StoragePreviewFile | StorageObject) {
   const downloadUrl =
     'download_url' in object
       ? object.download_url
@@ -236,7 +237,7 @@ function isPreviewableZip(object: StoragePreviewFile) {
 }
 
 const textPreviewByteLimit = 2 * 1024 * 1024
-const storageObjectDragType = 'application/x-caseclosed-storage-object'
+export const storageObjectDragType = 'application/x-caseclosed-storage-object'
 
 function storageSourceLabel(object: StorageObject) {
   if (object.source_type === 'direct_upload') {
@@ -315,7 +316,7 @@ function StorageSourceMailCard({ mail }: { mail: StorageSourceMail }) {
   )
 }
 
-function ActionIconLabel({
+export function ActionIconLabel({
   iconUrl,
   label,
 }: {
@@ -362,7 +363,7 @@ function LlmInputBlockedIcon() {
   )
 }
 
-function StorageObjectCard({
+export function StorageObjectCard({
   object,
   busy,
   selected,
@@ -378,6 +379,8 @@ function StorageObjectCard({
   onOpen: (object: StorageObject) => void
 }) {
   const filename = object.original_filename ?? object.id
+  const customIconUrl = object.file_icon_url ?? ''
+  const hasCustomIcon = customIconUrl !== ''
   return (
     <button
       aria-label={t('storage.openFile', { name: filename })}
@@ -400,8 +403,15 @@ function StorageObjectCard({
           <LlmInputBlockedIcon />
         </span>
       )}
-      <span aria-hidden="true" className="storage-object-icon">
-        {fileExtension(object.original_filename)}
+      <span
+        aria-hidden="true"
+        className={`storage-object-icon${hasCustomIcon ? ' storage-object-image-icon' : ''}`}
+      >
+        {hasCustomIcon ? (
+          <img alt="" src={customIconUrl} />
+        ) : (
+          fileExtension(object.original_filename)
+        )}
       </span>
       <span className="storage-object-card-main">
         <strong>{filename}</strong>
@@ -415,7 +425,7 @@ function StorageObjectCard({
   )
 }
 
-function StorageDirectoryCard({
+export function StorageDirectoryCard({
   directory,
   onDropObject,
   onContextMenu,
@@ -426,10 +436,13 @@ function StorageDirectoryCard({
   onContextMenu: (event: MouseEvent<HTMLButtonElement>, directory: StorageDirectory) => void
   onOpen: (directory: StorageDirectory) => void
 }) {
+  const isCaseDirectory = directory.directory_kind === 'case' || directory.case_id !== null
   return (
     <button
       aria-label={t('storage.openDirectory', { name: directory.name })}
-      className="storage-object-card"
+      className={`storage-object-card storage-directory-card${
+        isCaseDirectory ? ' storage-case-directory-card' : ''
+      }`}
       onClick={() => onOpen(directory)}
       onContextMenu={(event) => onContextMenu(event, directory)}
       onDragOver={(event) => {
@@ -1782,6 +1795,10 @@ function StorageListView() {
   ) {
     event.preventDefault()
     event.stopPropagation()
+    if (directory.directory_kind === 'case' || directory.case_id !== null) {
+      setContextMenu(null)
+      return
+    }
     setSelectedObjectId(null)
     setContextMenu({
       directory,
@@ -1954,7 +1971,17 @@ function StorageListView() {
             <div>
               <h2>{t('storage.objects')}</h2>
             </div>
-            <p>{t('storage.objectsBody')}</p>
+            <div className="storage-heading-actions">
+              <p>{t('storage.objectsBody')}</p>
+              <AppLink
+                aria-label={t('storage.fileIcons.configure')}
+                className="case-icon-button"
+                href="/file-icons"
+                title={t('storage.fileIcons.configure')}
+              >
+                <img alt="" aria-hidden="true" src={settingsGearIconUrl} />
+              </AppLink>
+            </div>
           </div>
           <div className="storage-object-grid">
             {directories.map((directory) => (
@@ -2001,12 +2028,21 @@ function StorageListView() {
                 </button>
               )}
               {contextMenu.directory !== null && (
-                <button onClick={handleContextDeleteDirectory} role="menuitem" type="button">
-                  <ActionIconLabel
-                    iconUrl={trashIconUrl}
-                    label={t('storage.context.deleteDirectory')}
-                  />
-                </button>
+                <>
+                  {contextMenu.directory.directory_kind !== 'case' &&
+                    contextMenu.directory.case_id === null && (
+                      <button
+                        onClick={handleContextDeleteDirectory}
+                        role="menuitem"
+                        type="button"
+                      >
+                        <ActionIconLabel
+                          iconUrl={trashIconUrl}
+                          label={t('storage.context.deleteDirectory')}
+                        />
+                      </button>
+                    )}
+                </>
               )}
               {contextMenu.object !== null && (
                 <>

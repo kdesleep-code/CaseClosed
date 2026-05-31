@@ -90,6 +90,7 @@ def get_storage_operation_history(
     safe_limit = max(1, min(limit, 200))
     rows = session.scalars(
         select(StorageOperationHistory)
+        .where(StorageOperationHistory.scope == "managed")
         .order_by(
             StorageOperationHistory.created_at.desc(),
             StorageOperationHistory.id.desc(),

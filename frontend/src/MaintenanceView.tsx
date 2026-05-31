@@ -50,6 +50,7 @@ import type {
   LlmModelConfig,
   MailSendRequest,
 } from './phase4Api'
+import { notifyPendingContactsIfAny } from './pendingContactRedirect'
 
 const usageMetrics = [
   { key: 'database', labelKey: 'maintenance.metric.database' },
@@ -671,6 +672,7 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
         listJobs().then(setJobs),
         listPendingMails().then(setPendingMails),
       ])
+      await notifyPendingContactsIfAny()
     } catch (requestError) {
       setError(describeError(requestError))
     } finally {

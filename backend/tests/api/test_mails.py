@@ -1880,6 +1880,86 @@ def test_mail_dates_returns_days_with_mail_for_tab(client) -> None:
     assert first_id != second_id
 
 
+def test_thread_mail_is_grouped_by_thread_and_day(client) -> None:
+    client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Daily Thread Sender",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "daily.thread@example.com", "is_primary": True}
+            ],
+        },
+    )
+    first_id = ingest_mail(
+        client,
+        gmail_message_id="gmail_daily_thread_first",
+        gmail_thread_id="thread_daily_group",
+        from_address="daily.thread@example.com",
+        subject="Daily thread first",
+        received_at="2026-05-21T09:00:00+09:00",
+    )
+    second_id = ingest_mail(
+        client,
+        gmail_message_id="gmail_daily_thread_second",
+        gmail_thread_id="thread_daily_group",
+        from_address="daily.thread@example.com",
+        subject="Daily thread second",
+        received_at="2026-05-23T09:00:00+09:00",
+    )
+    sent_response = client.post(
+        MOCK_MAILS_URL,
+        json={
+            "gmail_message_id": "gmail_daily_thread_sent",
+            "gmail_thread_id": "thread_daily_group",
+            "message_id_header": "<gmail-daily-thread-sent@example.com>",
+            "subject": "Daily thread reply",
+            "from_address": "me@example.com",
+            "gmail_labels": ["SENT"],
+            "received_at": "2026-05-24T09:00:00+09:00",
+            "body_text": "Sent reply.",
+        },
+    )
+    sent_id = sent_response.json()["data"]["message_id"]
+    client.post(f"{MAILS_URL}/{first_id}/process", json={"reason": "handled"})
+
+    all_dates = client.get(f"{MAILS_URL}/dates").json()["data"]["items"]
+    processed_dates = client.get(f"{MAILS_URL}/dates?tab=processed").json()["data"]["items"]
+    unprocessed_dates = client.get(
+        f"{MAILS_URL}/dates?tab=unprocessed"
+    ).json()["data"]["items"]
+
+    assert all_dates == [
+        {"date": "2026-05-21", "count": 1},
+        {"date": "2026-05-23", "count": 1},
+        {"date": "2026-05-24", "count": 1},
+    ]
+    assert processed_dates == [
+        {"date": "2026-05-21", "count": 1},
+        {"date": "2026-05-24", "count": 1},
+    ]
+    assert unprocessed_dates == [{"date": "2026-05-23", "count": 1}]
+
+    day1 = client.get(
+        f"{MAILS_URL}?tab=processed&date_from=2026-05-21T00:00:00+09:00"
+        "&date_to=2026-05-21T23:59:59+09:00"
+    ).json()["data"]["items"]
+    day2 = client.get(
+        f"{MAILS_URL}?tab=unprocessed&date_from=2026-05-23T00:00:00+09:00"
+        "&date_to=2026-05-23T23:59:59+09:00"
+    ).json()["data"]["items"]
+    day3 = client.get(
+        f"{MAILS_URL}?tab=processed&date_from=2026-05-24T00:00:00+09:00"
+        "&date_to=2026-05-24T23:59:59+09:00"
+    ).json()["data"]["items"]
+
+    assert [item["id"] for item in day1] == [first_id]
+    assert [item["id"] for item in day2] == [second_id]
+    assert [item["id"] for item in day3] == [sent_id]
+    assert day3[0]["processed_status"] == "processed"
+    assert day3[0]["effective_importance"] == "sent"
+
+
 def test_mail_list_filters_pending_dates_and_and_query(client) -> None:
     client.post(
         CONTACTS_URL,

@@ -1254,23 +1254,33 @@ def write_llm_profile_assignments(
 
 def aggregate_thread_rows(
     rows: list[tuple[GmailMessage, MailUserState, MailAutoState]],
-) -> list[tuple[GmailMessage, MailUserState, MailAutoState, str, str, str | None]]:
-    thread_rows: dict[str, list[tuple[GmailMessage, MailUserState, MailAutoState]]] = {}
+) -> list[tuple[GmailMessage, MailUserState, MailAutoState, str, str, str, str | None]]:
+    thread_rows: dict[
+        tuple[str, str],
+        list[tuple[GmailMessage, MailUserState, MailAutoState]],
+    ] = {}
     for message, user_state, auto_state in rows:
-        thread_rows.setdefault(message.thread_id, []).append(
+        thread_rows.setdefault((message.thread_id, message.received_at[:10]), []).append(
             (message, user_state, auto_state)
         )
 
     aggregated_rows: list[
-        tuple[GmailMessage, MailUserState, MailAutoState, str, str, str | None]
+        tuple[GmailMessage, MailUserState, MailAutoState, str, str, str, str | None]
     ] = []
-    for thread_group in thread_rows.values():
+    for date_group in thread_rows.values():
         display_group = [
-            row for row in thread_group if not message_is_sent(row[0])
-        ] or thread_group
+            row for row in date_group if not message_is_sent(row[0])
+        ] or date_group
         latest_message, latest_user_state, latest_auto_state = max(
             display_group,
             key=lambda row: (row[0].received_at, row[0].id),
+        )
+        processed_status = (
+            "processed"
+            if all(message_is_sent(row[0]) for row in display_group)
+            else "unprocessed"
+            if any(row[1].processed_status == "unprocessed" for row in display_group)
+            else "processed"
         )
         importance_candidates = [
             row[1].user_importance or row[2].effective_importance
@@ -1293,7 +1303,7 @@ def aggregate_thread_rows(
             None
             if thread_read_status == "unread"
             else max(
-                (row[1].read_at for row in thread_group if row[1].read_at is not None),
+                (row[1].read_at for row in date_group if row[1].read_at is not None),
                 default=None,
             )
         )
@@ -1303,6 +1313,7 @@ def aggregate_thread_rows(
                 latest_user_state,
                 latest_auto_state,
                 effective_importance,
+                processed_status,
                 thread_read_status,
                 thread_read_at,
             )
@@ -1489,6 +1500,7 @@ def list_item_data(
     auto_state: MailAutoState,
     *,
     effective_importance_override: str | None = None,
+    processed_status_override: str | None = None,
     read_status_override: str | None = None,
     read_at_override: str | None = None,
 ) -> dict[str, object]:
@@ -1514,7 +1526,7 @@ def list_item_data(
         "from_name": message.from_name,
         "reply_to_address": message.reply_to_address,
         "list_id": message.list_id,
-        "processed_status": user_state.processed_status,
+        "processed_status": processed_status_override or user_state.processed_status,
         "read_status": read_status_override or user_state.read_status,
         "read_at": read_at_override if read_status_override is not None else user_state.read_at,
         "user_importance": user_state.user_importance,
@@ -2241,11 +2253,11 @@ def list_mails(
             aggregated_rows = [
                 row
                 for row in aggregated_rows
-                if row[1].processed_status == "unprocessed"
+                if row[4] == "unprocessed"
             ]
         elif normalized_processed in {"1", "processed"}:
             aggregated_rows = [
-                row for row in aggregated_rows if row[1].processed_status == "processed"
+                row for row in aggregated_rows if row[4] == "processed"
             ]
 
         if normalized_tab == "pending":
@@ -2264,7 +2276,7 @@ def list_mails(
                 for row in aggregated_rows
                 if row[2].pending_reason is None
                 and row[3] != "skip"
-                and row[1].processed_status == "processed"
+                and row[4] == "processed"
             ]
         elif normalized_tab == "unprocessed":
             aggregated_rows = [
@@ -2272,7 +2284,7 @@ def list_mails(
                 for row in aggregated_rows
                 if row[2].pending_reason is None
                 and row[3] != "skip"
-                and row[1].processed_status == "unprocessed"
+                and row[4] == "unprocessed"
             ]
 
         if importance != "all":
@@ -2292,7 +2304,7 @@ def list_mails(
 
     if normalized_read != "all":
         aggregated_rows = [
-            row for row in aggregated_rows if row[4] == normalized_read
+            row for row in aggregated_rows if row[5] == normalized_read
         ]
 
     send_requests = []
@@ -2360,6 +2372,7 @@ def list_mails(
                 user_state,
                 auto_state,
                 effective_importance_override=effective_importance,
+                processed_status_override=processed_status,
                 read_status_override=thread_read_status,
                 read_at_override=thread_read_at,
             ),
@@ -2369,6 +2382,7 @@ def list_mails(
             user_state,
             auto_state,
             effective_importance,
+            processed_status,
             thread_read_status,
             thread_read_at,
         ) in aggregated_rows
@@ -2600,7 +2614,7 @@ def list_mail_dates(
             for row in aggregated_rows
             if row[2].pending_reason is None
             and row[3] != "skip"
-            and row[1].processed_status == "processed"
+            and row[4] == "processed"
         ]
     elif normalized_tab == "unprocessed":
         aggregated_rows = [
@@ -2608,11 +2622,11 @@ def list_mail_dates(
             for row in aggregated_rows
             if row[2].pending_reason is None
             and row[3] != "skip"
-            and row[1].processed_status == "unprocessed"
+            and row[4] == "unprocessed"
         ]
 
     date_counts: dict[str, int] = {}
-    for message, _, _, _, _, _ in aggregated_rows:
+    for message, _, _, _, _, _, _ in aggregated_rows:
         date_counts[message.received_at[:10]] = date_counts.get(message.received_at[:10], 0) + 1
     if normalized_tab in {"all", "processed"}:
         for send_request in send_only_requests(session):

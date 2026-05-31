@@ -18,6 +18,7 @@ import unknownContactAvatarUrl from './assets/default-unknown-contact-avatar.svg
 import llmBlockedIconUrl from './assets/llm-blocked.svg'
 import paperclipDiagonalUrl from './assets/paperclip-diagonal.svg'
 import needsActionClearTanukiUrl from './assets/needs-action-clear-tanuki.png'
+import { notifyPendingContactsIfAny } from './pendingContactRedirect'
 
 export type MailTab = 'unprocessed' | 'processed' | 'skip'
 type SearchSort = 'newest' | 'importance'
@@ -244,7 +245,7 @@ function mailListReturnHref(
 }
 
 function mailDetailHref(mailId: string, returnTo: string) {
-  const params = new URLSearchParams({ return_to: returnTo })
+  const params = new URLSearchParams({ return_to: returnTo, focus_message: mailId })
   return `/mail/${encodeURIComponent(mailId)}?${params.toString()}`
 }
 
@@ -414,6 +415,7 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
           isAutoImportRefreshInFlight.current = true
           try {
             await refreshMailData()
+            await notifyPendingContactsIfAny()
           } finally {
             isAutoImportRefreshInFlight.current = false
           }
@@ -483,6 +485,9 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
               date: result.date,
             }),
       )
+      if (result.imported_count > 0) {
+        await notifyPendingContactsIfAny()
+      }
     } catch (requestError) {
       setError(describeError(requestError))
     } finally {

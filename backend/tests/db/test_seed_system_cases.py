@@ -9,14 +9,13 @@ def test_phase_1_seed_data_creates_system_cases(migrated_database) -> None:
             """
             SELECT name, system_case_key, is_system_case
             FROM cases
-            WHERE system_case_key IN ('inbox', 'system_maintenance')
+            WHERE is_system_case = 1
             ORDER BY system_case_key
             """
         ).fetchall()
 
     assert rows == [
-        ("Inbox / なんでも箱", "inbox", 1),
-        ("システムメンテナンス", "system_maintenance", 1),
+        ("Bucket", "inbox", 1),
     ]
 
 
