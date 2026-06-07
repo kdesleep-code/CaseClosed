@@ -59,6 +59,7 @@ PHASE_4_TABLES = {
 }
 
 PHASE_6_TABLES = {
+    "file_links",
     "file_version_diffs",
     "file_summaries",
     "gmail_message_attachments",

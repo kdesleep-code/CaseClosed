@@ -5,6 +5,15 @@ import { AppLink, navigateTo } from './navigation'
 import { listContacts } from './phase3Api'
 import type { Contact } from './phase3Api'
 import {
+  caseRoleSelectorSuggestions,
+  describeContactSelectorList,
+  replaceLastContactSelector,
+  resolvedRecipientAddressTextWithCases,
+  resolveRecipientAddressList,
+} from './contactSelectors'
+import type { ContactSelectorCaseContext } from './contactSelectors'
+import { listCases, listCaseStakeholders } from './phase7Api'
+import {
   deleteMailDraft,
   generateMailDraft,
   getMailDraftGenerationStandardPrompt,
@@ -146,13 +155,6 @@ function replyToMessageIdFromQuery() {
   return params.get('reply_to_message_id')
 }
 
-function splitAddressList(value: string) {
-  return value
-    .split(/[,\n;]/)
-    .map((address) => address.trim())
-    .filter((address) => address !== '')
-}
-
 function contactStatusRank(status: string) {
   if (status === 'active') {
     return 0
@@ -248,6 +250,8 @@ export default function ComposeMailView() {
   const [recipientSuggestions, setRecipientSuggestions] = useState<
     ComposeRecipientSuggestion[]
   >([])
+  const [contacts, setContacts] = useState<Contact[]>([])
+  const [caseContexts, setCaseContexts] = useState<ContactSelectorCaseContext[]>([])
   const [selectedSignatureId, setSelectedSignatureId] = useState(() =>
     loadSelectedSignatureId(loadStoredSignatures()),
   )
@@ -292,14 +296,45 @@ export default function ComposeMailView() {
     void listContacts()
       .then((contacts) => {
         if (!canceled) {
+          setContacts(contacts)
           setRecipientSuggestions(recipientSuggestionsFromContacts(contacts))
         }
       })
       .catch(() => {
         if (!canceled) {
+          setContacts([])
           setRecipientSuggestions([])
         }
       })
+    return () => {
+      canceled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let canceled = false
+    async function loadCaseContexts() {
+      const caseLists = await Promise.all([
+        listCases('user_ball'),
+        listCases('waiting'),
+        listCases('completed'),
+      ])
+      const cases = caseLists.flat()
+      const stakeholders = await Promise.all(
+        cases.map(async (caseItem) => ({
+          case: caseItem,
+          stakeholders: await listCaseStakeholders(caseItem.id),
+        })),
+      )
+      if (!canceled) {
+        setCaseContexts(stakeholders)
+      }
+    }
+    void loadCaseContexts().catch(() => {
+      if (!canceled) {
+        setCaseContexts([])
+      }
+    })
     return () => {
       canceled = true
     }
@@ -356,6 +391,81 @@ export default function ComposeMailView() {
 
   function updateField(field: keyof ComposeState, value: string) {
     setForm((current) => ({ ...current, [field]: value }))
+  }
+
+  function resolveRecipientField(field: 'to' | 'cc' | 'bcc') {
+    setForm((current) => ({
+      ...current,
+      [field]: resolvedRecipientAddressTextWithCases(
+        current[field],
+        contacts,
+        caseContexts,
+      ),
+    }))
+  }
+
+  function resolvedAddressLists() {
+    return {
+      to: resolveRecipientAddressList(form.to, contacts, caseContexts),
+      cc: resolveRecipientAddressList(form.cc, contacts, caseContexts),
+      bcc: resolveRecipientAddressList(form.bcc, contacts, caseContexts),
+    }
+  }
+
+  function recipientPreviewItems(value: string) {
+    return describeContactSelectorList(value, contacts, caseContexts)
+      .filter((item) => item.contacts.length > 0)
+      .map((item) => ({
+        selector: item.selector,
+        addresses: resolveRecipientAddressList(item.selector, contacts, caseContexts),
+      }))
+      .filter((item) => item.addresses.length > 0)
+  }
+
+  function recipientPreview(value: string) {
+    const items = recipientPreviewItems(value)
+    if (items.length === 0) {
+      return null
+    }
+    return (
+      <div className="compose-recipient-preview" aria-live="polite">
+        {items.map((item) => (
+          <div key={item.selector} className="compose-recipient-preview-row">
+            <span>{item.selector}</span>
+            <div>
+              {item.addresses.map((address) => (
+                <em key={address}>{address}</em>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  function caseRecipientSuggestions(field: 'to' | 'cc' | 'bcc') {
+    const suggestions = caseRoleSelectorSuggestions(form[field], caseContexts)
+    if (suggestions.length === 0) {
+      return null
+    }
+    return (
+      <div className="compose-recipient-case-suggestions">
+        {suggestions.map((suggestion) => (
+          <button
+            key={suggestion.value}
+            onClick={() =>
+              setForm((current) => ({
+                ...current,
+                [field]: replaceLastContactSelector(current[field], suggestion.value),
+              }))
+            }
+            type="button"
+          >
+            {suggestion.label}
+          </button>
+        ))}
+      </div>
+    )
   }
 
   function composedBodyText() {
@@ -424,7 +534,7 @@ export default function ComposeMailView() {
     const bodyText = composedBodyText()
     if (
       attachments.length === 0 &&
-      bodyMentionsAttachment(bodyText) &&
+      bodyMentionsAttachment(form.body) &&
       !window.confirm(t('mail.compose.missingAttachmentConfirm'))
     ) {
       return
@@ -445,10 +555,17 @@ export default function ComposeMailView() {
           size: attachment.size,
         })),
       )
+      const recipients = resolvedAddressLists()
+      setForm((current) => ({
+        ...current,
+        to: recipients.to.join(', '),
+        cc: recipients.cc.join(', '),
+        bcc: recipients.bcc.join(', '),
+      }))
       const sendRequest = await sendMail({
-        to_addresses: splitAddressList(form.to),
-        cc_addresses: splitAddressList(form.cc),
-        bcc_addresses: splitAddressList(form.bcc),
+        to_addresses: recipients.to,
+        cc_addresses: recipients.cc,
+        bcc_addresses: recipients.bcc,
         subject: form.subject,
         body_text: bodyText,
         attachment_names: attachments.map((attachment) => attachment.name),
@@ -467,9 +584,8 @@ export default function ComposeMailView() {
     }
   }
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    await submitMail()
   }
 
   async function handleScheduleSend() {
@@ -521,9 +637,9 @@ export default function ComposeMailView() {
     try {
       const draft = await saveMailDraft({
         reply_to_message_id: replyToMessageId,
-        to_addresses: splitAddressList(form.to),
-        cc_addresses: splitAddressList(form.cc),
-        bcc_addresses: splitAddressList(form.bcc),
+        to_addresses: resolvedAddressLists().to,
+        cc_addresses: resolvedAddressLists().cc,
+        bcc_addresses: resolvedAddressLists().bcc,
         subject: form.subject,
         body_text: form.body,
         auto_body_text: form.autoBody,
@@ -707,9 +823,9 @@ export default function ComposeMailView() {
         instruction: llmGenerationInstruction,
         standard_prompt: standardPrompt,
         generation_language: llmGenerationLanguage,
-        to_addresses: splitAddressList(form.to),
-        cc_addresses: splitAddressList(form.cc),
-        bcc_addresses: splitAddressList(form.bcc),
+        to_addresses: resolvedAddressLists().to,
+        cc_addresses: resolvedAddressLists().cc,
+        bcc_addresses: resolvedAddressLists().bcc,
         subject: form.subject,
         auto_body_text: replyToMessageId === null ? '' : form.autoBody,
         body_text: form.body,
@@ -763,10 +879,13 @@ export default function ComposeMailView() {
                   <input
                     autoComplete="email"
                     list="compose-recipient-suggestions"
+                    onBlur={() => resolveRecipientField('to')}
                     onChange={(event) => updateField('to', event.target.value)}
                     type="text"
                     value={form.to}
                   />
+                  {caseRecipientSuggestions('to')}
+                  {recipientPreview(form.to)}
                 </label>
 
                 <div className="compose-recipient-toggles">
@@ -787,20 +906,26 @@ export default function ComposeMailView() {
                     <input
                       autoComplete="email"
                       list="compose-recipient-suggestions"
+                      onBlur={() => resolveRecipientField('cc')}
                       onChange={(event) => updateField('cc', event.target.value)}
                       type="text"
                       value={form.cc}
                     />
+                    {caseRecipientSuggestions('cc')}
+                    {recipientPreview(form.cc)}
                   </label>
                   <label className="compose-field compose-field-line">
                     <span>{t('mail.compose.bcc')}</span>
                     <input
                       autoComplete="email"
                       list="compose-recipient-suggestions"
+                      onBlur={() => resolveRecipientField('bcc')}
                       onChange={(event) => updateField('bcc', event.target.value)}
                       type="text"
                       value={form.bcc}
                     />
+                    {caseRecipientSuggestions('bcc')}
+                    {recipientPreview(form.bcc)}
                   </label>
                 </div>
               )}
@@ -902,7 +1027,10 @@ export default function ComposeMailView() {
                       isSending ? ' is-loading' : ''
                     }`}
                     disabled={isSending || form.to.trim() === '' || composedBodyText().trim() === ''}
-                    type="submit"
+                    onClick={() => {
+                      void submitMail()
+                    }}
+                    type="button"
                   >
                     {t('mail.compose.send')}
                   </button>

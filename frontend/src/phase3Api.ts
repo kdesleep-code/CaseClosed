@@ -19,7 +19,7 @@ export type Contact = {
   user_memo: string | null
   ai_memo: string | null
   status: string
-  kind?: 'person' | 'mailing_list'
+  kind?: 'person' | 'mailing_list' | 'service'
   sender_resolution_mode?: 'self' | 'reply_to'
   mailing_list_recipient_expression?: string | null
   mail_importance_rule_action?: 'llm' | 'fixed' | 'llm_with_instruction'
@@ -50,6 +50,10 @@ export type StorageObject = {
   id: string
   directory_id: string | null
   directory_path?: string[]
+  physical_directory_id?: string | null
+  physical_directory_path?: string[]
+  physical_directory_url?: string
+  display_source?: 'physical' | 'link' | string
   location_id: string
   scope: string
   original_filename: string | null
@@ -138,6 +142,16 @@ export type StorageObjectDeleteResult = {
   deleted_storage_object_id: string
   restored_storage_object: StorageObject | null
   source_type: string
+}
+
+export type StorageObjectLinkedCase = {
+  case_id: string
+  case_name: string
+  source: 'physical' | 'link' | string
+  file_link_id: string | null
+  created_at: string | null
+  updated_at: string
+  case_url: string
 }
 
 export type StorageArchiveTree = {
@@ -275,7 +289,7 @@ export type ContactCreatePayload = {
   user_memo: string
   ai_memo?: string | null
   status: 'active' | 'archived' | 'skipped' | 'spam'
-  kind: 'person' | 'mailing_list'
+  kind: 'person' | 'mailing_list' | 'service'
   sender_resolution_mode: 'self' | 'reply_to'
   mailing_list_recipient_expression?: string | null
   mail_importance_rule_action?: 'llm' | 'fixed' | 'llm_with_instruction'
@@ -295,7 +309,7 @@ export type ContactUpdatePayload = {
   user_memo: string
   ai_memo?: string | null
   status: 'active' | 'skipped' | 'spam' | 'archived'
-  kind: 'person' | 'mailing_list'
+  kind: 'person' | 'mailing_list' | 'service'
   sender_resolution_mode: 'self' | 'reply_to'
   mailing_list_recipient_expression?: string | null
   mail_importance_rule_action: 'llm' | 'fixed' | 'llm_with_instruction'
@@ -621,6 +635,43 @@ export function deleteStorageObject(
     `/api/v1/storage/objects/${encodeURIComponent(storageObjectId)}`,
     { method: 'DELETE' },
   )
+}
+
+export async function listStorageObjectLinkedCases(
+  storageObjectId: string,
+): Promise<StorageObjectLinkedCase[]> {
+  const data = await request<ListResponse<StorageObjectLinkedCase>>(
+    `/api/v1/storage/objects/${encodeURIComponent(storageObjectId)}/linked-cases`,
+  )
+  return data.items
+}
+
+export async function createStorageObjectCaseLink(
+  storageObjectId: string,
+  caseId: string,
+): Promise<StorageObjectLinkedCase[]> {
+  const data = await request<ListResponse<StorageObjectLinkedCase>>(
+    `/api/v1/storage/objects/${encodeURIComponent(storageObjectId)}/linked-cases`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ case_id: caseId }),
+    },
+  )
+  return data.items
+}
+
+export async function deleteStorageObjectCaseLink(
+  storageObjectId: string,
+  caseId: string,
+): Promise<StorageObjectLinkedCase[]> {
+  const data = await request<ListResponse<StorageObjectLinkedCase>>(
+    `/api/v1/storage/objects/${encodeURIComponent(
+      storageObjectId,
+    )}/linked-cases/${encodeURIComponent(caseId)}`,
+    { method: 'DELETE' },
+  )
+  return data.items
 }
 
 export function deleteOlderStorageObjectVersions(

@@ -3,6 +3,11 @@ import type { CSSProperties, DragEvent, FormEvent, MouseEvent, ReactNode } from 
 import { t } from './i18n'
 import { AppLink, navigateTo } from './navigation'
 import downloadIconUrl from './assets/download-icon.svg'
+import defaultContactAvatarUrl from './assets/default-contact-avatar.svg'
+import defaultMailingListAvatarUrl from './assets/default-mailing-list-avatar.svg'
+import defaultServiceAvatarUrl from './assets/default-service-avatar.svg'
+import defaultSpamAvatarUrl from './assets/default-spam-avatar.webp'
+import paperclipDiagonalUrl from './assets/paperclip-diagonal.svg'
 import settingsGearIconUrl from './assets/settings-gear.svg'
 import trashIconUrl from './assets/trash-icon.svg'
 import {
@@ -18,6 +23,22 @@ import {
 import { listContacts } from './phase3Api'
 import type { Contact, StorageDirectory, StorageObject } from './phase3Api'
 import {
+  assignMailThreadToCase,
+  listMailPage,
+  unassignMailThreadFromCase,
+} from './phase4Api'
+import type { MailListItem } from './phase4Api'
+import {
+  caseRoleSelectorSuggestions,
+  describeContactSelectorList,
+  replaceLastContactSelector,
+  resolveContactSelectorListWithCases,
+} from './contactSelectors'
+import type { ContactSelectorCaseContext } from './contactSelectors'
+import {
+  archiveCase,
+  completeCase,
+  createCaseAutoAssignRule,
   createCaseStakeholder,
   createCase,
   createCaseToolLink,
@@ -25,18 +46,26 @@ import {
   deleteCaseStakeholder,
   deleteCaseToolLink,
   deleteCaseGenre,
+  deleteCase,
+  deleteCaseAutoAssignRule,
   getCase,
+  listCaseAutoAssignRules,
+  listCaseFiles,
   listCaseMailLinks,
+  listCaseStakeholders,
   listCaseToolLinks,
   listCaseGenres,
   listCases,
+  regenerateCaseCurrentSituation,
   reorderCaseToolLinks,
   reorderCaseStakeholders,
+  reopenCase,
   updateCase,
   updateCaseStakeholder,
   updateCaseGenre,
+  unlinkCaseFile,
 } from './phase7Api'
-import type { CaseDetail, CaseGenre, CaseItem, CaseListStatus, CaseMailLink, CaseStakeholder, CaseToolLink } from './phase7Api'
+import type { CaseAutoAssignRule, CaseDetail, CaseGenre, CaseItem, CaseListStatus, CaseMailLink, CaseStakeholder, CaseToolLink } from './phase7Api'
 import {
   ActionIconLabel,
   downloadStorageObject,
@@ -45,6 +74,8 @@ import {
   storageObjectDragType,
 } from './StorageView'
 
+type CaseMailAssignSort = 'newest' | 'importance'
+
 function describeError(error: unknown) {
   return error instanceof Error ? error.message : t('cases.requestFailed')
 }
@@ -52,6 +83,118 @@ function describeError(error: unknown) {
 function formatDateTime(value: string | null) {
   if (value === null) return t('common.none')
   return value.slice(0, 16).replace('T', ' ')
+}
+
+function formatMailTime(value: string) {
+  return value.slice(11, 16)
+}
+
+function caseMailSenderDisplayName(mail: MailListItem) {
+  return mail.sender_contact?.display_name ?? mail.from_name ?? mail.from_address
+}
+
+function caseMailSenderAvatarUrl(mail: MailListItem) {
+  if (mail.sender_contact === null || mail.sender_contact === undefined) {
+    return defaultContactAvatarUrl
+  }
+  return (
+    mail.sender_contact.avatar_url ??
+    (mail.sender_contact.status === 'spam'
+      ? defaultSpamAvatarUrl
+      : mail.sender_contact.kind === 'mailing_list'
+        ? defaultMailingListAvatarUrl
+        : mail.sender_contact.kind === 'service'
+          ? defaultServiceAvatarUrl
+          : defaultContactAvatarUrl)
+  )
+}
+
+function caseMailSummary(mail: MailListItem) {
+  const summary = mail.summary?.trim()
+  if (summary === undefined || summary === '') {
+    return ''
+  }
+  return summary.length > 96 ? `${summary.slice(0, 95)}...` : summary
+}
+
+function caseMailPriorityClass(importance: string) {
+  if (importance === 'pending') {
+    return 'mail-priority-bug'
+  }
+  return `mail-priority-${importance}`
+}
+
+function caseMailGroupLabel(mail: MailListItem, sort: CaseMailAssignSort) {
+  if (sort === 'importance') {
+    return mail.effective_importance
+  }
+  return mail.received_date ?? mail.received_at.slice(0, 10)
+}
+
+function shouldShowCaseMailGroupLabel(
+  mail: MailListItem,
+  index: number,
+  mailsToRender: MailListItem[],
+  sort: CaseMailAssignSort,
+) {
+  if (index === 0) {
+    return true
+  }
+  return (
+    caseMailGroupLabel(mail, sort) !==
+    caseMailGroupLabel(mailsToRender[index - 1], sort)
+  )
+}
+
+function isCaseMailMiddleOrHigherImportance(importance: string) {
+  return importance === 'pinned' || importance === 'high' || importance === 'middle'
+}
+
+function shouldShowCaseMailImportanceThreshold(
+  mail: MailListItem,
+  index: number,
+  mailsToRender: MailListItem[],
+  sort: CaseMailAssignSort,
+) {
+  if (sort !== 'importance' || index === 0) {
+    return false
+  }
+  return (
+    isCaseMailMiddleOrHigherImportance(mailsToRender[index - 1].effective_importance) &&
+    !isCaseMailMiddleOrHigherImportance(mail.effective_importance)
+  )
+}
+
+function caseMailThreadKey(mail: MailListItem) {
+  return mail.thread_id ?? mail.gmail_thread_id
+}
+
+function latestCaseMailThreadItems(mails: MailListItem[]) {
+  const latestByThread = new Map<string, MailListItem>()
+  for (const mail of mails) {
+    const threadKey = caseMailThreadKey(mail)
+    const current = latestByThread.get(threadKey)
+    if (
+      current === undefined ||
+      mail.received_at.localeCompare(current.received_at) > 0 ||
+      (mail.received_at === current.received_at && mail.id.localeCompare(current.id) > 0)
+    ) {
+      latestByThread.set(threadKey, mail)
+    }
+  }
+  return Array.from(latestByThread.values())
+}
+
+function compareCaseMailAssignItems(sort: CaseMailAssignSort) {
+  return (left: MailListItem, right: MailListItem) => {
+    if (sort === 'importance') {
+      const rank = (left.importance_rank ?? 99) - (right.importance_rank ?? 99)
+      if (rank !== 0) {
+        return rank
+      }
+    }
+    return right.received_at.localeCompare(left.received_at) || left.id.localeCompare(right.id)
+  }
 }
 
 function jstDateToday() {
@@ -146,7 +289,13 @@ function CaseRow({ genres, item }: { genres: CaseGenre[]; item: CaseItem }) {
   )
 }
 
-function CaseStorageWindow({ rootDirectoryId }: { rootDirectoryId: string }) {
+function CaseStorageWindow({
+  caseId,
+  rootDirectoryId,
+}: {
+  caseId: string
+  rootDirectoryId: string
+}) {
   const [currentDirectoryId, setCurrentDirectoryId] = useState(rootDirectoryId)
   const [objects, setObjects] = useState<StorageObject[]>([])
   const [directories, setDirectories] = useState<StorageDirectory[]>([])
@@ -173,7 +322,9 @@ function CaseStorageWindow({ rootDirectoryId }: { rootDirectoryId: string }) {
 
   async function refreshStorage() {
     const [nextObjects, nextDirectories] = await Promise.all([
-      listStorageObjects({ directory_id: currentDirectoryId, limit: 200 }),
+      currentDirectoryId === rootDirectoryId
+        ? listCaseFiles(caseId)
+        : listStorageObjects({ directory_id: currentDirectoryId, limit: 200 }),
       listStorageDirectories(currentDirectoryId),
     ])
     setObjects(nextObjects)
@@ -268,7 +419,9 @@ function CaseStorageWindow({ rootDirectoryId }: { rootDirectoryId: string }) {
       return
     }
     const objectId = objectIdFromDragEvent(event)
-    if (objectId !== '') void handleMoveStorageObject(objectId, currentDirectoryId)
+    if (objectId !== '') {
+      void handleMoveStorageObject(objectId, currentDirectoryId)
+    }
   }
 
   function handleDragOver(event: DragEvent<HTMLDivElement>) {
@@ -330,19 +483,43 @@ function CaseStorageWindow({ rootDirectoryId }: { rootDirectoryId: string }) {
   }
 
   async function handleDelete(object: StorageObject) {
-    if (!window.confirm(t('storage.delete.confirm', { name: object.original_filename ?? object.id }))) {
+    const choice = window.prompt(
+      t('cases.storage.deleteChoice', { name: object.original_filename ?? object.id }),
+      'exclude',
+    )
+    const normalizedChoice = choice?.trim().toLowerCase() ?? ''
+    if (normalizedChoice === '') {
+      return
+    }
+    if (!['exclude', 'delete'].includes(normalizedChoice)) {
+      setError(t('cases.storage.deleteChoiceInvalid'))
       return
     }
     setDeleteBusyId(object.id)
     setError(null)
     setNotice(null)
     try {
-      await deleteStorageObject(object.id)
+      if (normalizedChoice === 'exclude') {
+        await unlinkCaseFile(caseId, object.id)
+      } else {
+        if (
+          !window.confirm(
+            t('storage.delete.confirm', { name: object.original_filename ?? object.id }),
+          )
+        ) {
+          return
+        }
+        await deleteStorageObject(object.id)
+      }
       setObjects((currentObjects) =>
         currentObjects.filter((currentObject) => currentObject.id !== object.id),
       )
       setSelectedObjectId((currentId) => (currentId === object.id ? null : currentId))
-      setNotice(t('storage.deleted', { name: object.original_filename ?? object.id }))
+      setNotice(
+        normalizedChoice === 'exclude'
+          ? t('cases.storage.unlinked', { name: object.original_filename ?? object.id })
+          : t('storage.deleted', { name: object.original_filename ?? object.id }),
+      )
     } catch (requestError) {
       setError(describeError(requestError))
     } finally {
@@ -638,13 +815,14 @@ function CaseWorkbenchPanel({
   )
 }
 
-const stakeholderRoles = ['owner', 'collaborator', 'reviewer', 'stakeholder'] as const
+const defaultStakeholderRoles = ['owner', 'collaborator', 'reviewer', 'stakeholder'] as const
 
 function stakeholderRoleLabel(role: string) {
   if (role === 'owner') return t('cases.stakeholders.role.owner')
   if (role === 'collaborator') return t('cases.stakeholders.role.collaborator')
   if (role === 'reviewer') return t('cases.stakeholders.role.reviewer')
-  return t('cases.stakeholders.role.stakeholder')
+  if (role === 'stakeholder') return t('cases.stakeholders.role.stakeholder')
+  return role
 }
 
 function CaseStakeholdersPanel({
@@ -656,6 +834,7 @@ function CaseStakeholdersPanel({
 }) {
   const [stakeholders, setStakeholders] = useState(initialStakeholders)
   const [contacts, setContacts] = useState<Contact[]>([])
+  const [caseContexts, setCaseContexts] = useState<ContactSelectorCaseContext[]>([])
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [contactQuery, setContactQuery] = useState('')
   const [role, setRole] = useState('stakeholder')
@@ -680,6 +859,33 @@ function CaseStakeholdersPanel({
     }
   }, [])
 
+  useEffect(() => {
+    let isMounted = true
+    async function loadCaseContexts() {
+      const caseLists = await Promise.all([
+        listCases('user_ball'),
+        listCases('waiting'),
+        listCases('completed'),
+      ])
+      const caseItems = caseLists.flat()
+      const contexts = await Promise.all(
+        caseItems.map(async (caseItem) => ({
+          case: caseItem,
+          stakeholders: await listCaseStakeholders(caseItem.id),
+        })),
+      )
+      if (isMounted) {
+        setCaseContexts(contexts)
+      }
+    }
+    void loadCaseContexts().catch(() => {
+      if (isMounted) setCaseContexts([])
+    })
+    return () => {
+      isMounted = false
+    }
+  }, [])
+
   const normalizedQuery = contactQuery.trim().toLowerCase()
   const suggestedContacts = normalizedQuery === ''
     ? []
@@ -699,21 +905,54 @@ function CaseStakeholdersPanel({
     )
   })
   const linkedContactIds = new Set(stakeholders.map((stakeholder) => stakeholder.contact_id))
+  const selectedContacts = resolveContactSelectorListWithCases(
+    contactQuery,
+    contacts,
+    caseContexts,
+  ).filter((contact) => !linkedContactIds.has(contact.id))
+  const selectorPreviewItems = describeContactSelectorList(
+    contactQuery,
+    contacts,
+    caseContexts,
+  )
+    .filter((item) => item.contacts.length > 0)
+  const caseSelectorSuggestions = caseRoleSelectorSuggestions(contactQuery, caseContexts)
+  const stakeholderRoleSuggestions = Array.from(
+    new Set([
+      ...defaultStakeholderRoles,
+      ...stakeholders.map((stakeholder) => stakeholder.role),
+      ...caseContexts.flatMap((context) =>
+        context.stakeholders.map((stakeholder) => stakeholder.role),
+      ),
+    ]),
+  )
+    .filter((roleValue) => roleValue.trim() !== '')
+    .sort((left, right) => left.localeCompare(right))
   const canAddStakeholder =
-    selectedContact !== undefined &&
-    !linkedContactIds.has(selectedContact.id)
+    selectedContacts.length > 0 ||
+    (selectedContact !== undefined && !linkedContactIds.has(selectedContact.id))
 
   async function addStakeholder(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!canAddStakeholder || selectedContact === undefined) return
+    if (!canAddStakeholder) return
     setBusy(true)
     setError(null)
     try {
-      const stakeholder = await createCaseStakeholder(caseId, {
-        contact_id: selectedContact.id,
-        role,
-      })
-      setStakeholders((current) => [...current, stakeholder])
+      const contactsToAdd =
+        selectedContacts.length > 0
+          ? selectedContacts
+          : selectedContact === undefined
+            ? []
+            : [selectedContact]
+      const createdStakeholders = await Promise.all(
+        contactsToAdd.map((contact) =>
+          createCaseStakeholder(caseId, {
+            contact_id: contact.id,
+            role,
+          }),
+        ),
+      )
+      setStakeholders((current) => [...current, ...createdStakeholders])
       setContactQuery('')
       setRole('stakeholder')
     } catch (requestError) {
@@ -724,11 +963,13 @@ function CaseStakeholdersPanel({
   }
 
   async function changeRole(stakeholder: CaseStakeholder, nextRole: string) {
+    const trimmedRole = nextRole.trim()
+    if (trimmedRole === '' || trimmedRole === stakeholder.role) return
     setBusy(true)
     setError(null)
     try {
       const updatedStakeholder = await updateCaseStakeholder(caseId, stakeholder.id, {
-        role: nextRole,
+        role: trimmedRole,
       })
       setStakeholders((current) =>
         current.map((item) => (item.id === updatedStakeholder.id ? updatedStakeholder : item)),
@@ -794,6 +1035,13 @@ function CaseStakeholdersPanel({
         </button>
       </div>
       {error !== null && <p className="case-stakeholder-error" role="alert">{error}</p>}
+      <datalist id={`case-stakeholder-role-suggestions-${caseId}`}>
+        {stakeholderRoleSuggestions.map((roleValue) => (
+          <option key={roleValue} value={roleValue}>
+            {stakeholderRoleLabel(roleValue)}
+          </option>
+        ))}
+      </datalist>
       <div className="case-stakeholder-list">
         {stakeholders.length === 0 ? (
           <p>{t('cases.stakeholders.empty')}</p>
@@ -807,18 +1055,14 @@ function CaseStakeholdersPanel({
               <strong>{stakeholder.contact_display_name}</strong>
               {isSettingsOpen ? (
                 <>
-                  <select
+                  <input
                     aria-label={t('cases.stakeholders.role')}
+                    defaultValue={stakeholder.role}
                     disabled={busy}
-                    onChange={(event) => void changeRole(stakeholder, event.target.value)}
-                    value={stakeholder.role}
-                  >
-                    {stakeholderRoles.map((roleValue) => (
-                      <option key={roleValue} value={roleValue}>
-                        {stakeholderRoleLabel(roleValue)}
-                      </option>
-                    ))}
-                  </select>
+                    list={`case-stakeholder-role-suggestions-${caseId}`}
+                    onBlur={(event) => void changeRole(stakeholder, event.target.value)}
+                    type="text"
+                  />
                   <button
                     disabled={busy || index === 0}
                     onClick={() => void moveStakeholder(index, -1)}
@@ -874,22 +1118,58 @@ function CaseStakeholdersPanel({
                 ))}
               </div>
             )}
+            {caseSelectorSuggestions.length > 0 && (
+              <div className="case-stakeholder-suggestions case-stakeholder-case-suggestions">
+                {caseSelectorSuggestions.map((suggestion) => (
+                  <button
+                    key={suggestion.value}
+                    onClick={() =>
+                      setContactQuery((current) =>
+                        replaceLastContactSelector(current, suggestion.value),
+                      )
+                    }
+                    type="button"
+                  >
+                    <strong>{suggestion.label}</strong>
+                  </button>
+                ))}
+              </div>
+            )}
+            {selectorPreviewItems.length > 0 && (
+              <div className="case-stakeholder-selector-preview" aria-live="polite">
+                {selectorPreviewItems.map((item) => (
+                  <div key={item.selector}>
+                    <span>{item.selector}</span>
+                    <div>
+                      {item.contacts.map((contact) => (
+                        <em key={contact.id}>{contact.display_name}</em>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </label>
           <label>
             <span>{t('cases.stakeholders.role')}</span>
-            <select onChange={(event) => setRole(event.target.value)} value={role}>
-              {stakeholderRoles.map((roleValue) => (
-                <option key={roleValue} value={roleValue}>
-                  {stakeholderRoleLabel(roleValue)}
-                </option>
-              ))}
-            </select>
+            <input
+              list={`case-stakeholder-role-suggestions-${caseId}`}
+              onChange={(event) => setRole(event.target.value)}
+              type="text"
+              value={role}
+            />
           </label>
           <button disabled={busy || !canAddStakeholder} type="submit">
             {t('cases.stakeholders.add')}
           </button>
           {contactQuery.trim() !== '' && selectedContact === undefined && (
-            <p>{t('cases.stakeholders.noContact')}</p>
+            <p>
+              {selectedContacts.length === 0
+                ? t('cases.stakeholders.noContact')
+                : t('cases.stakeholders.resolvedContacts', {
+                    count: selectedContacts.length,
+                  })}
+            </p>
           )}
           {selectedContact !== undefined && linkedContactIds.has(selectedContact.id) && (
             <p>{t('cases.stakeholders.alreadyLinked')}</p>
@@ -1588,6 +1868,13 @@ function CaseDetailView({ caseId }: { caseId: string }) {
   const [closedWhenDraft, setClosedWhenDraft] = useState('')
   const [tagDraft, setTagDraft] = useState('')
   const [isOverviewSaving, setIsOverviewSaving] = useState(false)
+  const [isCaseStateBusy, setIsCaseStateBusy] = useState(false)
+  const [isCurrentSituationRefreshing, setIsCurrentSituationRefreshing] = useState(false)
+  const [isDeletingCase, setIsDeletingCase] = useState(false)
+  const [deleteMenuPosition, setDeleteMenuPosition] = useState<{
+    x: number
+    y: number
+  } | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -1608,6 +1895,23 @@ function CaseDetailView({ caseId }: { caseId: string }) {
       isMounted = false
     }
   }, [caseId])
+
+  useEffect(() => {
+    if (deleteMenuPosition === null) {
+      return
+    }
+    function closeDeleteMenu() {
+      setDeleteMenuPosition(null)
+    }
+    window.addEventListener('click', closeDeleteMenu)
+    window.addEventListener('keydown', closeDeleteMenu)
+    window.addEventListener('scroll', closeDeleteMenu, true)
+    return () => {
+      window.removeEventListener('click', closeDeleteMenu)
+      window.removeEventListener('keydown', closeDeleteMenu)
+      window.removeEventListener('scroll', closeDeleteMenu, true)
+    }
+  }, [deleteMenuPosition])
 
   const item = detail?.case ?? null
 
@@ -1657,6 +1961,71 @@ function CaseDetailView({ caseId }: { caseId: string }) {
       setError(describeError(requestError))
     } finally {
       setIsOverviewSaving(false)
+    }
+  }
+
+  function openDeleteMenu(event: MouseEvent<HTMLButtonElement>) {
+    event.preventDefault()
+    if (item?.is_system_case) {
+      return
+    }
+    setDeleteMenuPosition({ x: event.clientX, y: event.clientY })
+  }
+
+  async function handleDeleteCase() {
+    if (item === null || isDeletingCase) return
+    setDeleteMenuPosition(null)
+    if (!window.confirm(t('cases.delete.confirm', { name: item.name }))) {
+      return
+    }
+    setIsDeletingCase(true)
+    setError(null)
+    try {
+      await deleteCase(item.id)
+      navigateTo('/cases')
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsDeletingCase(false)
+    }
+  }
+
+  async function updateCaseState(action: 'complete' | 'reopen' | 'archive') {
+    if (item === null || isCaseStateBusy) return
+    setIsCaseStateBusy(true)
+    setError(null)
+    try {
+      const updatedCase =
+        action === 'complete'
+          ? await completeCase(item.id)
+          : action === 'reopen'
+            ? await reopenCase(item.id)
+            : await archiveCase(item.id)
+      setDetail((currentDetail) =>
+        currentDetail === null ? currentDetail : { ...currentDetail, case: updatedCase },
+      )
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsCaseStateBusy(false)
+    }
+  }
+
+  async function handleCurrentSituationRefresh() {
+    if (item === null || isCurrentSituationRefreshing) return
+    setIsCurrentSituationRefreshing(true)
+    setError(null)
+    try {
+      const currentSituation = await regenerateCaseCurrentSituation(item.id)
+      setDetail((currentDetail) =>
+        currentDetail === null
+          ? currentDetail
+          : { ...currentDetail, current_situation: currentSituation },
+      )
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsCurrentSituationRefreshing(false)
     }
   }
 
@@ -1792,9 +2161,34 @@ function CaseDetailView({ caseId }: { caseId: string }) {
                     <span>{t('cases.aiStatus.eyebrow')}</span>
                     <h2>{t('cases.aiStatus.heading')}</h2>
                   </div>
-                  <button type="button">{t('cases.aiStatus.refresh')}</button>
+                  <button
+                    className={`button-loading-dot${
+                      isCurrentSituationRefreshing ? ' is-loading' : ''
+                    }`}
+                    disabled={isCurrentSituationRefreshing}
+                    onClick={handleCurrentSituationRefresh}
+                    type="button"
+                  >
+                    {isCurrentSituationRefreshing
+                      ? t('cases.aiStatus.refreshing')
+                      : t('cases.aiStatus.refresh')}
+                  </button>
                 </div>
-                <p>{t('cases.aiStatus.empty')}</p>
+                {detail.current_situation === null || detail.current_situation === undefined ? (
+                  <p>{t('cases.aiStatus.empty')}</p>
+                ) : (
+                  <>
+                    <pre className="case-ai-status-text">
+                      {detail.current_situation.context_markdown}
+                    </pre>
+                    <p className="case-ai-status-meta">
+                      {t('cases.aiStatus.version', {
+                        version: detail.current_situation.version_no,
+                        time: formatDateTime(detail.current_situation.created_at),
+                      })}
+                    </p>
+                  </>
+                )}
                 <div className="case-ai-status-grid">
                   <span>{t('cases.aiStatus.source.mail')}</span>
                   <span>{t('cases.aiStatus.source.task')}</span>
@@ -1811,11 +2205,21 @@ function CaseDetailView({ caseId }: { caseId: string }) {
                   title={t('cases.mail.window')}
                 >
                   <div className="case-mail-preview-list">
-                    <div>
-                      <time>--:--</time>
-                      <span>{t('cases.mail.empty')}</span>
-                      <b>{t('cases.card.none')}</b>
-                    </div>
+                    {detail.related_mails.length === 0 ? (
+                      <div>
+                        <time>--:--</time>
+                        <span>{t('cases.mail.empty')}</span>
+                        <b>{t('cases.card.none')}</b>
+                      </div>
+                    ) : (
+                      detail.related_mails.slice(0, 3).map((mail) => (
+                        <AppLink className="case-mail-preview-row" href={mail.mail_url} key={mail.id}>
+                          <time>{formatDateTime(mail.received_at)}</time>
+                          <span>{mail.subject ?? t('mail.noSubject')}</span>
+                          <b>{mail.effective_importance}</b>
+                        </AppLink>
+                      ))
+                    )}
                   </div>
                 </CaseWorkbenchPanel>
                 <CaseWorkbenchPanel
@@ -1837,7 +2241,7 @@ function CaseDetailView({ caseId }: { caseId: string }) {
                   </div>
                 </CaseWorkbenchPanel>
               </div>
-              <CaseStorageWindow rootDirectoryId={item.storage_directory_id} />
+              <CaseStorageWindow caseId={item.id} rootDirectoryId={item.storage_directory_id} />
               <CaseStakeholdersPanel
                 caseId={item.id}
                 initialStakeholders={detail.stakeholders ?? []}
@@ -1846,9 +2250,74 @@ function CaseDetailView({ caseId }: { caseId: string }) {
             <aside aria-label={t('cases.gadgets')} className="case-gadget-column">
               <CaseCalendarGadget caseItem={item} />
               <CaseToolsGadget caseId={item.id} initialTools={detail.tool_links ?? []} />
-              <button className="case-complete-gadget-button" type="button">
-                {t('cases.complete.button')}
-              </button>
+              {!item.is_system_case && (
+                <>
+                  {item.closed_at === null && item.archived_at === null ? (
+                    <button
+                      className={`case-complete-gadget-button button-loading-dot${
+                        isCaseStateBusy || isDeletingCase ? ' is-loading' : ''
+                      }`}
+                      disabled={isCaseStateBusy || isDeletingCase}
+                      onClick={() => {
+                        void updateCaseState('complete')
+                      }}
+                      onContextMenu={openDeleteMenu}
+                      type="button"
+                    >
+                      {t('cases.complete.button')}
+                    </button>
+                  ) : (
+                    <button
+                      className={`case-complete-gadget-button button-loading-dot${
+                        isCaseStateBusy || isDeletingCase ? ' is-loading' : ''
+                      }`}
+                      disabled={isCaseStateBusy || isDeletingCase}
+                      onClick={() => {
+                        void updateCaseState('reopen')
+                      }}
+                      onContextMenu={openDeleteMenu}
+                      type="button"
+                    >
+                      {t('cases.reopen.button')}
+                    </button>
+                  )}
+                  {item.archived_at === null && (
+                    <button
+                      className={`case-secondary-gadget-button button-loading-dot${
+                        isCaseStateBusy ? ' is-loading' : ''
+                      }`}
+                      disabled={isCaseStateBusy || isDeletingCase}
+                      onClick={() => {
+                        void updateCaseState('archive')
+                      }}
+                      type="button"
+                    >
+                      {t('cases.archive.button')}
+                    </button>
+                  )}
+                </>
+              )}
+              {deleteMenuPosition !== null && (
+                <div
+                  className="case-complete-context-menu"
+                  role="menu"
+                  style={{
+                    left: deleteMenuPosition.x,
+                    top: deleteMenuPosition.y,
+                  }}
+                >
+                  <button
+                    disabled={isDeletingCase}
+                    onClick={() => {
+                      void handleDeleteCase()
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    {t('cases.delete.button')}
+                  </button>
+                </div>
+              )}
             </aside>
           </div>
         )}
@@ -1972,19 +2441,34 @@ function CaseCreateView() {
 function CaseMailListView({ caseId }: { caseId: string }) {
   const [caseItem, setCaseItem] = useState<CaseItem | null>(null)
   const [mailLinks, setMailLinks] = useState<CaseMailLink[]>([])
+  const [autoAssignRules, setAutoAssignRules] = useState<CaseAutoAssignRule[]>([])
+  const [mailSearchResults, setMailSearchResults] = useState<MailListItem[]>([])
   const [searchQuery, setSearchQuery] = useState('')
+  const [autoRuleSenderEmail, setAutoRuleSenderEmail] = useState('')
+  const [assignSearchQuery, setAssignSearchQuery] = useState('')
+  const [assignSort, setAssignSort] = useState<CaseMailAssignSort>('importance')
+  const [assignPageSize, setAssignPageSize] = useState(25)
+  const [assignSearchRefreshTick, setAssignSearchRefreshTick] = useState(0)
+  const [pinnedMails, setPinnedMails] = useState<Record<string, MailListItem>>({})
+  const [isAssignMode, setIsAssignMode] = useState(false)
+  const [isRemoveMode, setIsRemoveMode] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
+  const [isSearchingMails, setIsSearchingMails] = useState(false)
+  const [isAssigning, setIsAssigning] = useState(false)
+  const [isAutoRuleSaving, setIsAutoRuleSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
 
   useEffect(() => {
     let isMounted = true
     setIsLoading(true)
     setError(null)
-    Promise.all([getCase(caseId), listCaseMailLinks(caseId)])
-      .then(([detail, links]) => {
+    Promise.all([getCase(caseId), listCaseMailLinks(caseId), listCaseAutoAssignRules(caseId)])
+      .then(([detail, links, rules]) => {
         if (!isMounted) return
         setCaseItem(detail.case)
         setMailLinks(links)
+        setAutoAssignRules(rules)
       })
       .catch((requestError) => {
         if (isMounted) setError(describeError(requestError))
@@ -1996,6 +2480,52 @@ function CaseMailListView({ caseId }: { caseId: string }) {
       isMounted = false
     }
   }, [caseId])
+
+  useEffect(() => {
+    if (!isAssignMode) {
+      setMailSearchResults([])
+      setIsSearchingMails(false)
+      return
+    }
+    const query = assignSearchQuery.trim()
+    if (query === '') {
+      setMailSearchResults([])
+      setIsSearchingMails(false)
+      return
+    }
+
+    let isMounted = true
+    setIsSearchingMails(true)
+    const timeoutId = window.setTimeout(() => {
+      listMailPage({
+        tab: 'all',
+        processed: 'all',
+        contact_status: 'all',
+        read: 'all',
+        q: query,
+        limit: assignPageSize,
+      })
+        .then((page) => {
+          if (isMounted) {
+            setMailSearchResults(page.items)
+          }
+        })
+        .catch((requestError) => {
+          if (isMounted) {
+            setError(describeError(requestError))
+          }
+        })
+        .finally(() => {
+          if (isMounted) {
+            setIsSearchingMails(false)
+          }
+        })
+    }, 220)
+    return () => {
+      isMounted = false
+      window.clearTimeout(timeoutId)
+    }
+  }, [assignPageSize, assignSearchQuery, assignSearchRefreshTick, isAssignMode])
 
   const normalizedQuery = searchQuery.trim().toLowerCase()
   const visibleMailLinks = mailLinks.filter((mail) => {
@@ -2012,6 +2542,218 @@ function CaseMailListView({ caseId }: { caseId: string }) {
       .toLowerCase()
       .includes(normalizedQuery)
   })
+  const assignedThreadIds = new Set(mailLinks.map((mail) => mail.thread_id))
+  const pinnedMailItems = latestCaseMailThreadItems(Object.values(pinnedMails)).toSorted(
+    (first, second) => second.received_at.localeCompare(first.received_at),
+  )
+  const pinnedThreadIds = new Set(pinnedMailItems.map(caseMailThreadKey))
+  const normalizedAssignQuery = assignSearchQuery.trim().toLowerCase()
+  const visibleMailSearchResults = latestCaseMailThreadItems(mailSearchResults)
+    .filter((mail) => {
+      const threadId = caseMailThreadKey(mail)
+      if (assignedThreadIds.has(threadId) || pinnedThreadIds.has(threadId)) {
+        return false
+      }
+      return normalizedAssignQuery !== ''
+    })
+    .toSorted(compareCaseMailAssignItems(assignSort))
+
+  function pinMail(mail: MailListItem) {
+    setPinnedMails((currentPinnedMails) => ({
+      ...currentPinnedMails,
+      [caseMailThreadKey(mail)]: mail,
+    }))
+  }
+
+  function pinVisibleMailSearchResults() {
+    if (visibleMailSearchResults.length === 0) {
+      return
+    }
+    setPinnedMails((currentPinnedMails) => {
+      const nextPinnedMails = { ...currentPinnedMails }
+      for (const mail of visibleMailSearchResults) {
+        nextPinnedMails[caseMailThreadKey(mail)] = mail
+      }
+      return nextPinnedMails
+    })
+  }
+
+  function unpinMail(mail: MailListItem) {
+    setPinnedMails((currentPinnedMails) => {
+      const nextPinnedMails = { ...currentPinnedMails }
+      delete nextPinnedMails[caseMailThreadKey(mail)]
+      return nextPinnedMails
+    })
+  }
+
+  async function handleRegisterPinnedMails() {
+    if (pinnedMailItems.length === 0) {
+      return
+    }
+    setError(null)
+    setNotice(null)
+    setIsAssigning(true)
+    try {
+      await Promise.all(
+        pinnedMailItems.map((mail) => assignMailThreadToCase(mail.id, caseId)),
+      )
+      const links = await listCaseMailLinks(caseId)
+      setMailLinks(links)
+      setPinnedMails({})
+      setAssignSearchQuery('')
+      setIsAssignMode(false)
+      setNotice(t('cases.mail.assignRegistered', { count: pinnedMailItems.length }))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsAssigning(false)
+    }
+  }
+
+  async function handleUnassignMailThread(mail: CaseMailLink) {
+    setError(null)
+    setNotice(null)
+    setIsAssigning(true)
+    try {
+      await unassignMailThreadFromCase(mail.message_id, caseId)
+      const links = await listCaseMailLinks(caseId)
+      setMailLinks(links)
+      if (links.length === 0) {
+        setIsRemoveMode(false)
+      }
+      setNotice(t('cases.mail.unassigned', { subject: mail.subject ?? t('mail.noSubject') }))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsAssigning(false)
+    }
+  }
+
+  async function handleCreateAutoAssignRule(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const senderEmail = autoRuleSenderEmail.trim()
+    if (senderEmail === '' || isAutoRuleSaving) {
+      return
+    }
+    setError(null)
+    setNotice(null)
+    setIsAutoRuleSaving(true)
+    try {
+      const rule = await createCaseAutoAssignRule(caseId, {
+        sender_email: senderEmail,
+      })
+      setAutoAssignRules((currentRules) => [rule, ...currentRules])
+      setAutoRuleSenderEmail('')
+      setNotice(t('cases.mail.autoRule.created', { email: rule.rule_value }))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsAutoRuleSaving(false)
+    }
+  }
+
+  async function handleDeleteAutoAssignRule(rule: CaseAutoAssignRule) {
+    if (isAutoRuleSaving) {
+      return
+    }
+    setError(null)
+    setNotice(null)
+    setIsAutoRuleSaving(true)
+    try {
+      await deleteCaseAutoAssignRule(caseId, rule.id)
+      setAutoAssignRules((currentRules) =>
+        currentRules.filter((currentRule) => currentRule.id !== rule.id),
+      )
+      setNotice(t('cases.mail.autoRule.deleted', { email: rule.rule_value }))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsAutoRuleSaving(false)
+    }
+  }
+
+  function renderMailRow(mail: MailListItem, options: {
+    actionLabel: string
+    onClick: () => void
+  }) {
+    return (
+      <button
+        className={`mail-list-item case-mail-picker-row ${caseMailPriorityClass(
+          mail.effective_importance,
+        )} mail-read-${mail.read_status ?? 'unread'}`}
+        key={mail.id}
+        onClick={options.onClick}
+        type="button"
+      >
+        <div className="mail-list-sender-media">
+          <span className="mail-list-time">{formatMailTime(mail.received_at)}</span>
+          <img
+            alt={t('mail.senderAvatarAlt', {
+              name: caseMailSenderDisplayName(mail),
+            })}
+            src={caseMailSenderAvatarUrl(mail)}
+          />
+        </div>
+        <div className="mail-list-main">
+          <strong>
+            <span>{mail.subject ?? t('mail.noSubject')}</span>
+          </strong>
+          <span>{caseMailSenderDisplayName(mail)}</span>
+        </div>
+        <p className="mail-list-summary">{caseMailSummary(mail)}</p>
+        <div className="mail-list-cases">
+          {mail.has_attachments === true && (
+            <span
+              aria-label={t('mail.attachmentsPresent')}
+              className="mail-attachment-indicator"
+              title={t('mail.attachmentsPresent')}
+            >
+              <img alt="" src={paperclipDiagonalUrl} />
+            </span>
+          )}
+          {(mail.case_links ?? []).length > 0 ? (
+            mail.case_links?.map((caseLink) => (
+              <span key={caseLink.id}>{caseLink.title}</span>
+            ))
+          ) : (
+            <span>{t('mail.noCase')}</span>
+          )}
+          <span>{options.actionLabel}</span>
+        </div>
+      </button>
+    )
+  }
+
+  function renderMailPickerList(
+    mails: MailListItem[],
+    options: {
+      actionLabel: string
+      onClick: (mail: MailListItem) => void
+      showGroups?: boolean
+    },
+  ) {
+    return (
+      <div className="mail-list case-mail-picker-list" role="list">
+        {mails.map((mail, index) => (
+          <div className="mail-list-entry" key={mail.id}>
+            {options.showGroups !== false &&
+              shouldShowCaseMailGroupLabel(mail, index, mails, assignSort) && (
+                <div className="mail-list-group-label">
+                  <span>{caseMailGroupLabel(mail, assignSort)}</span>
+                </div>
+              )}
+            {shouldShowCaseMailImportanceThreshold(mail, index, mails, assignSort) && (
+              <div aria-hidden="true" className="mail-importance-threshold" />
+            )}
+            {renderMailRow(mail, {
+              actionLabel: options.actionLabel,
+              onClick: () => options.onClick(mail),
+            })}
+          </div>
+        ))}
+      </div>
+    )
+  }
 
   return (
     <main className="app-shell">
@@ -2034,53 +2776,327 @@ function CaseMailListView({ caseId }: { caseId: string }) {
             <p role="alert">{error}</p>
           </div>
         )}
-
-        <section className="case-mail-assignment-tools">
-          <div className="section-heading">
-            <h2>{t('cases.mail.assignedTools')}</h2>
+        {notice !== null && (
+          <div className="mail-feedback">
+            <p>{notice}</p>
           </div>
-          <label>
-            <span>{t('cases.search.label')}</span>
-            <input
-              aria-label={t('cases.search.label')}
-              onChange={(event) => setSearchQuery(event.target.value)}
-              placeholder={t('cases.mail.searchPlaceholder')}
-              type="search"
-              value={searchQuery}
-            />
-          </label>
-        </section>
+        )}
 
-        <section className="case-mail-assignment-panel">
-          <div className="section-heading">
-            <div>
-              <h2>{t('cases.mail.assignedList')}</h2>
-              <p>{t('cases.mail.assignedCount', { count: visibleMailLinks.length })}</p>
-            </div>
-          </div>
-          {isLoading ? (
-            <p className="mail-empty">{t('cases.loading')}</p>
-          ) : visibleMailLinks.length === 0 ? (
-            <p className="mail-empty">{t('cases.mail.assignedEmpty')}</p>
-          ) : (
-            <div className="case-assigned-mail-list">
-              {visibleMailLinks.map((mail) => (
-                <AppLink className="case-assigned-mail-row" href={mail.mail_url} key={mail.id}>
-                  <time>{formatDateTime(mail.received_at)}</time>
-                  <div>
-                    <strong>{mail.subject ?? t('mail.noSubject')}</strong>
-                    <span>{mail.from_name ?? mail.from_address}</span>
+        {isAssignMode ? (
+          <>
+            <div className="mail-main-layout case-mail-assign-layout">
+              <div className="mail-main-column">
+                <section aria-labelledby="case-mail-search-results-heading" className="mail-list-workspace">
+                  <div className="mail-panel mail-list-panel">
+                    <div className="section-heading">
+                      <div>
+                        <h2 id="case-mail-search-results-heading">
+                          {t('mail.search.results')}
+                        </h2>
+                        <p>{t('mail.search.resultNote')}</p>
+                      </div>
+                      <div className="mail-list-heading-actions">
+                        <button
+                          className={`button-loading-dot${isSearchingMails ? ' is-loading' : ''}`}
+                          disabled={isSearchingMails}
+                          onClick={() => setAssignSearchRefreshTick((tick) => tick + 1)}
+                          type="button"
+                        >
+                          {t('mail.refresh')}
+                        </button>
+                        <button
+                          className="case-mail-add-button"
+                          onClick={() => {
+                            setIsAssignMode(false)
+                            setError(null)
+                            setNotice(null)
+                          }}
+                          type="button"
+                        >
+                          {t('common.cancel')}
+                        </button>
+                      </div>
+                    </div>
+
+                    {pinnedMailItems.length > 0 && (
+                      <div className="mail-list case-mail-picker-list case-mail-pinned-list" role="list">
+                        <div className="mail-list-entry">
+                          <div className="mail-list-group-label">
+                            <span>{t('cases.mail.pinned')}</span>
+                          </div>
+                        </div>
+                        {pinnedMailItems.map((mail) => (
+                          <div className="mail-list-entry" key={caseMailThreadKey(mail)}>
+                            {renderMailRow(mail, {
+                              actionLabel: t('cases.mail.unpin'),
+                              onClick: () => unpinMail(mail),
+                            })}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {normalizedAssignQuery === '' ? (
+                      <p className="mail-empty">{t('cases.mail.assignSearchPrompt')}</p>
+                    ) : isSearchingMails ? (
+                      <p className="mail-empty">{t('mail.loading')}</p>
+                    ) : visibleMailSearchResults.length === 0 ? (
+                      <p className="mail-empty">{t('mail.search.empty')}</p>
+                    ) : (
+                      renderMailPickerList(visibleMailSearchResults, {
+                        actionLabel: t('cases.mail.pin'),
+                        onClick: pinMail,
+                      })
+                    )}
                   </div>
-                  <p>{mail.summary ?? ''}</p>
-                  <div className="case-assigned-mail-badges">
-                    <span>{mail.effective_importance}</span>
-                    <span>{mail.processed_status}</span>
+                </section>
+              </div>
+
+              <aside className="mail-side-column">
+                <section aria-labelledby="case-mail-sort-heading" className="mail-panel mail-sort-panel">
+                  <div className="section-heading">
+                    <h2 id="case-mail-sort-heading">{t('mail.sort.heading')}</h2>
                   </div>
-                </AppLink>
-              ))}
+                  <div aria-label={t('mail.sort.label')} className="mail-sort-control">
+                    <button
+                      aria-pressed={assignSort === 'importance'}
+                      onClick={() => setAssignSort('importance')}
+                      type="button"
+                    >
+                      {t('mail.sort.importance')}
+                    </button>
+                    <button
+                      aria-pressed={assignSort === 'newest'}
+                      onClick={() => setAssignSort('newest')}
+                      type="button"
+                    >
+                      {t('mail.sort.newest')}
+                    </button>
+                  </div>
+                </section>
+
+                <section aria-labelledby="case-mail-search-heading" className="mail-panel mail-search-panel">
+                  <div className="section-heading">
+                    <h2 id="case-mail-search-heading">{t('mail.search.heading')}</h2>
+                  </div>
+                  <form
+                    className="mail-search-form"
+                    onSubmit={(event) => {
+                      event.preventDefault()
+                      setAssignSearchRefreshTick((tick) => tick + 1)
+                    }}
+                  >
+                    <input
+                      aria-label={t('mail.search.label')}
+                      onChange={(event) => setAssignSearchQuery(event.target.value)}
+                      placeholder={t('mail.search.placeholder')}
+                      value={assignSearchQuery}
+                    />
+                    <select
+                      aria-label={t('mail.pageSize')}
+                      onChange={(event) => setAssignPageSize(Number(event.target.value))}
+                      value={assignPageSize}
+                    >
+                      <option value={10}>10</option>
+                      <option value={25}>25</option>
+                      <option value={50}>50</option>
+                    </select>
+                    <div className="mail-search-actions">
+                      <button
+                        className={`button-loading-dot${isSearchingMails ? ' is-loading' : ''}`}
+                        disabled={isSearchingMails}
+                        type="submit"
+                      >
+                        {t('mail.search.submit')}
+                      </button>
+                      <button
+                        className={`button-loading-dot${isSearchingMails ? ' is-loading' : ''}`}
+                        disabled={isSearchingMails || assignSearchQuery.trim() === ''}
+                        onClick={() => setAssignSearchQuery('')}
+                        type="button"
+                      >
+                        {t('mail.search.clear')}
+                      </button>
+                    </div>
+                  </form>
+                </section>
+
+                <section aria-labelledby="case-mail-pin-heading" className="mail-panel mail-search-panel">
+                  <div className="section-heading">
+                    <h2 id="case-mail-pin-heading">{t('cases.mail.pinTools')}</h2>
+                  </div>
+                  <div className="case-mail-pin-actions">
+                    <button
+                      disabled={
+                        isSearchingMails ||
+                        normalizedAssignQuery === '' ||
+                        visibleMailSearchResults.length === 0
+                      }
+                      onClick={pinVisibleMailSearchResults}
+                      type="button"
+                    >
+                      {t('cases.mail.pinAllSearchResults')}
+                    </button>
+                    <button
+                      disabled={pinnedMailItems.length === 0}
+                      onClick={() => setPinnedMails({})}
+                      type="button"
+                    >
+                      {t('cases.mail.resetPinned')}
+                    </button>
+                  </div>
+                  <p className="case-mail-pin-note">
+                    {t('cases.mail.pinnedCount', { count: pinnedMailItems.length })}
+                  </p>
+                </section>
+              </aside>
             </div>
-          )}
-        </section>
+            <div className="case-mail-register-bar">
+              <button
+                className={`button-loading-dot${isAssigning ? ' is-loading' : ''}`}
+                disabled={isAssigning || pinnedMailItems.length === 0}
+                onClick={() => {
+                  void handleRegisterPinnedMails()
+                }}
+                type="button"
+              >
+                {t('cases.mail.registerPinned')}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <section className="case-mail-assignment-tools">
+              <div className="section-heading">
+                <h2>{t('cases.mail.assignedTools')}</h2>
+                <button
+                  className="case-mail-add-button"
+                  onClick={() => {
+                    setIsAssignMode(true)
+                    setError(null)
+                    setNotice(null)
+                  }}
+                  type="button"
+                >
+                  {t('cases.mail.add')}
+                </button>
+              </div>
+              <label>
+                <span>{t('cases.search.label')}</span>
+                <input
+                  aria-label={t('cases.search.label')}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  placeholder={t('cases.mail.searchPlaceholder')}
+                  type="search"
+                  value={searchQuery}
+                />
+              </label>
+            </section>
+
+            <section className="case-mail-auto-rule-panel">
+              <div className="section-heading">
+                <div>
+                  <h2>{t('cases.mail.autoRule.heading')}</h2>
+                  <p>{t('cases.mail.autoRule.body')}</p>
+                </div>
+              </div>
+              <form className="case-mail-auto-rule-form" onSubmit={handleCreateAutoAssignRule}>
+                <label>
+                  <span>{t('cases.mail.autoRule.senderEmail')}</span>
+                  <input
+                    onChange={(event) => setAutoRuleSenderEmail(event.target.value)}
+                    placeholder={t('cases.mail.autoRule.placeholder')}
+                    type="email"
+                    value={autoRuleSenderEmail}
+                  />
+                </label>
+                <button
+                  className={`button-loading-dot${isAutoRuleSaving ? ' is-loading' : ''}`}
+                  disabled={isAutoRuleSaving || autoRuleSenderEmail.trim() === ''}
+                  type="submit"
+                >
+                  {t('cases.mail.autoRule.add')}
+                </button>
+              </form>
+              {autoAssignRules.length === 0 ? (
+                <p className="case-mail-auto-rule-empty">
+                  {t('cases.mail.autoRule.empty')}
+                </p>
+              ) : (
+                <div className="case-mail-auto-rule-list">
+                  {autoAssignRules.map((rule) => (
+                    <div className="case-mail-auto-rule-item" key={rule.id}>
+                      <span>{rule.rule_value}</span>
+                      <button
+                        disabled={isAutoRuleSaving}
+                        onClick={() => {
+                          void handleDeleteAutoAssignRule(rule)
+                        }}
+                        type="button"
+                      >
+                        {t('cases.mail.autoRule.delete')}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <section className="case-mail-assignment-panel">
+              <div className="section-heading">
+                <div>
+                  <h2>{t('cases.mail.assignedList')}</h2>
+                  <p>{t('cases.mail.assignedCount', { count: visibleMailLinks.length })}</p>
+                </div>
+                <button
+                  aria-pressed={isRemoveMode}
+                  className="case-mail-add-button"
+                  disabled={visibleMailLinks.length === 0}
+                  onClick={() => setIsRemoveMode((current) => !current)}
+                  type="button"
+                >
+                  {isRemoveMode ? t('cases.mail.removeModeOff') : t('cases.mail.removeModeOn')}
+                </button>
+              </div>
+              {isLoading ? (
+                <p className="mail-empty">{t('cases.loading')}</p>
+              ) : visibleMailLinks.length === 0 ? (
+                <p className="mail-empty">{t('cases.mail.assignedEmpty')}</p>
+              ) : (
+                <div className="case-assigned-mail-list">
+                  {visibleMailLinks.map((mail) => (
+                    <div className="case-assigned-mail-row" key={mail.id}>
+                      <AppLink className="case-assigned-mail-link" href={mail.mail_url}>
+                        <time>{formatDateTime(mail.received_at)}</time>
+                        <div>
+                          <strong>{mail.subject ?? t('mail.noSubject')}</strong>
+                          <span>{mail.from_name ?? mail.from_address}</span>
+                        </div>
+                        <p>{mail.summary ?? ''}</p>
+                        <div className="case-assigned-mail-badges">
+                          <span>{mail.effective_importance}</span>
+                          <span>{mail.processed_status}</span>
+                        </div>
+                      </AppLink>
+                      {isRemoveMode && (
+                        <button
+                          className="case-assigned-mail-remove"
+                          disabled={isAssigning}
+                          onClick={() => {
+                            void handleUnassignMailThread(mail)
+                          }}
+                          type="button"
+                        >
+                          {t('cases.mail.unassign')}
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          </>
+        )}
       </div>
     </main>
   )

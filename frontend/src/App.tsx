@@ -13,6 +13,7 @@ import type { MailTab } from './MailView'
 import MailThreadView from './MailThreadView'
 import MaintenanceView from './MaintenanceView'
 import type { MaintenanceInitialData } from './MaintenanceView'
+import ProfileView from './ProfileView'
 import StorageView from './StorageView'
 import { t } from './i18n'
 import type { MessageKey } from './i18n'
@@ -44,6 +45,8 @@ type LinkItem = {
   href: string
 }
 
+type PageSlot = LinkItem | { blank: true; key: string }
+
 const pageLinks: LinkItem[] = [
   { labelKey: 'nav.mail', href: '/mail' },
   { labelKey: 'nav.cases', href: '/cases' },
@@ -56,9 +59,11 @@ const pageLinks: LinkItem[] = [
   { labelKey: 'nav.maintenance', href: '/maintenance' },
 ]
 
-const workLinks: LinkItem[] = [
-  { labelKey: 'work.newCase', href: '/cases/new' },
-  { labelKey: 'work.newTask', href: '/tasks/new' },
+const pageSlots: PageSlot[] = [
+  ...pageLinks,
+  { labelKey: 'nav.profile', href: '/profile' },
+  { blank: true, key: 'reserved-1' },
+  { blank: true, key: 'reserved-2' },
 ]
 
 type RoutePreload =
@@ -448,6 +453,13 @@ function TopView({
     )
   }
 
+  function pageSlot(slot: PageSlot) {
+    if ('blank' in slot) {
+      return <span aria-hidden="true" className="hub-link-placeholder" key={slot.key} />
+    }
+    return lockedLink(slot)
+  }
+
   return (
     <main className="app-shell">
       <div className={`top-shell${isLockedByPending ? ' top-shell-locked' : ''}`}>
@@ -488,15 +500,7 @@ function TopView({
           <h2 id="pages-heading">{t('top.pages.heading')}</h2>
 
           <nav aria-label={t('top.pages.navLabel')} className="hub-links">
-            {pageLinks.map((link) => lockedLink(link))}
-          </nav>
-        </section>
-
-        <section aria-labelledby="work-heading" className="hub-section">
-          <h2 id="work-heading">{t('top.work.heading')}</h2>
-
-          <nav aria-label={t('top.work.navLabel')} className="work-links">
-            {workLinks.map((link) => lockedLink(link))}
+            {pageSlots.map((slot) => pageSlot(slot))}
           </nav>
         </section>
       </div>
@@ -1073,6 +1077,15 @@ function App() {
           {pendingContactNoticeElement}
           {navigationError !== null && <p className="route-error">{navigationError}</p>}
           <FileIconsView />
+        </>
+      )
+    }
+    if (path === '/profile') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <ProfileView />
         </>
       )
     }

@@ -247,6 +247,24 @@ def build_file_summary_provider() -> LlmProvider:
     )
 
 
+def build_case_current_situation_provider() -> LlmProvider:
+    profile = load_llm_model_profile(FUNCTION_TYPE_CASE_CURRENT_SITUATION_SUMMARY)
+    if profile is None or profile.provider == "mock":
+        return MockCaseCurrentSituationProvider()
+
+    if profile.provider != "openai":
+        raise OpenAIProviderError(
+            "Unsupported provider for "
+            f"{FUNCTION_TYPE_CASE_CURRENT_SITUATION_SUMMARY}: {profile.provider}"
+        )
+
+    return OpenAICaseCurrentSituationProvider(
+        api_key_env=profile.api_key_env,
+        model_name=profile.model,
+        timeout_seconds=profile.timeout_seconds,
+    )
+
+
 def build_contact_ai_memo_update_provider() -> LlmProvider:
     profile = load_llm_model_profile(FUNCTION_TYPE_CONTACT_AI_MEMO_UPDATE)
     if profile is None or profile.provider == "mock":
@@ -292,6 +310,7 @@ FUNCTION_TYPE_MAIL_IMPORTANCE = "mail_importance_classification"
 FUNCTION_TYPE_MAIL_SUMMARY = "mail_summary"
 FUNCTION_TYPE_MAIL_THREAD_SUMMARY = "mail_thread_summary"
 FUNCTION_TYPE_FILE_SUMMARY = "file_summary"
+FUNCTION_TYPE_CASE_CURRENT_SITUATION_SUMMARY = "case_current_situation_summary"
 FUNCTION_TYPE_CONTACT_AI_MEMO_UPDATE = "contact_ai_memo_update"
 FUNCTION_TYPE_REPLY_DRAFT_GENERATION = "reply_draft_generation"
 FUNCTION_TYPE_NEW_MAIL_DRAFT_GENERATION = "new_mail_draft_generation"
@@ -425,6 +444,7 @@ LLM_FUNCTION_TYPES = [
     "mail_summary",
     "mail_thread_summary",
     "file_summary",
+    "case_current_situation_summary",
     "mail_case_selection",
     "reply_draft_generation",
     "new_mail_draft_generation",
@@ -446,6 +466,9 @@ def llm_function_config_data(function_type: str) -> dict[str, object]:
 def mail_importance_instructions() -> str:
     return (
         "You classify the user's email importance for a personal work-support app. "
+        "Use the user profile context to judge whether the message is relevant to "
+        "the user's research, teaching, committee work, administration, projects, "
+        "and usual responsibilities. "
         "Return only JSON matching the provided schema. "
         "Use high for urgent, time-sensitive, high-impact, or action-critical mail. "
         "Use middle for review, meeting, deadline, coordination, or normal work items. "
@@ -455,9 +478,45 @@ def mail_importance_instructions() -> str:
     )
 
 
+def profile_context_input_text(value: object) -> str:
+    if not isinstance(value, dict) or not value:
+        return "User profile context: Not configured."
+    labels = {
+        "display_name": "Name",
+        "affiliation": "Affiliation",
+        "academic_title": "Academic title",
+        "lab_or_group": "Lab/group",
+        "research_fields": "Research fields",
+        "teaching_responsibilities": "Teaching responsibilities",
+        "committee_roles": "Committee roles",
+        "administrative_roles": "Administrative roles",
+        "important_projects": "Important projects",
+        "priority_keywords": "Priority keywords",
+        "low_priority_keywords": "Low priority keywords",
+        "important_senders_or_domains": "Important senders/domains",
+        "expected_response_policy": "Expected response policy",
+        "unavailable_times": "Unavailable times",
+        "llm_self_description": "Self description",
+        "mail_importance_notes": "Mail importance notes",
+        "primary_email": "Primary email",
+        "email_aliases": "Email aliases",
+    }
+    lines = ["User profile context:"]
+    for key, label in labels.items():
+        item = value.get(key)
+        if isinstance(item, list):
+            text = "; ".join(str(part).strip() for part in item if str(part).strip())
+        else:
+            text = str(item or "").strip()
+        if text:
+            lines.append(f"- {label}: {truncated_text(text, 1200)}")
+    return "\n".join(lines)
+
+
 def mail_importance_input_text(input_payload: dict[str, object]) -> str:
     return "\n".join(
         [
+            profile_context_input_text(input_payload.get("profile_context")),
             f"Message ID: {input_payload.get('message_id') or ''}",
             f"Gmail message ID: {input_payload.get('gmail_message_id') or ''}",
             f"Subject: {input_payload.get('subject') or ''}",
@@ -684,7 +743,12 @@ class MockMailSummaryProvider:
 
         subject = compact_text(str(input_payload.get("subject") or "No subject"), 80)
         body = normalized_text(
-            str(input_payload.get("body_text") or input_payload.get("snippet") or "")
+            str(
+                input_payload.get("current_body_text")
+                or input_payload.get("body_text")
+                or input_payload.get("snippet")
+                or ""
+            )
         )
         key_points = [point for point in [subject, compact_text(body, 140)] if point]
         summary = f"{subject}: {body}" if body else subject
@@ -806,6 +870,66 @@ class MockFileSummaryProvider:
         return LlmProviderResponse(
             output=output,
             output_preview=str(output["file_description"]),
+            prompt_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+            estimated_cost=0.0,
+        )
+
+
+class MockCaseCurrentSituationProvider:
+    provider_name = "mock"
+    model_name = "deterministic-case-current-situation-v1"
+
+    def complete_json(
+        self,
+        *,
+        function_type: str,
+        input_payload: dict[str, object],
+    ) -> LlmProviderResponse:
+        if function_type != FUNCTION_TYPE_CASE_CURRENT_SITUATION_SUMMARY:
+            raise ValueError(f"Unsupported mock function type: {function_type}")
+
+        case_payload = input_payload.get("case")
+        case_data = case_payload if isinstance(case_payload, dict) else {}
+        mail_threads = input_payload.get("mail_threads")
+        mail_count = len(mail_threads) if isinstance(mail_threads, list) else 0
+        files = input_payload.get("files")
+        file_count = len(files) if isinstance(files, list) else 0
+        calendar_status = input_payload.get("calendar_status")
+        calendar_connected = (
+            isinstance(calendar_status, dict) and calendar_status.get("connected") is True
+        )
+        task_status = input_payload.get("task_status")
+        task_connected = (
+            isinstance(task_status, dict) and task_status.get("connected") is True
+        )
+        title = str(case_data.get("name") or "Case")
+        summary = (
+            f"{title} は、関連メール {mail_count} 件と関連ファイル {file_count} 件をもとに状況確認中です。"
+            if mail_count > 0 or file_count > 0
+            else f"{title} は、概要をもとに状況確認中です。"
+        )
+        key_points = [
+            f"関連メールThread: {mail_count}件",
+            f"関連ファイルDigest: {file_count}件",
+            "Task状況: 接続済み" if task_connected else "Task状況: 未接続",
+            "Calendar状況: 接続済み" if calendar_connected else "Calendar状況: 未接続",
+        ]
+        if str(case_data.get("closed_when_text") or "").strip():
+            key_points.append(f"終了条件: {case_data.get('closed_when_text')}")
+        output = {
+            "schema_version": "1.0",
+            "summary": summary,
+            "key_points": key_points[:5],
+            "risks": [],
+            "next_focus": "関連メールとOverviewを確認する。",
+            "reasoning_summary": "Mock case current situation generated from metadata.",
+            "warnings": [],
+        }
+        return LlmProviderResponse(
+            output=output,
+            output_preview=summary,
             prompt_tokens=0,
             completion_tokens=0,
             total_tokens=0,
@@ -1041,6 +1165,46 @@ class OpenAIFileSummaryProvider:
         )
 
 
+class OpenAICaseCurrentSituationProvider:
+    provider_name = "openai"
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        api_key_env: str | None = None,
+        model_name: str,
+        timeout_seconds: float,
+    ) -> None:
+        self.api_key = api_key or read_api_key(api_key_env)
+        if self.api_key is None or self.api_key.strip() == "":
+            raise OpenAIProviderError("OpenAI API key is not configured.")
+        self.model_name = model_name
+        self.timeout_seconds = timeout_seconds
+
+    def complete_json(
+        self,
+        *,
+        function_type: str,
+        input_payload: dict[str, object],
+    ) -> LlmProviderResponse:
+        if function_type != FUNCTION_TYPE_CASE_CURRENT_SITUATION_SUMMARY:
+            raise ValueError(f"Unsupported OpenAI function type: {function_type}")
+
+        payload = {
+            "model": self.model_name,
+            "instructions": case_current_situation_instructions(),
+            "input": case_current_situation_input_text(input_payload),
+            "max_output_tokens": 1400,
+            "text": {"format": case_current_situation_response_format()},
+        }
+        return openai_structured_response(
+            payload,
+            api_key=self.api_key,
+            timeout_seconds=self.timeout_seconds,
+        )
+
+
 class OpenAIMailDraftGenerationProvider:
     provider_name = "openai"
 
@@ -1214,6 +1378,37 @@ def contact_ai_memo_update_response_format() -> dict[str, object]:
                 "reasoning_summary": {"type": "string"},
             },
             "required": ["schema_version", "ai_memo", "reasoning_summary"],
+        },
+    }
+
+
+def case_current_situation_response_format() -> dict[str, object]:
+    string_array = {"type": "array", "items": {"type": "string"}}
+    return {
+        "type": "json_schema",
+        "name": "case_current_situation_summary",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "schema_version": {"type": "string"},
+                "summary": {"type": "string"},
+                "key_points": string_array,
+                "risks": string_array,
+                "next_focus": {"type": "string"},
+                "reasoning_summary": {"type": "string"},
+                "warnings": string_array,
+            },
+            "required": [
+                "schema_version",
+                "summary",
+                "key_points",
+                "risks",
+                "next_focus",
+                "reasoning_summary",
+                "warnings",
+            ],
         },
     }
 
@@ -1416,12 +1611,15 @@ def mail_summary_instructions() -> str:
     return (
         "You summarize one email for a Japanese personal work-support app. "
         "Return only JSON matching the provided schema. "
-        "Write summary, translation, next_action, and key_points in Japanese. "
-        "If the email is already Japanese, set translation to null. "
-        "If the email is not Japanese, translation must be a faithful Japanese "
-        "translation of the full email body, not a summary. Preserve paragraph "
-        "structure, URLs, named entities, dates, and amounts where practical. "
+        "Write summary, next_action, and key_points in Japanese. "
+        "Full-body translation is disabled; always set translation to null. "
         "Keep the summary concise but preserve deadlines, requests, and decisions. "
+        "Summarize only the current/new message body. Treat quoted replies, "
+        "forwarded history, previous messages, signatures, and mailing-list footers "
+        "as context only, not as facts to summarize. If the current message is short "
+        "or only acknowledges a previous message, summarize that short current "
+        "message and do not fill the summary from quoted history. Use quoted reply "
+        "context only to disambiguate references in the current message. "
         "When the email presents a website URL or homepage address that is useful "
         "for the recipient's next action or context, include that URL in the summary "
         "as much as possible without inventing or rewriting it. "
@@ -1447,7 +1645,8 @@ def mail_thread_summary_instructions() -> str:
     return (
         "You summarize an email thread for a Japanese personal work-support app. "
         "Return only JSON matching the provided schema. "
-        "Write summary, translation, next_action, and key_points in Japanese. "
+        "Write summary, next_action, and key_points in Japanese. "
+        "Full-body translation is disabled; always set translation to null. "
         "Write the summary as bullet points. "
         "Summarize the whole thread chronologically, including current status, "
         "open questions, deadlines, requests, and decisions. "
@@ -1459,7 +1658,28 @@ def mail_thread_summary_instructions() -> str:
         "new messages in relation to current_thread_summary. "
         "If summary_scope is final_from_partial_summaries, integrate the provided "
         "partial summaries into one coherent thread summary. "
-        "If the thread is already Japanese, set translation to null."
+        "Do not translate the full thread body."
+    )
+
+
+def case_current_situation_instructions() -> str:
+    return (
+        "You write a current situation note for one Case in a Japanese personal "
+        "work-support app for a university faculty member. Return only JSON matching "
+        "the provided schema. Write summary, key_points, risks, and next_focus in "
+        "Japanese. The goal is to help the user quickly remember what this Case is "
+        "about, what has happened recently, what is unresolved, and what to inspect "
+        "next. Use the Case overview as the user's explicit intent. Use related mail "
+        "thread summaries as evidence. Use calendar_status items when connected to "
+        "identify upcoming meetings, deadlines, or date-bound context; if not "
+        "connected, do not invent calendar events. Use file summaries/digests as "
+        "supporting evidence for the contents of related documents, and mention when "
+        "a file summary is not current only if that affects the situation. Use "
+        "task_status only when connected; if it is not connected, explicitly avoid "
+        "inventing task completion state. Do not invent facts, deadlines, decisions, "
+        "or stakeholder roles that are not in the input. Keep summary to one short "
+        "paragraph. key_points should have at most five items. risks should include "
+        "only concrete uncertainties or blockers."
     )
 
 
@@ -1625,6 +1845,10 @@ def contact_ai_memo_update_input_text(input_payload: dict[str, object]) -> str:
 
 
 def mail_summary_input_text(input_payload: dict[str, object]) -> str:
+    current_body_text = input_payload.get("current_body_text")
+    if current_body_text is None:
+        current_body_text = input_payload.get("body_text")
+    quoted_reply_context = input_payload.get("quoted_reply_context")
     return "\n".join(
         [
             f"Message ID: {input_payload.get('message_id') or ''}",
@@ -1636,7 +1860,15 @@ def mail_summary_input_text(input_payload: dict[str, object]) -> str:
             f"To: {input_payload.get('to_addresses_json') or ''}",
             f"Cc: {input_payload.get('cc_addresses_json') or ''}",
             f"Snippet: {truncated_text(input_payload.get('snippet'), 1000)}",
-            f"Body text: {truncated_text(input_payload.get('body_text'), 20000)}",
+            (
+                "Current message body to summarize: "
+                f"{truncated_text(current_body_text, 16000)}"
+            ),
+            (
+                "Quoted reply / previous-message context. Do not summarize this "
+                "section as current mail content: "
+                f"{truncated_text(quoted_reply_context, 8000)}"
+            ),
         ]
     )
 
@@ -1699,6 +1931,17 @@ def mail_thread_summary_input_text(input_payload: dict[str, object]) -> str:
                 ]
             )
     return "\n".join(lines)
+
+
+def case_current_situation_input_text(input_payload: dict[str, object]) -> str:
+    return "\n".join(
+        [
+            (
+                "Case current situation input JSON:\n"
+                f"{truncated_text(json_text(input_payload), 50000)}"
+            )
+        ]
+    )
 
 
 def display_name_from_email(email_address: str) -> str:

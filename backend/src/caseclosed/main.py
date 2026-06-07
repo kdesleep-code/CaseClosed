@@ -23,6 +23,7 @@ from caseclosed.mail_drafts import bootstrap_mail_drafts_database
 from caseclosed.mail_drafts import router as mail_drafts_router
 from caseclosed.mails import router as mails_router
 from caseclosed.maintenance import router as maintenance_router
+from caseclosed.profile import router as profile_router
 from caseclosed.services.background_worker import BackgroundWorkerSupervisor
 from caseclosed.services.gmail_auto_import import GmailAutoImportSupervisor
 from caseclosed.settings import is_background_worker_enabled
@@ -62,6 +63,7 @@ app.include_router(google_integration_router)
 app.include_router(maintenance_router)
 app.include_router(mail_drafts_router)
 app.include_router(mails_router)
+app.include_router(profile_router)
 app.include_router(storage_router)
 
 if (FRONTEND_DIST / "assets").exists():

@@ -35,9 +35,16 @@ router = APIRouter(prefix="/api/v1/contacts", tags=["contacts"])
 
 CONTACT_STATUSES = {"active", "skipped", "spam", "archived"}
 EMAIL_ADDRESS_STATUSES = {"active", "inactive", "deleted"}
-CONTACT_KINDS = {"person", "mailing_list"}
+CONTACT_KINDS = {"person", "mailing_list", "service"}
 SENDER_RESOLUTION_MODES = {"self", "reply_to"}
-RESERVED_CONTACT_TAGS = {"mailing-list"}
+FORBIDDEN_CONTACT_TAGS = {"mailing-list"}
+RESERVED_CONTACT_ROLE_TAGS = {
+    "collaborator",
+    "lab-alumni",
+    "lab-member",
+    "supervised-student",
+}
+RESERVED_CONTACT_TAGS = FORBIDDEN_CONTACT_TAGS | RESERVED_CONTACT_ROLE_TAGS
 MAIL_IMPORTANCE_RULE_ACTIONS = {"llm", "fixed", "llm_with_instruction"}
 MAIL_IMPORTANCE_RULE_VALUES = {"pinned", "high", "middle", "low"}
 CONTACT_CUSTOM_TABS_KEY = "contact_custom_tabs"
@@ -185,17 +192,17 @@ def validate_sender_resolution_mode(
             "VALIDATION_ERROR",
             "Invalid contact sender resolution mode.",
         )
-    if kind == "person" and sender_resolution_mode != "self":
+    if kind in {"person", "service"} and sender_resolution_mode != "self":
         raise json_error(
             422,
             "VALIDATION_ERROR",
-            "Person contacts must use self sender resolution.",
+            "Person and service contacts must use self sender resolution.",
         )
 
 
 def validate_contact_tags(*, kind: str, tags: list[str]) -> None:
     normalized_tags = {tag.strip().lower() for tag in tags if tag.strip()}
-    if RESERVED_CONTACT_TAGS & normalized_tags:
+    if FORBIDDEN_CONTACT_TAGS & normalized_tags:
         raise json_error(
             422,
             "VALIDATION_ERROR",
@@ -245,6 +252,18 @@ def validate_mail_importance_rule(
             "VALIDATION_ERROR",
             "LLM instruction rule requires instruction text.",
         )
+
+
+def contact_importance_defaults_for_kind(
+    *,
+    kind: str,
+    action: str,
+    importance: str | None,
+    instruction: str | None,
+) -> tuple[str, str | None, str | None]:
+    if kind == "service" and action == "llm" and importance is None and instruction is None:
+        return "fixed", "low", None
+    return action, importance, instruction
 
 
 def display_name_from_email_address(email_address: str) -> str:
@@ -864,15 +883,25 @@ def create_contact(
 ) -> dict[str, object]:
     validate_contact_status(payload.status)
     validate_contact_kind(payload.kind)
+    (
+        mail_importance_rule_action,
+        mail_importance_rule_importance,
+        mail_importance_rule_instruction,
+    ) = contact_importance_defaults_for_kind(
+        kind=payload.kind,
+        action=payload.mail_importance_rule_action,
+        importance=payload.mail_importance_rule_importance,
+        instruction=payload.mail_importance_rule_instruction,
+    )
     validate_sender_resolution_mode(
         kind=payload.kind,
         sender_resolution_mode=payload.sender_resolution_mode,
     )
     validate_contact_tags(kind=payload.kind, tags=payload.tags)
     validate_mail_importance_rule(
-        action=payload.mail_importance_rule_action,
-        importance=payload.mail_importance_rule_importance,
-        instruction=payload.mail_importance_rule_instruction,
+        action=mail_importance_rule_action,
+        importance=mail_importance_rule_importance,
+        instruction=mail_importance_rule_instruction,
     )
     if payload.kind == "mailing_list" and len(payload.email_addresses) > 1:
         raise json_error(
@@ -896,13 +925,15 @@ def create_contact(
         status=payload.status,
         kind=payload.kind,
         sender_resolution_mode=payload.sender_resolution_mode,
-        mailing_list_recipient_expression=normalize_optional_text(
-            payload.mailing_list_recipient_expression
+        mailing_list_recipient_expression=(
+            normalize_optional_text(payload.mailing_list_recipient_expression)
+            if payload.kind == "mailing_list"
+            else None
         ),
-        mail_importance_rule_action=payload.mail_importance_rule_action,
-        mail_importance_rule_importance=payload.mail_importance_rule_importance,
+        mail_importance_rule_action=mail_importance_rule_action,
+        mail_importance_rule_importance=mail_importance_rule_importance,
         mail_importance_rule_instruction=normalize_optional_text(
-            payload.mail_importance_rule_instruction
+            mail_importance_rule_instruction
         ),
         created_at=now,
         updated_at=now,
@@ -1273,15 +1304,13 @@ def merge_contact(
     if source_contact.id == target_contact.id:
         raise json_error(409, "CONFLICT", "Target contact must be different.")
     if (
-        source_contact.kind != "person"
-        or target_contact.kind != "person"
-        or source_contact.status != "active"
-        or target_contact.status != "active"
+        source_contact.kind != target_contact.kind
+        or source_contact.kind not in {"person", "service"}
     ):
         raise json_error(
             409,
             "CONFLICT",
-            "Only active person contacts can be merged.",
+            "Only person or service contacts of the same kind can be merged.",
         )
 
     now = jst_iso()

@@ -126,6 +126,51 @@ def ensure_runtime_schema() -> None:
                     """
                 )
             )
+    if "case_auto_assign_rules" not in table_names and "cases" in table_names:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE case_auto_assign_rules (
+                        id TEXT PRIMARY KEY,
+                        case_id TEXT NOT NULL REFERENCES cases(id),
+                        rule_type TEXT NOT NULL,
+                        rule_value TEXT NOT NULL,
+                        label TEXT,
+                        is_enabled INTEGER NOT NULL DEFAULT 1,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        UNIQUE(case_id, rule_type, rule_value)
+                    )
+                    """
+                )
+            )
+    if "file_links" not in table_names:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE file_links (
+                        id TEXT PRIMARY KEY,
+                        storage_object_id TEXT NOT NULL REFERENCES storage_objects(id),
+                        linked_type TEXT NOT NULL,
+                        linked_id TEXT NOT NULL,
+                        directory_id TEXT,
+                        label TEXT,
+                        status TEXT NOT NULL DEFAULT 'active',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+            )
+    elif "directory_id" not in {
+        column["name"] for column in inspector.get_columns("file_links")
+    }:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE file_links ADD COLUMN directory_id TEXT"))
     if "case_tool_links" not in table_names and "cases" in table_names:
         with engine.begin() as connection:
             connection.execute(
@@ -514,6 +559,24 @@ def ensure_runtime_schema() -> None:
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
                         version INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+            )
+        if "cases" in table_names and "case_context_versions" not in table_names:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE case_context_versions (
+                        id TEXT PRIMARY KEY,
+                        case_id TEXT NOT NULL REFERENCES cases(id),
+                        version_no INTEGER NOT NULL,
+                        context_markdown TEXT NOT NULL,
+                        source_event_until_at TEXT,
+                        llm_run_id TEXT REFERENCES llm_runs(id),
+                        created_at TEXT NOT NULL,
+                        created_by TEXT NOT NULL,
+                        UNIQUE(case_id, version_no)
                     )
                     """
                 )

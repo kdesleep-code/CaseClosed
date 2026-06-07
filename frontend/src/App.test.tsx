@@ -143,9 +143,12 @@ describe('Phase 1 login screen', () => {
     expect(screen.getByRole('navigation', { name: 'Main pages' })).toHaveTextContent(
       'Mail',
     )
-    expect(screen.getByRole('navigation', { name: 'Main work' })).toHaveTextContent(
-      'New Case',
+    expect(screen.getByRole('navigation', { name: 'Main pages' })).toHaveTextContent(
+      'Profile',
     )
+    expect(
+      screen.queryByRole('navigation', { name: 'Main work' }),
+    ).not.toBeInTheDocument()
     expect(screen.getByLabelText('Current session')).toHaveTextContent(
       'IP 127.0.0.1',
     )
@@ -447,6 +450,10 @@ describe('Phase 4 mail screen', () => {
     expect(screen.getByLabelText('Body')).toHaveValue('Draft body')
     expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled()
 
+    await user.click(screen.getByLabelText('To'))
+    await user.keyboard('{Enter}')
+    expect(sentPayload).toBeNull()
+
     await user.click(screen.getByRole('button', { name: 'Send' }))
 
     expect(
@@ -637,8 +644,139 @@ describe('Phase 4 mail screen', () => {
     confirmSpy.mockRestore()
   })
 
+  it('does not warn when only the quoted auto body mentions attachments', async () => {
+    const user = userEvent.setup()
+    window.history.pushState(
+      {},
+      '',
+      '/mail/compose?to=receiver%40example.com&subject=Quoted&manual_body=確認しました&auto_body=以前のメールで資料を添付しますと書かれていました',
+    )
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    let sentPayload: Record<string, unknown> | null = null
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        const path = input.toString()
+        if (path === '/api/v1/auth/session') {
+          return activeSessionResponse()
+        }
+        if (path === '/api/v1/mails/send') {
+          sentPayload = JSON.parse(String(init?.body ?? '{}'))
+          return apiResponse(200, {
+            ok: true,
+            data: {
+              id: 'mail_send_quoted_attachment',
+              status: 'scheduled_mock',
+              to_addresses: ['receiver@example.com'],
+              cc_addresses: [],
+              bcc_addresses: [],
+              subject: 'Quoted',
+              body_text: '確認しました\n\n以前のメールで資料を添付しますと書かれていました',
+              attachment_names: [],
+              reply_to_message_id: null,
+              sent_message_id: null,
+              scheduled_at: null,
+              created_at: '2026-05-25T10:00:00+09:00',
+              updated_at: '2026-05-25T10:00:00+09:00',
+              version: 1,
+            },
+          })
+        }
+        if (path === '/api/v1/mails/mail_send_quoted_attachment') {
+          return apiResponse(200, {
+            ok: true,
+            data: {
+              message: {
+                id: 'mail_send_quoted_attachment',
+                gmail_message_id: 'provisional:mail_send_quoted_attachment',
+                gmail_thread_id: 'provisional_thread_mail_send_quoted_attachment',
+                thread_id: 'provisional_thread_mail_send_quoted_attachment',
+                received_at: '2026-05-25T10:01:00+09:00',
+                received_date: '2026-05-25',
+                subject: 'Quoted',
+                from_address: 'caseclosed.me@example.local',
+                from_name: 'CaseClosed',
+                from_contact: null,
+                sender_contact: null,
+                sender_address: null,
+                reply_to_address: null,
+                to_addresses: ['receiver@example.com'],
+                cc_addresses: [],
+                bcc_addresses: [],
+                to_recipients: [{ email_address: 'receiver@example.com', contact: null }],
+                cc_recipients: [],
+                bcc_recipients: [],
+                message_id_header: null,
+                in_reply_to_header: null,
+                references_header: null,
+                list_id: null,
+                snippet: '確認しました',
+                gmail_link: null,
+                external_starred: false,
+                gmail_labels: ['SENT'],
+                body_text: '確認しました\n\n以前のメールで資料を添付しますと書かれていました',
+                body_html: null,
+                processed_status: 'processed',
+                read_status: 'read',
+                read_at: '2026-05-25T10:00:00+09:00',
+                user_importance: null,
+                effective_importance: 'sent',
+                importance_rank: 7,
+                external_importance: null,
+                suggested_importance: null,
+                llm_run_id: null,
+                pending_reason: null,
+                created_at: '2026-05-25T10:00:00+09:00',
+                updated_at: '2026-05-25T10:00:00+09:00',
+                version: 1,
+              },
+              thread_messages: [],
+              scheduled_send_requests: [],
+              user_state: {
+                user_importance: null,
+                processed_status: 'processed',
+                processed_at: '2026-05-25T10:00:00+09:00',
+                read_status: 'read',
+                read_at: '2026-05-25T10:00:00+09:00',
+                version: 1,
+              },
+              auto_state: {
+                external_importance: null,
+                suggested_importance: null,
+                llm_run_id: null,
+                effective_importance: 'sent',
+                pending_reason: null,
+              },
+              summary: null,
+              available_actions: [],
+            },
+          })
+        }
+        throw new Error(`Unexpected request: ${path}`)
+      }),
+    )
+
+    render(<App />)
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Compose Mail' }),
+    ).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(sentPayload).toEqual(
+      expect.objectContaining({
+        body_text: '確認しました\n\n以前のメールで資料を添付しますと書かれていました',
+      }),
+    )
+    confirmSpy.mockRestore()
+  })
+
   it('ingests a mock mail and opens the detail view', async () => {
     const user = userEvent.setup()
+    const originalScrollIntoView = Element.prototype.scrollIntoView
+    const scrollIntoView = vi.fn()
+    Element.prototype.scrollIntoView = scrollIntoView
     const createdMail = {
       id: 'mail_new',
       gmail_message_id: 'mock_created',
@@ -667,9 +805,13 @@ describe('Phase 4 mail screen', () => {
       thread_id: 'thread_db',
       from_name: null,
       sender_address: null,
-      to_addresses: [],
+      to_addresses: ['recipient.one@example.com', 'recipient.two@example.com'],
       cc_addresses: ['team@example.com'],
       bcc_addresses: [],
+      to_recipients: [
+        { email_address: 'recipient.one@example.com', contact: null },
+        { email_address: 'recipient.two@example.com', contact: null },
+      ],
       cc_recipients: [{ email_address: 'team@example.com', contact: null }],
       message_id_header: '<mock@test>',
       in_reply_to_header: null,
@@ -731,6 +873,35 @@ describe('Phase 4 mail screen', () => {
       const path = input.toString()
       if (path === '/api/v1/auth/session') {
         return activeSessionResponse()
+      }
+      if (path === '/api/v1/profile') {
+        return apiResponse(200, {
+          ok: true,
+          data: {
+            display_name: 'Kazumasa Horie',
+            primary_email: 'recipient.two@example.com',
+            email_aliases: ['team@example.com'],
+            affiliation: '',
+            academic_title: '',
+            lab_or_group: '',
+            research_fields: '',
+            teaching_responsibilities: '',
+            committee_roles: '',
+            administrative_roles: '',
+            supervised_people: '',
+            collaborators: '',
+            important_projects: '',
+            priority_keywords: '',
+            low_priority_keywords: '',
+            important_senders_or_domains: '',
+            expected_response_policy: '',
+            unavailable_times: '',
+            default_reply_language: 'japanese',
+            llm_self_description: '',
+            mail_importance_notes: '',
+            updated_at: '2026-06-03T19:30:00+09:00',
+          },
+        })
       }
       if (path === '/api/v1/contacts/unresolved-from-addresses') {
         return apiResponse(200, { ok: true, data: { items: [] } })
@@ -973,6 +1144,13 @@ describe('Phase 4 mail screen', () => {
     expect(
       await screen.findByRole('heading', { level: 1, name: 'Review mock mail' }),
     ).toBeInTheDocument()
+    await waitFor(() => {
+      expect(scrollIntoView).toHaveBeenCalledWith({
+        block: 'start',
+        inline: 'nearest',
+      })
+    })
+    scrollIntoView.mockClear()
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/v1/mails/mail_new/read',
       expect.objectContaining({
@@ -1010,10 +1188,10 @@ describe('Phase 4 mail screen', () => {
     expect(
       screen.getByRole('link', { name: 'https://example.com/summary' }),
     ).toHaveAttribute('href', 'https://example.com/summary')
-    expect(screen.getByText(/メール要約後の和訳/)).toBeInTheDocument()
+    expect(screen.queryByText(/メール要約後の和訳/)).not.toBeInTheDocument()
     expect(
-      screen.getByRole('link', { name: 'https://example.com/translatio...' }),
-    ).toHaveAttribute('href', 'https://example.com/translation')
+      screen.queryByRole('link', { name: 'https://example.com/translatio...' }),
+    ).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Cancel send' }))
     expect(fetchMock).toHaveBeenCalledWith(
@@ -1047,12 +1225,19 @@ describe('Phase 4 mail screen', () => {
     expect(
       await screen.findByRole('heading', { level: 1, name: 'Review mock mail' }),
     ).toBeInTheDocument()
+    expect(scrollIntoView).not.toHaveBeenCalled()
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/v1/profile',
+        expect.objectContaining({ credentials: 'include' }),
+      )
+    })
     await user.click(screen.getByRole('button', { name: 'Reply' }))
     expect(
       await screen.findByRole('heading', { level: 1, name: 'Compose Mail' }),
     ).toBeInTheDocument()
     expect(screen.getByLabelText('To')).toHaveValue('review.mock.sender@example.com')
-    expect(screen.getByLabelText('Cc')).toHaveValue('team@example.com')
+    expect(screen.getByLabelText('Cc')).toHaveValue('recipient.one@example.com')
     expect(screen.getByLabelText('Subject')).toHaveValue('Review mock mail')
     expect(screen.getByLabelText('Body')).toHaveValue('')
     expect(screen.getByRole('button', { name: 'Auto body' })).toHaveAttribute(
@@ -1096,6 +1281,386 @@ describe('Phase 4 mail screen', () => {
     )
 
     window.history.pushState({}, '', '/')
+    Element.prototype.scrollIntoView = originalScrollIntoView
+  })
+
+  it('returns to the originating date list when the same thread still has another incomplete day', async () => {
+    const user = userEvent.setup()
+    const baseMail = {
+      id: 'mail_low',
+      gmail_message_id: 'gmail_mail_low',
+      gmail_thread_id: 'thread_mail_low',
+      thread_id: 'thread_mail_low',
+      received_at: '2026-05-24T09:00:00+09:00',
+      received_date: '2026-05-24',
+      subject: 'Low priority note',
+      from_address: 'low.sender@example.com',
+      from_name: null,
+      sender_address: null,
+      reply_to_address: null,
+      list_id: null,
+      processed_status: 'unprocessed',
+      read_status: 'unread',
+      read_at: null,
+      user_importance: null,
+      effective_importance: 'low',
+      importance_rank: 3,
+      external_importance: null,
+      suggested_importance: null,
+      llm_run_id: null,
+      pending_reason: null,
+      to_addresses: ['me@example.com'],
+      cc_addresses: [],
+      bcc_addresses: [],
+      to_recipients: [{ email_address: 'me@example.com', contact: null }],
+      cc_recipients: [],
+      bcc_recipients: [],
+      message_id_header: '<mail-low@test>',
+      in_reply_to_header: null,
+      references_header: null,
+      snippet: null,
+      gmail_link: 'https://mail.google.com/mail/u/0/#inbox/gmail_mail_low',
+      external_starred: false,
+      body_text: 'This is a low priority note.',
+      body_html: null,
+      gmail_labels: [],
+      attachments: [],
+      created_at: '2026-05-24T09:00:00+09:00',
+      updated_at: '2026-05-24T09:00:00+09:00',
+      version: 1,
+    }
+    const otherDateMail = {
+      ...baseMail,
+      id: 'mail_other_day',
+      gmail_message_id: 'gmail_mail_other_day',
+      received_at: '2026-05-23T09:00:00+09:00',
+      received_date: '2026-05-23',
+      subject: 'Earlier action note',
+      effective_importance: 'high',
+    }
+    const fetchMock = vi.fn((input: string | URL | Request, init?: RequestInit) => {
+      const path = input.toString()
+      if (path === '/api/v1/auth/session') {
+        return activeSessionResponse()
+      }
+      if (path === '/api/v1/contacts/unresolved-from-addresses') {
+        return apiResponse(200, { ok: true, data: { items: [] } })
+      }
+      if (path === '/api/v1/profile') {
+        return apiResponse(200, {
+          ok: true,
+          data: {
+            display_name: '',
+            primary_email: 'me@example.com',
+            email_aliases: [],
+            affiliation: '',
+            academic_title: '',
+            lab_or_group: '',
+            research_fields: '',
+            teaching_responsibilities: '',
+            committee_roles: '',
+            administrative_roles: '',
+            supervised_people: '',
+            collaborators: '',
+            important_projects: '',
+            priority_keywords: '',
+            low_priority_keywords: '',
+            important_senders_or_domains: '',
+            expected_response_policy: '',
+            unavailable_times: '',
+            default_reply_language: 'japanese',
+            llm_self_description: '',
+            mail_importance_notes: '',
+            updated_at: null,
+          },
+        })
+      }
+      if (path.startsWith('/api/v1/mails/dates') && init?.method === undefined) {
+        return apiResponse(200, {
+          ok: true,
+          data: { items: [{ date: '2026-05-24', count: 0 }] },
+        })
+      }
+      if (path.startsWith('/api/v1/mails?') && init?.method === undefined) {
+        return apiResponse(200, {
+          ok: true,
+          data: { items: [], next_cursor: null, limit: 25 },
+        })
+      }
+      if (path === '/api/v1/mails/mail_low') {
+        return apiResponse(200, {
+          ok: true,
+          data: {
+            message: baseMail,
+            thread_messages: [otherDateMail, baseMail],
+            scheduled_send_requests: [],
+            user_state: {
+              user_importance: null,
+              processed_status: 'unprocessed',
+              processed_at: null,
+              read_status: 'unread',
+              read_at: null,
+              version: 1,
+            },
+            auto_state: {
+              external_importance: null,
+              suggested_importance: null,
+              llm_run_id: null,
+              effective_importance: 'low',
+              pending_reason: null,
+            },
+            summary: null,
+            available_actions: [],
+          },
+        })
+      }
+      if (path === '/api/v1/mails/mail_low/read' && init?.method === 'POST') {
+        return apiResponse(200, {
+          ok: true,
+          data: {
+            message: { ...baseMail, read_status: 'read' },
+            thread_messages: [
+              { ...otherDateMail, read_status: 'read' },
+              { ...baseMail, read_status: 'read' },
+            ],
+            scheduled_send_requests: [],
+            user_state: {
+              user_importance: null,
+              processed_status: 'unprocessed',
+              processed_at: null,
+              read_status: 'read',
+              read_at: '2026-05-24T09:01:00+09:00',
+              version: 2,
+            },
+            auto_state: {
+              external_importance: null,
+              suggested_importance: null,
+              llm_run_id: null,
+              effective_importance: 'low',
+              pending_reason: null,
+            },
+            summary: null,
+            available_actions: [],
+          },
+        })
+      }
+      if (path === '/api/v1/mails/mail_low/process' && init?.method === 'POST') {
+        return apiResponse(200, {
+          ok: true,
+          data: {
+            message: {
+              ...baseMail,
+              processed_status: 'processed',
+              read_status: 'read',
+            },
+            thread_messages: [
+              {
+                ...otherDateMail,
+                read_status: 'read',
+              },
+              {
+                ...baseMail,
+                processed_status: 'processed',
+                read_status: 'read',
+              },
+            ],
+            scheduled_send_requests: [],
+            user_state: {
+              user_importance: null,
+              processed_status: 'processed',
+              processed_at: '2026-05-24T09:02:00+09:00',
+              read_status: 'read',
+              read_at: '2026-05-24T09:01:00+09:00',
+              version: 3,
+            },
+            auto_state: {
+              external_importance: null,
+              suggested_importance: null,
+              llm_run_id: null,
+              effective_importance: 'low',
+              pending_reason: null,
+            },
+            summary: null,
+            available_actions: [],
+          },
+        })
+      }
+      throw new Error(`Unexpected request: ${path} ${init?.method ?? 'GET'}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    window.history.pushState(
+      {},
+      '',
+      '/mail/mail_low?return_to=%2Fmail%3Ftab%3Dunprocessed%26date%3D2026-05-24',
+    )
+
+    render(<App />)
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Low priority note' }),
+    ).toBeInTheDocument()
+    await user.click(screen.getAllByRole('button', { name: 'Complete' })[0])
+    fireEvent.pointerDown(window)
+
+    await waitFor(
+      () => {
+        expect(`${window.location.pathname}${window.location.search}`).toBe(
+          '/mail?tab=unprocessed&date=2026-05-24',
+        )
+      },
+      { timeout: 2500 },
+    )
+  })
+
+  it('cancels the pending return navigation when the completed mail is reopened', async () => {
+    const user = userEvent.setup()
+    const baseMail = {
+      id: 'mail_reopen',
+      gmail_message_id: 'gmail_mail_reopen',
+      gmail_thread_id: 'thread_mail_reopen',
+      thread_id: 'thread_mail_reopen',
+      received_at: '2026-05-24T10:00:00+09:00',
+      received_date: '2026-05-24',
+      subject: 'Reopen check',
+      from_address: 'reopen.sender@example.com',
+      from_name: null,
+      sender_address: null,
+      reply_to_address: null,
+      list_id: null,
+      processed_status: 'unprocessed',
+      read_status: 'read',
+      read_at: '2026-05-24T10:01:00+09:00',
+      user_importance: null,
+      effective_importance: 'high',
+      importance_rank: 1,
+      external_importance: null,
+      suggested_importance: null,
+      llm_run_id: null,
+      pending_reason: null,
+      to_addresses: ['me@example.com'],
+      cc_addresses: [],
+      bcc_addresses: [],
+      to_recipients: [{ email_address: 'me@example.com', contact: null }],
+      cc_recipients: [],
+      bcc_recipients: [],
+      message_id_header: '<mail-reopen@test>',
+      in_reply_to_header: null,
+      references_header: null,
+      snippet: null,
+      gmail_link: 'https://mail.google.com/mail/u/0/#inbox/gmail_mail_reopen',
+      external_starred: false,
+      body_text: 'This mail checks reopen navigation.',
+      body_html: null,
+      gmail_labels: [],
+      attachments: [],
+      created_at: '2026-05-24T10:00:00+09:00',
+      updated_at: '2026-05-24T10:00:00+09:00',
+      version: 1,
+    }
+    let processed = false
+    const detailResponse = () => ({
+      ok: true,
+      data: {
+        message: {
+          ...baseMail,
+          processed_status: processed ? 'processed' : 'unprocessed',
+        },
+        thread_messages: [
+          {
+            ...baseMail,
+            processed_status: processed ? 'processed' : 'unprocessed',
+          },
+        ],
+        scheduled_send_requests: [],
+        user_state: {
+          user_importance: null,
+          processed_status: processed ? 'processed' : 'unprocessed',
+          processed_at: processed ? '2026-05-24T10:02:00+09:00' : null,
+          read_status: 'read',
+          read_at: '2026-05-24T10:01:00+09:00',
+          version: processed ? 2 : 1,
+        },
+        auto_state: {
+          external_importance: null,
+          suggested_importance: null,
+          llm_run_id: null,
+          effective_importance: 'high',
+          pending_reason: null,
+        },
+        summary: null,
+        available_actions: [],
+      },
+    })
+    const fetchMock = vi.fn((input: string | URL | Request, init?: RequestInit) => {
+      const path = input.toString()
+      if (path === '/api/v1/auth/session') {
+        return activeSessionResponse()
+      }
+      if (path === '/api/v1/contacts/unresolved-from-addresses') {
+        return apiResponse(200, { ok: true, data: { items: [] } })
+      }
+      if (path === '/api/v1/profile') {
+        return apiResponse(200, {
+          ok: true,
+          data: {
+            display_name: '',
+            primary_email: 'me@example.com',
+            email_aliases: [],
+            affiliation: '',
+            academic_title: '',
+            lab_or_group: '',
+            research_fields: '',
+            teaching_responsibilities: '',
+            committee_roles: '',
+            administrative_roles: '',
+            supervised_people: '',
+            collaborators: '',
+            important_projects: '',
+            priority_keywords: '',
+            low_priority_keywords: '',
+            important_senders_or_domains: '',
+            expected_response_policy: '',
+            unavailable_times: '',
+            default_reply_language: 'japanese',
+            llm_self_description: '',
+            mail_importance_notes: '',
+            updated_at: null,
+          },
+        })
+      }
+      if (path === '/api/v1/mails/mail_reopen') {
+        return apiResponse(200, detailResponse())
+      }
+      if (path === '/api/v1/mails/mail_reopen/process' && init?.method === 'POST') {
+        processed = true
+        return apiResponse(200, detailResponse())
+      }
+      if (path === '/api/v1/mails/mail_reopen/unprocess' && init?.method === 'POST') {
+        processed = false
+        return apiResponse(200, detailResponse())
+      }
+      throw new Error(`Unexpected request: ${path} ${init?.method ?? 'GET'}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    window.history.pushState(
+      {},
+      '',
+      '/mail/mail_reopen?return_to=%2Fmail%3Ftab%3Dunprocessed%26date%3D2026-05-24',
+    )
+
+    render(<App />)
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Reopen check' }),
+    ).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Complete' }))
+    expect(await screen.findByRole('button', { name: 'Reopen' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Reopen' }))
+
+    await new Promise((resolve) => window.setTimeout(resolve, 1600))
+    expect(`${window.location.pathname}${window.location.search}`).toBe(
+      '/mail/mail_reopen?return_to=%2Fmail%3Ftab%3Dunprocessed%26date%3D2026-05-24',
+    )
   })
 
   it('collapses Japanese Gmail quoted reply sections in sent mail bodies', async () => {
@@ -2121,6 +2686,100 @@ describe('Phase 2 maintenance screen', () => {
   })
 })
 
+describe('Profile screen', () => {
+  it('shows supervised people and collaborators from contact tags', async () => {
+    const user = userEvent.setup()
+    navigateTo('/profile')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request) => {
+        const path = input.toString()
+        if (path === '/api/v1/auth/session') {
+          return activeSessionResponse()
+        }
+        if (path === '/api/v1/profile') {
+          return apiResponse(200, {
+            ok: true,
+            data: {
+              display_name: 'Kazumasa Horie',
+              primary_email: 'horie@example.edu',
+              email_aliases: [],
+              affiliation: 'University',
+              academic_title: 'Faculty',
+              lab_or_group: 'Lab',
+              research_fields: 'Sleep AI',
+              teaching_responsibilities: '',
+              committee_roles: '',
+              administrative_roles: '',
+              supervised_people: '',
+              collaborators: '',
+              important_projects: '',
+              priority_keywords: '',
+              low_priority_keywords: '',
+              important_senders_or_domains: '',
+              expected_response_policy: '',
+              unavailable_times: '',
+              default_reply_language: 'japanese',
+              llm_self_description: '',
+              mail_importance_notes: '',
+              updated_at: '2026-06-03T18:00:00+09:00',
+            },
+          })
+        }
+        if (path === '/api/v1/contacts') {
+          return apiResponse(200, {
+            ok: true,
+            data: {
+              items: [
+                {
+                  id: 'contact_student',
+                  display_name: 'Supervised Student',
+                  avatar_url: 'data:image/png;base64,student',
+                  user_memo: null,
+                  ai_memo: null,
+                  status: 'active',
+                  tags: ['supervised-student'],
+                  email_addresses: [],
+                  latest_received_at: null,
+                  inbound_message_count: 0,
+                  created_at: '2026-06-03T18:00:00+09:00',
+                  updated_at: '2026-06-03T18:00:00+09:00',
+                  version: 1,
+                },
+                {
+                  id: 'contact_collaborator',
+                  display_name: 'Clinical Collaborator',
+                  avatar_url: null,
+                  user_memo: null,
+                  ai_memo: null,
+                  status: 'active',
+                  tags: ['collaborator'],
+                  email_addresses: [],
+                  latest_received_at: null,
+                  inbound_message_count: 0,
+                  created_at: '2026-06-03T18:00:00+09:00',
+                  updated_at: '2026-06-03T18:00:00+09:00',
+                  version: 1,
+                },
+              ],
+            },
+          })
+        }
+        throw new Error(`Unexpected request: ${path}`)
+      }),
+    )
+
+    render(<App />)
+
+    expect(await screen.findByText('Supervised People')).toBeInTheDocument()
+    expect(screen.getByText('Collaborators')).toBeInTheDocument()
+    await user.click(screen.getByText('Supervised People'))
+    expect(screen.getByText('Supervised Student')).toBeVisible()
+    await user.click(screen.getByText('Collaborators'))
+    expect(screen.getByText('Clinical Collaborator')).toBeVisible()
+  })
+})
+
 describe('Phase 3 contacts screen', () => {
   beforeEach(() => {
     window.history.pushState({}, '', '/contacts')
@@ -2227,12 +2886,17 @@ describe('Phase 3 contacts screen', () => {
     expect(screen.getByRole('option', { name: 'Most mail received' })).toBeInTheDocument()
     expect(screen.queryByRole('option', { name: 'Status' })).not.toBeInTheDocument()
     expect(screen.getByRole('tablist', { name: 'Contact List views' })).toBeInTheDocument()
+    expect(screen.getByRole('tablist', { name: 'Contact kind' })).toBeInTheDocument()
+    expect(
+      within(screen.getByRole('tablist', { name: 'Contact kind' }))
+        .getAllByRole('tab')
+        .map((tab) => tab.textContent),
+    ).toEqual(['Person', 'Mailing list', 'Service'])
     const tabList = screen.getByRole('tablist', { name: 'Contact List views' })
     expect(within(tabList).getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
       'All',
       'active',
       '+',
-      'Mailing list',
       'archived',
       'Skip',
       'SPAM',
@@ -2257,6 +2921,7 @@ describe('Phase 3 contacts screen', () => {
     expect(screen.queryByText('Example List')).not.toBeInTheDocument()
     expect(screen.getByText('student@example.com')).toBeInTheDocument()
     expect(screen.getAllByText('student').length).toBeGreaterThan(0)
+    await user.click(screen.getByRole('button', { name: 'Other tags (3)' }))
     expect(screen.getByRole('button', { name: '遲第ｳ｢螟ｧ蟄ｦ 1' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'mailing-list 1' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'student 1' })).toBeInTheDocument()
@@ -2265,10 +2930,13 @@ describe('Phase 3 contacts screen', () => {
     expect(screen.queryByText('Example List')).not.toBeInTheDocument()
     await user.clear(screen.getByLabelText('Search contacts'))
     await user.click(screen.getByRole('tab', { name: 'Skip' }))
+    expect(screen.queryByText('Example List')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('tab', { name: 'Mailing list' }))
     expect(screen.getByText('Example List')).toBeInTheDocument()
     expect(screen.getByText('sender:Reply-To')).toBeInTheDocument()
     expect(screen.getByText('{faculty&public-relations}')).toBeInTheDocument()
     expect(screen.queryByText('Example Student')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('tab', { name: 'Person' }))
     await user.click(screen.getByRole('tab', { name: 'active' }))
     await user.type(screen.getByLabelText('Search contacts'), 'Example missing')
     expect(screen.queryByText('Example Student')).not.toBeInTheDocument()
@@ -2279,12 +2947,21 @@ describe('Phase 3 contacts screen', () => {
     const user = userEvent.setup()
     vi.stubGlobal(
       'fetch',
-      vi.fn((input: string | URL | Request) => {
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
         const path = input.toString()
         if (path === '/api/v1/auth/session') {
           return activeSessionResponse()
         }
         if (path === '/api/v1/contacts/custom-tabs') {
+          if (init?.method === 'PUT') {
+            const payload = JSON.parse(String(init.body)) as {
+              items: Array<{ id: string; label: string; expression: string }>
+            }
+            return apiResponse(200, {
+              ok: true,
+              data: { items: payload.items },
+            })
+          }
           return apiResponse(200, {
             ok: true,
             data: { items: [] },
@@ -2375,10 +3052,25 @@ describe('Phase 3 contacts screen', () => {
     const user = userEvent.setup()
     vi.stubGlobal(
       'fetch',
-      vi.fn((input: string | URL | Request) => {
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
         const path = input.toString()
         if (path === '/api/v1/auth/session') {
           return activeSessionResponse()
+        }
+        if (path === '/api/v1/contacts/custom-tabs') {
+          if (init?.method === 'PUT') {
+            const payload = JSON.parse(String(init.body)) as {
+              items: Array<{ id: string; label: string; expression: string }>
+            }
+            return apiResponse(200, {
+              ok: true,
+              data: { items: payload.items },
+            })
+          }
+          return apiResponse(200, {
+            ok: true,
+            data: { items: [] },
+          })
         }
         if (path === '/api/v1/contacts') {
           return apiResponse(200, {
@@ -2403,7 +3095,7 @@ describe('Phase 3 contacts screen', () => {
                 avatar_url: null,
                 user_memo: null,
                   status: 'active',
-                  tags: ['tsukuba', 'student', 'KDE'],
+                  tags: ['tsukuba', 'student', 'lab-member'],
                   email_addresses: [],
                   created_at: '2026-05-23T09:00:00+09:00',
                   updated_at: '2026-05-23T09:00:00+09:00',
@@ -2436,20 +3128,20 @@ describe('Phase 3 contacts screen', () => {
     render(<App />)
 
     expect(await screen.findByText('Example Student')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'KDE 1' }))
+    await user.click(screen.getByRole('button', { name: 'Other tags (3)' }))
+    await user.click(screen.getByRole('button', { name: 'lab-member 1' }))
 
     expect(screen.queryByText('Example Student')).not.toBeInTheDocument()
     expect(screen.getByText('KDE Student')).toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: 'KDE 1' }))
+    await user.click(screen.getByRole('button', { name: 'lab-member 1' }))
     await user.click(screen.getByRole('tab', { name: 'Skip' }))
 
     expect(screen.queryByText('Example Student')).not.toBeInTheDocument()
-    expect(screen.getByText('Example List')).toBeInTheDocument()
-    await user.click(screen.getByRole('tab', { name: 'Mailing list' }))
     expect(screen.queryByText('Example List')).not.toBeInTheDocument()
-    await user.click(screen.getByRole('tab', { name: 'Skip' }))
+    await user.click(screen.getByRole('tab', { name: 'Mailing list' }))
     expect(screen.getByText('Example List')).toBeInTheDocument()
+    await user.click(screen.getByRole('tab', { name: 'Person' }))
 
     await user.click(screen.getByRole('tab', { name: '+' }))
     expect(screen.getByRole('tabpanel', { name: '+ Contact List' })).toBeInTheDocument()
@@ -2457,14 +3149,17 @@ describe('Phase 3 contacts screen', () => {
     expect(screen.getByText('Example Student')).toBeInTheDocument()
     expect(screen.getByText('KDE Student')).toBeInTheDocument()
     await user.type(screen.getByLabelText('Custom tab name'), 'TsukubaLab')
-    await user.type(screen.getByLabelText('Tag expression'), 'tsukuba&student&!KDE')
+    await user.type(screen.getByLabelText('Tag expression'), 'tsukuba&student&!lab-member')
     expect(screen.getByText('Example Student')).toBeInTheDocument()
     expect(screen.queryByText('KDE Student')).not.toBeInTheDocument()
     expect(screen.queryByText('Example List')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'OK' }))
+    await user.click(await screen.findByRole('tab', { name: 'TsukubaLab' }))
 
-    expect(screen.getByText('Example Student')).toBeInTheDocument()
-    expect(screen.queryByText('KDE Student')).not.toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getByText('Example Student')).toBeInTheDocument()
+      expect(screen.queryByText('KDE Student')).not.toBeInTheDocument()
+    })
     expect(screen.queryByText('Example List')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Delete tab' })).toBeInTheDocument()
     expect(within(screen.getByRole('tablist', { name: 'Contact List views' })).getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
@@ -2472,7 +3167,6 @@ describe('Phase 3 contacts screen', () => {
       'active',
       'TsukubaLab',
       '+',
-      'Mailing list',
       'archived',
       'Skip',
       'SPAM',

@@ -5,12 +5,14 @@ import type { MessageKey } from './i18n'
 import { AppLink, navigateTo } from './navigation'
 import defaultContactAvatarUrl from './assets/default-contact-avatar.svg'
 import defaultMailingListAvatarUrl from './assets/default-mailing-list-avatar.svg'
+import defaultServiceAvatarUrl from './assets/default-service-avatar.svg'
 import defaultSpamAvatarUrl from './assets/default-spam-avatar.webp'
 import gmailIconUrl from './assets/gmail-icon-2020.svg'
 import paperclipDiagonalUrl from './assets/paperclip-diagonal.svg'
 import unknownContactAvatarUrl from './assets/default-unknown-contact-avatar.svg'
 import {
   cancelMailSendRequest,
+  assignMailThreadToCase,
   enqueueMailAttachmentFetchJob,
   getMailDetail,
   markMailRead,
@@ -19,11 +21,15 @@ import {
   requestMailSummary,
   rescheduleMailRequest,
   sendMailRequestNow,
+  unassignMailThreadFromCase,
   unprocessMail,
   updateMailImportance,
 } from './phase4Api'
 import type { MailAttachment, MailDetail, MailSendRequest, MailThreadMessage } from './phase4Api'
 import type { MailRecipient } from './phase4Api'
+import { listCases } from './phase7Api'
+import type { CaseItem } from './phase7Api'
+import { getProfile } from './profileApi'
 
 type MailThreadViewProps = {
   messageId: string
@@ -55,6 +61,38 @@ function recipientsFor(addresses: string[], recipients?: MailRecipient[]) {
     email_address: emailAddress,
     contact: null,
   }))
+}
+
+function normalizedRecipientAddress(address: string) {
+  return address.trim().toLowerCase()
+}
+
+function uniqueRecipientAddresses(
+  recipients: MailRecipient[],
+  excludedAddresses: string[] = [],
+) {
+  const excluded = new Set(excludedAddresses.map(normalizedRecipientAddress))
+  const seen = new Set<string>()
+  const addresses: string[] = []
+  for (const recipient of recipients) {
+    const normalized = normalizedRecipientAddress(recipient.email_address)
+    if (normalized === '' || excluded.has(normalized) || seen.has(normalized)) {
+      continue
+    }
+    seen.add(normalized)
+    addresses.push(recipient.email_address)
+  }
+  return addresses
+}
+
+function isExcludedRecipientAddress(address: string, excludedAddresses: string[]) {
+  const normalized = normalizedRecipientAddress(address)
+  return (
+    normalized === '' ||
+    excludedAddresses
+      .map(normalizedRecipientAddress)
+      .some((excludedAddress) => excludedAddress === normalized)
+  )
 }
 
 function senderRecipient(message: MailThreadMessage): MailRecipient {
@@ -94,13 +132,99 @@ function isSentMessage(message: MailThreadMessage) {
 function isIncompleteActionRequiredIncomingMessage(message: MailThreadMessage) {
   return (
     !isSentMessage(message) &&
-    isActionRequiredImportance(message.effective_importance) &&
-    message.processed_status !== 'processed'
+    message.pending_reason === null &&
+    message.processed_status !== 'processed' &&
+    ['high', 'middle', 'pending', 'unclassified'].includes(message.effective_importance)
   )
 }
 
-function isActionRequiredImportance(importance: string) {
-  return ['high', 'middle', 'pending', 'unclassified'].includes(importance)
+function isIncompleteNeedsActionIncomingMessage(message: MailThreadMessage) {
+  return (
+    !isSentMessage(message) &&
+    message.pending_reason === null &&
+    message.processed_status !== 'processed' &&
+    ['high', 'middle'].includes(message.effective_importance)
+  )
+}
+
+function importanceRank(importance: string) {
+  const ranks: Record<string, number> = {
+    pinned: 0,
+    high: 1,
+    middle: 2,
+    low: 3,
+    pending: 4,
+    unclassified: 5,
+    skip: 6,
+    sent: 7,
+  }
+  return ranks[importance] ?? 99
+}
+
+function aggregateThreadListState(messages: MailThreadMessage[]) {
+  const displayGroup = messages.filter((message) => !isSentMessage(message))
+  const targetGroup = displayGroup.length > 0 ? displayGroup : messages
+  const latestMessage = [...targetGroup].sort(
+    (left, right) =>
+      right.received_at.localeCompare(left.received_at) || right.id.localeCompare(left.id),
+  )[0]
+  const processedStatus =
+    targetGroup.length > 0 && targetGroup.every((message) => isSentMessage(message))
+      ? 'processed'
+      : targetGroup.some((message) => message.processed_status === 'unprocessed')
+        ? 'unprocessed'
+        : 'processed'
+  const importanceCandidates = targetGroup
+    .map((message) => message.user_importance ?? message.effective_importance)
+    .filter((importance) => importance !== 'skip')
+  const effectiveImportance =
+    importanceCandidates.length === 0
+      ? 'skip'
+      : importanceCandidates.sort(
+          (left, right) =>
+            importanceRank(left) - importanceRank(right) || left.localeCompare(right),
+        )[0]
+  return {
+    effectiveImportance,
+    latestPendingReason: latestMessage?.pending_reason ?? null,
+    processedStatus,
+  }
+}
+
+function detailStillVisibleInReturnTo(detail: MailDetail, returnTo: string) {
+  const destination = new URL(returnTo, window.location.origin)
+  if (destination.pathname === '/mail/action-needed') {
+    return detail.thread_messages.some(isIncompleteNeedsActionIncomingMessage)
+  }
+  if (destination.pathname !== '/mail') {
+    return true
+  }
+
+  const tab = destination.searchParams.get('tab') ?? 'unprocessed'
+  const date = destination.searchParams.get('date')
+  const messages =
+    date === null
+      ? detail.thread_messages
+      : detail.thread_messages.filter((message) => message.received_at.slice(0, 10) === date)
+  if (messages.length === 0) {
+    return false
+  }
+  const listState = aggregateThreadListState(messages)
+  if (tab === 'skip') {
+    return listState.latestPendingReason === null && listState.effectiveImportance === 'skip'
+  }
+  if (tab === 'processed') {
+    return (
+      listState.latestPendingReason === null &&
+      listState.effectiveImportance !== 'skip' &&
+      listState.processedStatus === 'processed'
+    )
+  }
+  return (
+    listState.latestPendingReason === null &&
+    listState.effectiveImportance !== 'skip' &&
+    listState.processedStatus === 'unprocessed'
+  )
 }
 
 function latestReceivedMailDate(threadMessages: MailThreadMessage[]) {
@@ -794,15 +918,27 @@ function composeFollowUpBody(message: MailThreadMessage) {
   return `On ${formatDateTime(message.received_at)}, I wrote:\n${quotedBody}`
 }
 
-function replyHrefFor(message: MailThreadMessage) {
+function replyHrefFor(
+  message: MailThreadMessage,
+  ownedEmailAddresses: string[] = [],
+) {
+  const replyToAddress = message.reply_to_address ?? message.from_address
+  const toRecipients = recipientsFor(message.to_addresses, message.to_recipients)
+  const ccRecipients = recipientsFor(message.cc_addresses, message.cc_recipients)
+  const candidateRecipients = [...toRecipients, ...ccRecipients]
+  const toAddress = isExcludedRecipientAddress(replyToAddress, ownedEmailAddresses)
+    ? uniqueRecipientAddresses(candidateRecipients, ownedEmailAddresses)[0] ?? ''
+    : replyToAddress
   const params = new URLSearchParams({
-    to: message.reply_to_address ?? message.from_address,
+    to: toAddress,
     subject: message.subject ?? '',
     auto_body: composeReplyBody(message),
     reply_to_message_id: message.id,
   })
-  const ccRecipients = recipientsFor(message.cc_addresses, message.cc_recipients)
-  const ccAddresses = ccRecipients.map((recipient) => recipient.email_address)
+  const ccAddresses = uniqueRecipientAddresses(
+    candidateRecipients,
+    [toAddress, replyToAddress, ...ownedEmailAddresses],
+  )
   if (ccAddresses.length > 0) {
     params.set('cc', ccAddresses.join(', '))
   }
@@ -927,7 +1063,8 @@ function returnToHrefFromLocation() {
     if (
       destination.origin !== window.location.origin ||
       !destination.pathname.startsWith('/mail') ||
-      destination.pathname.startsWith('/mail/')
+      (destination.pathname.startsWith('/mail/') &&
+        destination.pathname !== '/mail/action-needed')
     ) {
       return null
     }
@@ -951,6 +1088,8 @@ function contactAvatarUrl(contact: MailRecipient['contact']) {
       ? defaultSpamAvatarUrl
       : contact.kind === 'mailing_list'
         ? defaultMailingListAvatarUrl
+        : contact.kind === 'service'
+          ? defaultServiceAvatarUrl
         : defaultContactAvatarUrl)
   )
 }
@@ -965,6 +1104,9 @@ function recipientTags(recipient: MailRecipient) {
   }
   if (recipient.contact.kind === 'mailing_list') {
     return [t('contacts.kind.mailingList')]
+  }
+  if (recipient.contact.kind === 'service') {
+    return [t('contacts.kind.service')]
   }
   const tags = recipient.contact.tags ?? []
   return tags.length > 0 ? tags.slice(0, 2) : [t('contacts.kind.person')]
@@ -1054,12 +1196,18 @@ function focusMessageIdFromLocation() {
 }
 
 function MailThreadView({ messageId }: MailThreadViewProps) {
+  const caseAssignDatalistId = useId()
   const [detail, setDetail] = useState<MailDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [busyAction, setBusyAction] = useState<string | null>(null)
   const [importanceMenuId, setImportanceMenuId] = useState<string | null>(null)
   const [movingAttachmentId, setMovingAttachmentId] = useState<string | null>(null)
+  const [ownedEmailAddresses, setOwnedEmailAddresses] = useState<string[]>([])
+  const [caseAssignEditing, setCaseAssignEditing] = useState(false)
+  const [caseAssignInput, setCaseAssignInput] = useState('')
+  const [caseCandidates, setCaseCandidates] = useState<CaseItem[]>([])
+  const [caseAssignBusy, setCaseAssignBusy] = useState(false)
   const [attachmentMenu, setAttachmentMenu] = useState<{
     attachment: MailAttachment
     x: number
@@ -1068,10 +1216,33 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
   const targetRef = useRef<HTMLDivElement | null>(null)
   const didScrollToTargetRef = useRef(false)
   const pendingInboxNavigationRef = useRef<{
-    cleanup: () => void
     timeoutId: number
   } | null>(null)
-  const focusMessageId = focusMessageIdFromLocation() ?? messageId
+  const requestedFocusMessageId = focusMessageIdFromLocation()
+  const focusMessageId = requestedFocusMessageId ?? messageId
+
+  useEffect(() => {
+    let isMounted = true
+    getProfile()
+      .then((profile) => {
+        if (!isMounted) {
+          return
+        }
+        setOwnedEmailAddresses(
+          [profile.primary_email, ...profile.email_aliases].filter(
+            (address) => address.trim() !== '',
+          ),
+        )
+      })
+      .catch(() => {
+        if (isMounted) {
+          setOwnedEmailAddresses([])
+        }
+      })
+    return () => {
+      isMounted = false
+    }
+  }, [])
 
   useEffect(() => {
     let isMounted = true
@@ -1104,11 +1275,36 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
   }, [messageId])
 
   useEffect(() => {
-    if (detail !== null && !didScrollToTargetRef.current) {
-      targetRef.current?.scrollIntoView?.({ block: 'center', inline: 'nearest' })
+    if (!caseAssignEditing || caseCandidates.length > 0) {
+      return
+    }
+    let isMounted = true
+    listCases('all')
+      .then((items) => {
+        if (isMounted) {
+          setCaseCandidates(items)
+        }
+      })
+      .catch((requestError) => {
+        if (isMounted) {
+          setError(describeError(requestError))
+        }
+      })
+    return () => {
+      isMounted = false
+    }
+  }, [caseAssignEditing, caseCandidates.length])
+
+  useEffect(() => {
+    if (
+      requestedFocusMessageId !== null &&
+      detail !== null &&
+      !didScrollToTargetRef.current
+    ) {
+      targetRef.current?.scrollIntoView?.({ block: 'start', inline: 'nearest' })
       didScrollToTargetRef.current = true
     }
-  }, [detail])
+  }, [detail, requestedFocusMessageId])
 
   useEffect(() => {
     if (
@@ -1164,33 +1360,39 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
       return
     }
     window.clearTimeout(pendingNavigation.timeoutId)
-    pendingNavigation.cleanup()
     pendingInboxNavigationRef.current = null
   }
 
-  function scheduleInboxNavigation(date: string | undefined) {
+  function scheduleNavigation(destination: string) {
     cancelPendingInboxNavigation()
 
-    const destination =
-      returnToHrefFromLocation() ??
-      (date === undefined
-        ? '/mail?tab=unprocessed'
-        : `/mail?tab=unprocessed&date=${encodeURIComponent(date)}`)
-    const cancelOnUserOperation = () => {
-      cancelPendingInboxNavigation()
-    }
-    window.addEventListener('pointerdown', cancelOnUserOperation, { capture: true })
-    window.addEventListener('keydown', cancelOnUserOperation, { capture: true })
-    const cleanup = () => {
-      window.removeEventListener('pointerdown', cancelOnUserOperation, { capture: true })
-      window.removeEventListener('keydown', cancelOnUserOperation, { capture: true })
-    }
     const timeoutId = window.setTimeout(() => {
-      pendingInboxNavigationRef.current?.cleanup()
       pendingInboxNavigationRef.current = null
       navigateTo(destination)
     }, 1500)
-    pendingInboxNavigationRef.current = { cleanup, timeoutId }
+    pendingInboxNavigationRef.current = { timeoutId }
+  }
+
+  function scheduleInboxNavigation(date: string | undefined) {
+    scheduleNavigation(
+      date === undefined
+        ? '/mail?tab=unprocessed'
+        : `/mail?tab=unprocessed&date=${encodeURIComponent(date)}`,
+    )
+  }
+
+  function scheduleReturnToNavigationIfResolved(nextDetail: MailDetail) {
+    const returnTo = returnToHrefFromLocation()
+    if (returnTo !== null) {
+      if (!detailStillVisibleInReturnTo(nextDetail, returnTo)) {
+        scheduleNavigation(returnTo)
+      }
+      return
+    }
+    if (!nextDetail.thread_messages.some(isIncompleteActionRequiredIncomingMessage)) {
+      const inboxDate = latestReceivedMailDate(nextDetail.thread_messages)
+      scheduleInboxNavigation(inboxDate)
+    }
   }
 
   async function runAction(
@@ -1274,6 +1476,58 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
     return getMailDetail(messageId)
   }
 
+  function selectedCaseCandidate() {
+    const query = caseAssignInput.trim()
+    if (query === '') {
+      return null
+    }
+    const normalizedQuery = query.toLowerCase()
+    const exactMatches = caseCandidates.filter(
+      (item) => item.id === query || item.name.toLowerCase() === normalizedQuery,
+    )
+    if (exactMatches.length === 1) {
+      return exactMatches[0]
+    }
+    const prefixMatches = caseCandidates.filter((item) =>
+      item.name.toLowerCase().startsWith(normalizedQuery),
+    )
+    return prefixMatches.length === 1 ? prefixMatches[0] : null
+  }
+
+  async function handleAssignCase() {
+    const selectedCase = selectedCaseCandidate()
+    if (selectedCase === null) {
+      setError(t('mail.thread.caseAssignInvalid'))
+      return
+    }
+    setCaseAssignBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      setDetail(await assignMailThreadToCase(messageId, selectedCase.id))
+      setCaseAssignInput('')
+      setNotice(t('mail.thread.caseAssigned', { name: selectedCase.name }))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setCaseAssignBusy(false)
+    }
+  }
+
+  async function handleUnassignCase(caseId: string, caseTitle: string) {
+    setCaseAssignBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      setDetail(await unassignMailThreadFromCase(messageId, caseId))
+      setNotice(t('mail.thread.caseUnassigned', { name: caseTitle }))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setCaseAssignBusy(false)
+    }
+  }
+
   async function requestSummaryAndRefresh(messageIdToSummarize: string) {
     await requestMailSummary(messageIdToSummarize)
     return refreshUntilMailSummary(messageIdToSummarize)
@@ -1317,25 +1571,12 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
             `${message.id}-done`,
             async () => {
               if (isProcessed) {
+                cancelPendingInboxNavigation()
                 await unprocessMail(message.id)
               } else {
-                const hadActionRequiredIncomingMessage =
-                  detail?.thread_messages.some(
-                    isIncompleteActionRequiredIncomingMessage,
-                  ) === true
                 const nextDetail = await processMail(message.id)
-                const hasRemainingActionRequiredIncomingMessage =
-                  nextDetail.thread_messages.some(
-                    isIncompleteActionRequiredIncomingMessage,
-                  )
-                if (
-                  hadActionRequiredIncomingMessage &&
-                  !hasRemainingActionRequiredIncomingMessage
-                ) {
-                  const inboxDate = latestReceivedMailDate(nextDetail.thread_messages)
-                  scheduleInboxNavigation(inboxDate)
-                  return nextDetail
-                }
+                scheduleReturnToNavigationIfResolved(nextDetail)
+                return nextDetail
               }
               return getMailDetail(messageId)
             },
@@ -1369,7 +1610,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
               : t('common.notImplemented'),
         onClick: () => {
           if (key === 'mail.thread.action.reply') {
-            navigateTo(replyHrefFor(message))
+            navigateTo(replyHrefFor(message, ownedEmailAddresses))
             return
           }
           if (key !== 'mail.thread.action.summary') {
@@ -1501,6 +1742,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
     return receivedOrder !== 0 ? receivedOrder : second.id.localeCompare(first.id)
   })
   const summaryItems = detail.summary?.items ?? []
+  const assignedCaseLinks = detail.case_links ?? []
   const focusedMessage =
     detail.thread_messages.find((threadMessage) => threadMessage.id === focusMessageId) ??
     detail.thread_messages.find((threadMessage) => threadMessage.id === messageId) ??
@@ -1549,6 +1791,87 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                 </a>
               )}
             </div>
+            <div className="mail-thread-case-links">
+              <span>{t('mail.thread.assignedCases')}</span>
+              <div className="mail-thread-case-badges">
+                {assignedCaseLinks.length === 0 ? (
+                  <span className="mail-thread-case-empty">
+                    {t('mail.thread.noAssignedCases')}
+                  </span>
+                ) : (
+                  assignedCaseLinks.map((caseLink) => (
+                    <span className="mail-thread-case-badge-wrap" key={caseLink.case_id}>
+                      {caseAssignEditing ? (
+                        <span className="mail-thread-case-badge mail-thread-case-badge-editing">
+                          {caseLink.title}
+                        </span>
+                      ) : (
+                        <AppLink
+                          className="mail-thread-case-badge"
+                          href={`/cases/${encodeURIComponent(caseLink.case_id)}`}
+                        >
+                          {caseLink.title}
+                        </AppLink>
+                      )}
+                      {caseAssignEditing && (
+                        <button
+                          aria-label={t('mail.thread.caseUnassign', {
+                            name: caseLink.title,
+                          })}
+                          className="mail-thread-case-badge-remove"
+                          disabled={caseAssignBusy}
+                          onClick={() => void handleUnassignCase(caseLink.case_id, caseLink.title)}
+                          type="button"
+                        >
+                          ×
+                        </button>
+                      )}
+                    </span>
+                  ))
+                )}
+              </div>
+              <button
+                aria-expanded={caseAssignEditing}
+                className="mail-thread-case-settings"
+                onClick={() => setCaseAssignEditing((current) => !current)}
+                title={t('mail.thread.caseAssignSettings')}
+                type="button"
+              >
+                {t('mail.thread.caseAssignSettingsShort')}
+              </button>
+            </div>
+            {caseAssignEditing && (
+              <div className="mail-thread-case-editor">
+                <div className="mail-thread-case-editor-input">
+                  <label htmlFor="mail-thread-case-input">
+                    {t('mail.thread.caseAssignInput')}
+                  </label>
+                  <input
+                    autoComplete="off"
+                    disabled={caseAssignBusy}
+                    id="mail-thread-case-input"
+                    list={caseAssignDatalistId}
+                    onChange={(event) => setCaseAssignInput(event.currentTarget.value)}
+                    placeholder={t('mail.thread.caseAssignPlaceholder')}
+                    type="text"
+                    value={caseAssignInput}
+                  />
+                  <datalist id={caseAssignDatalistId}>
+                    {caseCandidates.map((item) => (
+                      <option key={item.id} value={item.name} />
+                    ))}
+                  </datalist>
+                  <button
+                    className={`button-loading-dot${caseAssignBusy ? ' is-loading' : ''}`}
+                    disabled={caseAssignBusy || caseAssignInput.trim() === ''}
+                    onClick={() => void handleAssignCase()}
+                    type="button"
+                  >
+                    {t('common.ok')}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
           <nav className="mail-thread-nav" aria-label={t('mail.thread.navLabel')}>
             <AppLink href={mailListHref}>{t('mail.heading')}</AppLink>
@@ -1908,15 +2231,6 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                       <h3>{t('mail.thread.action.summarizing')}</h3>
                       <p>{t('mail.thread.summaryInProgress')}</p>
                     </section>
-                  )}
-
-                  {messageSummary?.translation_text != null && (
-                    <details className="mail-thread-section mail-thread-head-details">
-                      <summary>{t('mail.thread.translation')}</summary>
-                      <pre className="mail-thread-body">
-                        <LinkifiedText text={messageSummary.translation_text} />
-                      </pre>
-                    </details>
                   )}
 
                   {messageSummary === undefined ? (

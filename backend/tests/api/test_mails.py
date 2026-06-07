@@ -9,6 +9,7 @@ CONTACTS_URL = "/api/v1/contacts"
 MOCK_MAILS_URL = "/api/v1/mails/mock-ingest"
 MAILS_URL = "/api/v1/mails"
 MAIL_DRAFTS_URL = "/api/v1/mail-drafts"
+CASES_URL = "/api/v1/cases"
 
 
 def ingest_mail(
@@ -74,6 +75,172 @@ def create_known_sender_mail(client, *, subject: str, body_text: str = "") -> st
         },
     )
     return response.json()["data"]["message_id"]
+
+
+def test_mail_thread_can_be_assigned_to_case(client) -> None:
+    case_response = client.post(
+        CASES_URL,
+        json={
+            "name": "Assigned Thread Case",
+            "description": None,
+            "progress_status": "in_progress",
+            "ball_status": "user",
+        },
+    )
+    assert case_response.status_code == 200
+    case_id = case_response.json()["data"]["case"]["id"]
+    first_message_id = ingest_mail(
+        client,
+        gmail_message_id="gmail_case_assign_1",
+        gmail_thread_id="thread_case_assign",
+        from_address="assign.sender@example.com",
+        subject="Assign me",
+        received_at="2026-06-05T10:00:00+09:00",
+        body_text="First message.",
+    )
+    second_message_id = ingest_mail(
+        client,
+        gmail_message_id="gmail_case_assign_2",
+        gmail_thread_id="thread_case_assign",
+        from_address="assign.sender@example.com",
+        subject="Assign me",
+        received_at="2026-06-05T11:00:00+09:00",
+        body_text="Second message.",
+    )
+
+    assign_response = client.post(
+        f"{MAILS_URL}/{first_message_id}/case-links",
+        json={"case_id": case_id},
+    )
+    assert assign_response.status_code == 200
+    assert assign_response.json()["data"]["case_links"] == [
+        {
+            "id": case_id,
+            "case_id": case_id,
+            "title": "Assigned Thread Case",
+        }
+    ]
+
+    second_detail = client.get(f"{MAILS_URL}/{second_message_id}")
+    assert second_detail.status_code == 200
+    assert second_detail.json()["data"]["case_links"][0]["case_id"] == case_id
+
+    unassign_response = client.delete(
+        f"{MAILS_URL}/{second_message_id}/case-links/{case_id}",
+    )
+    assert unassign_response.status_code == 200
+    assert unassign_response.json()["data"]["case_links"] == []
+
+    first_detail = client.get(f"{MAILS_URL}/{first_message_id}")
+    assert first_detail.json()["data"]["case_links"] == []
+
+
+def test_mail_ingestion_applies_case_auto_assign_rules(client) -> None:
+    case_ids: dict[str, str] = {}
+    for name in ("Rule Active Case", "Rule Completed Case", "Rule Archived Case"):
+        response = client.post(
+            CASES_URL,
+            json={
+                "name": name,
+                "description": None,
+                "progress_status": "in_progress",
+                "ball_status": "user",
+            },
+        )
+        assert response.status_code == 200
+        case_ids[name] = response.json()["data"]["case"]["id"]
+
+    assert (
+        client.post(f"{CASES_URL}/{case_ids['Rule Completed Case']}/complete").status_code
+        == 200
+    )
+    assert (
+        client.post(f"{CASES_URL}/{case_ids['Rule Archived Case']}/archive").status_code
+        == 200
+    )
+
+    for case_id in case_ids.values():
+        rule_response = client.post(
+            f"{CASES_URL}/{case_id}/auto-assign-rules",
+            json={"sender_email": "papers@example.com"},
+        )
+        assert rule_response.status_code == 200
+        assert rule_response.json()["data"]["rule"]["rule_value"] == "papers@example.com"
+
+    list_response = client.get(
+        f"{CASES_URL}/{case_ids['Rule Active Case']}/auto-assign-rules"
+    )
+    assert list_response.status_code == 200
+    assert len(list_response.json()["data"]["items"]) == 1
+
+    message_id = ingest_mail(
+        client,
+        gmail_message_id="gmail_case_auto_assign",
+        gmail_thread_id="thread_case_auto_assign",
+        from_address="Papers <papers@example.com>",
+        subject="Daily paper digest",
+        received_at="2026-06-07T08:00:00+09:00",
+        body_text="New papers.",
+    )
+
+    detail_response = client.get(f"{MAILS_URL}/{message_id}")
+    assert detail_response.status_code == 200
+    linked_case_ids = {
+        item["case_id"] for item in detail_response.json()["data"]["case_links"]
+    }
+    assert case_ids["Rule Active Case"] in linked_case_ids
+    assert case_ids["Rule Completed Case"] in linked_case_ids
+    assert case_ids["Rule Archived Case"] not in linked_case_ids
+
+    spam_subject_message_id = ingest_mail(
+        client,
+        gmail_message_id="gmail_case_auto_assign_spam_subject",
+        gmail_thread_id="thread_case_auto_assign_spam_subject",
+        from_address="papers@example.com",
+        subject="[SPAM] Daily paper digest",
+        received_at="2026-06-07T08:10:00+09:00",
+        body_text="Spam-like papers.",
+    )
+    spam_subject_detail = client.get(f"{MAILS_URL}/{spam_subject_message_id}")
+    assert spam_subject_detail.status_code == 200
+    assert spam_subject_detail.json()["data"]["case_links"] == []
+
+    client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Skipped Paper Sender",
+            "status": "skipped",
+            "email_addresses": [
+                {"email_address": "skipped-papers@example.com", "is_primary": True}
+            ],
+        },
+    )
+    skipped_rule_response = client.post(
+        f"{CASES_URL}/{case_ids['Rule Active Case']}/auto-assign-rules",
+        json={"sender_email": "skipped-papers@example.com"},
+    )
+    assert skipped_rule_response.status_code == 200
+    skipped_message_id = ingest_mail(
+        client,
+        gmail_message_id="gmail_case_auto_assign_skipped_sender",
+        gmail_thread_id="thread_case_auto_assign_skipped_sender",
+        from_address="skipped-papers@example.com",
+        subject="Skipped but collected paper digest",
+        received_at="2026-06-07T08:20:00+09:00",
+        body_text="This sender is skipped but should still be collected.",
+    )
+    skipped_detail = client.get(f"{MAILS_URL}/{skipped_message_id}")
+    assert skipped_detail.status_code == 200
+    assert {
+        item["case_id"] for item in skipped_detail.json()["data"]["case_links"]
+    } == {case_ids["Rule Active Case"]}
+
+    rule_id = list_response.json()["data"]["items"][0]["id"]
+    delete_response = client.delete(
+        f"{CASES_URL}/{case_ids['Rule Active Case']}/auto-assign-rules/{rule_id}"
+    )
+    assert delete_response.status_code == 200
+    assert delete_response.json()["data"]["deleted"] is True
 
 
 def insert_received_attachment(
@@ -727,6 +894,127 @@ def test_send_mail_records_mock_send_request(client, database_path) -> None:
     assert len(jobs) == 1
     assert jobs[0][1] == "pending"
     assert json.loads(jobs[0][2])["send_request_id"] == data["id"]
+
+
+def test_send_mail_expands_contact_tag_recipient_selectors(client, database_path) -> None:
+    client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Student One",
+            "status": "active",
+            "tags": ["student", "lab-member"],
+            "email_addresses": [
+                {"email_address": "student.one@example.com", "is_primary": True}
+            ],
+        },
+    )
+    client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Student Alumni",
+            "status": "active",
+            "tags": ["student", "lab-alumni"],
+            "email_addresses": [
+                {"email_address": "alumni.one@example.com", "is_primary": True}
+            ],
+        },
+    )
+
+    response = client.post(
+        f"{MAILS_URL}/send",
+        json={
+            "to_addresses": ["{student&!lab-alumni}", "direct@example.com"],
+            "subject": "Selector recipients",
+            "body_text": "Hello selector recipients.",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["to_addresses"] == [
+        "student.one@example.com",
+        "direct@example.com",
+    ]
+
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT to_addresses_json FROM mail_send_requests WHERE id = ?",
+            (data["id"],),
+        ).fetchone()
+
+    assert json.loads(row[0]) == ["student.one@example.com", "direct@example.com"]
+
+
+def test_send_mail_expands_case_role_recipient_selectors(client) -> None:
+    contact_response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Case Reviewer",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "case.reviewer@example.com", "is_primary": True}
+            ],
+        },
+    )
+    owner_contact_response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Case Owner",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "case.owner@example.com", "is_primary": True}
+            ],
+        },
+    )
+    case_response = client.post(
+        CASES_URL,
+        json={
+            "name": "Annual Review",
+            "description": None,
+            "progress_status": "not_started",
+            "ball_status": "user",
+        },
+    )
+    case_id = case_response.json()["data"]["case"]["id"]
+    contact_id = contact_response.json()["data"]["id"]
+    owner_contact_id = owner_contact_response.json()["data"]["id"]
+    stakeholder_response = client.post(
+        f"{CASES_URL}/{case_id}/stakeholders",
+        json={"contact_id": contact_id, "role": "reviewer"},
+    )
+    assert stakeholder_response.status_code == 200
+    owner_stakeholder_response = client.post(
+        f"{CASES_URL}/{case_id}/stakeholders",
+        json={"contact_id": owner_contact_id, "role": "owner"},
+    )
+    assert owner_stakeholder_response.status_code == 200
+
+    response = client.post(
+        f"{MAILS_URL}/send",
+        json={
+            "to_addresses": ["Case:Annual Review:reviewer"],
+            "subject": "Case role recipients",
+            "body_text": "Hello case reviewers.",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["to_addresses"] == ["case.reviewer@example.com"]
+
+    all_response = client.post(
+        f"{MAILS_URL}/send",
+        json={
+            "to_addresses": ["Case:Annual Review:ALL"],
+            "subject": "All case recipients",
+            "body_text": "Hello all case stakeholders.",
+        },
+    )
+
+    assert all_response.status_code == 200
+    assert all_response.json()["data"]["to_addresses"] == [
+        "case.reviewer@example.com",
+        "case.owner@example.com",
+    ]
 
 
 def test_send_mail_rejects_attachment_names_without_file_data(client) -> None:
@@ -1679,6 +1967,22 @@ def test_mail_list_needs_action_matches_unprocessed_high_or_middle_messages(
         subject="Low latest mail",
         received_at="2026-05-23T10:00:00+09:00",
     )
+    high_same_thread_id = ingest_mail(
+        client,
+        gmail_message_id="gmail_needs_high_same_thread",
+        gmail_thread_id="thread_needs_high_low_same_thread",
+        from_address="needs.action@example.com",
+        subject="High same-thread action mail",
+        received_at="2026-05-23T10:30:00+09:00",
+    )
+    low_same_thread_id = ingest_mail(
+        client,
+        gmail_message_id="gmail_needs_low_same_thread",
+        gmail_thread_id="thread_needs_high_low_same_thread",
+        from_address="needs.action@example.com",
+        subject="Low same-thread mail",
+        received_at="2026-05-23T10:45:00+09:00",
+    )
     high_unprocessed_id = ingest_mail(
         client,
         gmail_message_id="gmail_needs_high_unprocessed",
@@ -1709,6 +2013,8 @@ def test_mail_list_needs_action_matches_unprocessed_high_or_middle_messages(
     )
     client.post(f"{MAILS_URL}/{processed_high_id}/process", json={"reason": "handled"})
     client.post(f"{MAILS_URL}/{low_unprocessed_id}/importance", json={"importance": "Low"})
+    client.post(f"{MAILS_URL}/{high_same_thread_id}/importance", json={"importance": "High"})
+    client.post(f"{MAILS_URL}/{low_same_thread_id}/importance", json={"importance": "Low"})
     client.post(f"{MAILS_URL}/{high_unprocessed_id}/importance", json={"importance": "High"})
     client.post(
         f"{MAILS_URL}/{middle_unprocessed_id}/importance",
@@ -1726,9 +2032,14 @@ def test_mail_list_needs_action_matches_unprocessed_high_or_middle_messages(
         item["gmail_thread_id"] for item in response.json()["data"]["items"]
     }
     assert gmail_thread_ids == {
+        "thread_needs_high_low_same_thread",
         "thread_needs_high_unprocessed",
         "thread_needs_middle_unprocessed",
     }
+    items_by_thread_id = {
+        item["gmail_thread_id"]: item for item in response.json()["data"]["items"]
+    }
+    assert items_by_thread_id["thread_needs_high_low_same_thread"]["id"] == high_same_thread_id
 
 
 def test_spam_contact_mail_appears_in_skip_tab_with_contact_status(client) -> None:

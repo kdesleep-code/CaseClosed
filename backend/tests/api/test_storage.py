@@ -1044,6 +1044,104 @@ def test_case_storage_directory_is_listed_and_protected(
     assert delete_response.json()["error"]["code"] == "CASE_DIRECTORY_PROTECTED"
 
 
+def test_storage_object_linked_cases_can_be_managed(client, database_path: Path) -> None:
+    case_a = client.post(
+        "/api/v1/cases",
+        json={"name": "Physical File Case", "progress_status": "in_progress", "ball_status": "user"},
+    ).json()["data"]["case"]
+    case_b = client.post(
+        "/api/v1/cases",
+        json={"name": "Linked File Case", "progress_status": "in_progress", "ball_status": "user"},
+    ).json()["data"]["case"]
+
+    upload_response = client.post(
+        "/api/v1/storage/objects",
+        json={
+            "filename": "linked-cases.txt",
+            "content_type": "text/plain",
+            "data_base64": base64.b64encode(b"linked cases").decode("ascii"),
+            "directory_id": case_a["storage_directory_id"],
+        },
+    )
+    assert upload_response.status_code == 200
+    storage_object = upload_response.json()["data"]["storage_object"]
+
+    list_response = client.get(
+        f"/api/v1/storage/objects/{storage_object['id']}/linked-cases"
+    )
+    assert list_response.status_code == 200
+    assert list_response.json()["data"]["items"] == [
+        {
+            "case_id": case_a["id"],
+            "case_name": case_a["name"],
+            "source": "physical",
+            "file_link_id": None,
+            "created_at": None,
+            "updated_at": case_a["updated_at"],
+            "case_url": f"/cases/{case_a['id']}",
+        }
+    ]
+
+    link_response = client.post(
+        f"/api/v1/storage/objects/{storage_object['id']}/linked-cases",
+        json={"case_id": case_b["id"]},
+    )
+    assert link_response.status_code == 200
+    linked_items = link_response.json()["data"]["items"]
+    assert {item["case_id"]: item["source"] for item in linked_items} == {
+        case_a["id"]: "physical",
+        case_b["id"]: "link",
+    }
+
+    with sqlite3.connect(database_path) as connection:
+        active_link_count = connection.execute(
+            """
+            SELECT count(*)
+            FROM file_links
+            WHERE storage_object_id = ? AND linked_id = ? AND status = 'active'
+            """,
+            (storage_object["id"], case_b["id"]),
+        ).fetchone()[0]
+    assert active_link_count == 1
+
+    case_b_storage_response = client.get(
+        f"/api/v1/storage/objects?directory_id={case_b['storage_directory_id']}"
+    )
+    assert case_b_storage_response.status_code == 200
+    assert [
+        item["id"] for item in case_b_storage_response.json()["data"]["items"]
+    ] == [storage_object["id"]]
+
+    unlink_response = client.delete(
+        f"/api/v1/storage/objects/{storage_object['id']}/linked-cases/{case_b['id']}"
+    )
+    assert unlink_response.status_code == 200
+    assert [item["case_id"] for item in unlink_response.json()["data"]["items"]] == [
+        case_a["id"]
+    ]
+
+    remove_physical_response = client.delete(
+        f"/api/v1/storage/objects/{storage_object['id']}/linked-cases/{case_a['id']}"
+    )
+    assert remove_physical_response.status_code == 200
+    assert remove_physical_response.json()["data"]["items"] == [
+        {
+            "case_id": case_a["id"],
+            "case_name": case_a["name"],
+            "source": "physical",
+            "file_link_id": None,
+            "created_at": None,
+            "updated_at": case_a["updated_at"],
+            "case_url": f"/cases/{case_a['id']}",
+        }
+    ]
+    assert (
+        client.get(f"/api/v1/storage/objects/{storage_object['id']}")
+        .json()["data"]["storage_object"]["directory_id"]
+        == case_a["storage_directory_id"]
+    )
+
+
 def test_storage_object_can_move_between_directories(
     client,
 ) -> None:

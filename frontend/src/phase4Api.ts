@@ -61,11 +61,14 @@ export type MailListItem = {
     sender_resolution_mode?: 'self' | 'reply_to'
     tags?: string[]
   } | null
-  case_links?: Array<{
-    id: string
-    title: string
-  }>
+  case_links?: MailCaseLink[]
   summary?: string | null
+}
+
+export type MailCaseLink = {
+  id: string
+  case_id: string
+  title: string
 }
 
 export type MailAttachment = {
@@ -160,6 +163,7 @@ export type MailDetail = {
       updated_at: string
     }
   >
+  case_links?: MailCaseLink[]
   user_state: {
     user_importance: string | null
     processed_status: string
@@ -537,6 +541,34 @@ export function getMailDayStats(date: string): Promise<MailDayStats> {
 
 export function getMailDetail(messageId: string): Promise<MailDetail> {
   return request<MailDetail>(`/api/v1/mails/${encodeURIComponent(messageId)}`)
+}
+
+export async function listMailThreadCaseLinks(messageId: string): Promise<MailCaseLink[]> {
+  const data = await request<ItemsResponse<MailCaseLink>>(
+    `/api/v1/mails/${encodeURIComponent(messageId)}/case-links`,
+  )
+  return data.items
+}
+
+export function assignMailThreadToCase(
+  messageId: string,
+  caseId: string,
+): Promise<MailDetail> {
+  return request(`/api/v1/mails/${encodeURIComponent(messageId)}/case-links`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ case_id: caseId }),
+  })
+}
+
+export function unassignMailThreadFromCase(
+  messageId: string,
+  caseId: string,
+): Promise<MailDetail> {
+  return request(
+    `/api/v1/mails/${encodeURIComponent(messageId)}/case-links/${encodeURIComponent(caseId)}`,
+    { method: 'DELETE' },
+  )
 }
 
 export function sendMail(payload: MailSendPayload): Promise<MailSendRequest> {

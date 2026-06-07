@@ -15,6 +15,7 @@ from caseclosed.services.llm_provider import LlmProvider
 from caseclosed.services.llm_provider import build_mail_summary_provider
 from caseclosed.services.mail_ingestion import message_is_sent
 from caseclosed.services.mail_thread_summary import enqueue_mail_thread_summary_job
+from caseclosed.services.mail_thread_summary import split_quoted_reply_sections
 
 FUNCTION_TYPE = "mail_summary"
 SUMMARY_TARGET_IMPORTANCE = {"high", "middle"}
@@ -106,6 +107,9 @@ def handle_mail_summary(
                 "reason": "not_summary_target",
             }
 
+        current_body_text, quoted_reply_context = split_quoted_reply_sections(
+            message.body_text or ""
+        )
         provider_response = llm_provider.complete_json(
             function_type=FUNCTION_TYPE,
             input_payload={
@@ -118,6 +122,8 @@ def handle_mail_summary(
                 "cc_addresses_json": message.cc_addresses_json,
                 "snippet": message.snippet,
                 "body_text": message.body_text,
+                "current_body_text": current_body_text,
+                "quoted_reply_context": quoted_reply_context,
                 "importance": auto_state.effective_importance,
             },
         )
@@ -145,6 +151,8 @@ def handle_mail_summary(
                     "has_body_text": message.body_text is not None,
                     "has_snippet": message.snippet is not None,
                     "body_text_length": len(message.body_text or ""),
+                    "current_body_text_length": len(current_body_text),
+                    "quoted_reply_context_length": len(quoted_reply_context),
                 },
                 ensure_ascii=True,
                 sort_keys=True,
@@ -182,7 +190,7 @@ def handle_mail_summary(
                     ensure_ascii=True,
                     sort_keys=True,
                 ),
-                translation_text=string_or_none(output.get("translation")),
+                translation_text=None,
                 language="ja",
                 llm_run_id=llm_run.id,
                 created_at=now,
@@ -200,7 +208,7 @@ def handle_mail_summary(
                 ensure_ascii=True,
                 sort_keys=True,
             )
-            summary.translation_text = string_or_none(output.get("translation"))
+            summary.translation_text = None
             summary.llm_run_id = llm_run.id
             summary.updated_at = now
             summary.version += 1

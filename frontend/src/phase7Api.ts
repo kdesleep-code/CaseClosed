@@ -1,3 +1,5 @@
+import type { StorageObject } from './phase3Api'
+
 export type CaseItem = {
   id: string
   genre_id: string | null
@@ -96,6 +98,29 @@ export type CaseMailLink = {
   version: number
 }
 
+export type CaseAutoAssignRule = {
+  id: string
+  case_id: string
+  rule_type: string
+  rule_value: string
+  label: string | null
+  is_enabled: boolean
+  created_at: string
+  updated_at: string
+  version: number
+}
+
+export type CaseCurrentSituation = {
+  id: string
+  case_id: string
+  version_no: number
+  context_markdown: string
+  source_event_until_at: string | null
+  llm_run_id: string | null
+  created_at: string
+  created_by: string
+}
+
 export type CaseDetail = {
   case: CaseItem
   related_mails: CaseMailLink[]
@@ -105,6 +130,7 @@ export type CaseDetail = {
   files: unknown[]
   stakeholders?: CaseStakeholder[]
   tool_links?: CaseToolLink[]
+  current_situation?: CaseCurrentSituation | null
   recent_events: CaseEventItem[]
 }
 
@@ -179,7 +205,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return payload.data
 }
 
-export async function listCases(status: CaseListStatus = 'user_ball'): Promise<CaseItem[]> {
+export async function listCases(status: CaseListStatus | 'all' = 'user_ball'): Promise<CaseItem[]> {
   const params = new URLSearchParams({ status })
   const data = await request<ListResponse<CaseItem>>(`/api/v1/cases?${params.toString()}`)
   return data.items
@@ -230,8 +256,91 @@ export async function listCaseMailLinks(caseId: string): Promise<CaseMailLink[]>
   return data.items
 }
 
+export async function listCaseFiles(caseId: string): Promise<StorageObject[]> {
+  const data = await request<ListResponse<StorageObject>>(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/files`,
+  )
+  return data.items
+}
+
+export async function linkCaseFile(
+  caseId: string,
+  storageObjectId: string,
+  directoryId?: string | null,
+): Promise<StorageObject> {
+  const data = await request<{ storage_object: StorageObject }>(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/files/${encodeURIComponent(
+      storageObjectId,
+    )}/link`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ directory_id: directoryId ?? null }),
+    },
+  )
+  return data.storage_object
+}
+
+export async function unlinkCaseFile(
+  caseId: string,
+  storageObjectId: string,
+): Promise<{ unlinked: boolean; storage_object: StorageObject }> {
+  return request<{ unlinked: boolean; storage_object: StorageObject }>(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/files/${encodeURIComponent(
+      storageObjectId,
+    )}/link`,
+    { method: 'DELETE' },
+  )
+}
+
+export async function listCaseAutoAssignRules(
+  caseId: string,
+): Promise<CaseAutoAssignRule[]> {
+  const data = await request<ListResponse<CaseAutoAssignRule>>(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/auto-assign-rules`,
+  )
+  return data.items
+}
+
+export async function createCaseAutoAssignRule(
+  caseId: string,
+  payload: { sender_email: string; label?: string | null },
+): Promise<CaseAutoAssignRule> {
+  const data = await request<{ rule: CaseAutoAssignRule }>(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/auto-assign-rules`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  )
+  return data.rule
+}
+
+export function deleteCaseAutoAssignRule(
+  caseId: string,
+  ruleId: string,
+): Promise<{ deleted: boolean }> {
+  return request<{ deleted: boolean }>(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/auto-assign-rules/${encodeURIComponent(
+      ruleId,
+    )}`,
+    { method: 'DELETE' },
+  )
+}
+
 export function getCase(caseId: string): Promise<CaseDetail> {
   return request<CaseDetail>(`/api/v1/cases/${encodeURIComponent(caseId)}`)
+}
+
+export async function regenerateCaseCurrentSituation(
+  caseId: string,
+): Promise<CaseCurrentSituation> {
+  const data = await request<{ current_situation: CaseCurrentSituation }>(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/current-situation`,
+    { method: 'POST' },
+  )
+  return data.current_situation
 }
 
 export async function updateCase(
@@ -266,6 +375,37 @@ export async function createCase(payload: {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
+  return data.case
+}
+
+export async function deleteCase(caseId: string): Promise<void> {
+  await request<{ deleted: boolean }>(
+    `/api/v1/cases/${encodeURIComponent(caseId)}`,
+    { method: 'DELETE' },
+  )
+}
+
+export async function completeCase(caseId: string): Promise<CaseItem> {
+  const data = await request<{ case: CaseItem }>(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/complete`,
+    { method: 'POST' },
+  )
+  return data.case
+}
+
+export async function reopenCase(caseId: string): Promise<CaseItem> {
+  const data = await request<{ case: CaseItem }>(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/reopen`,
+    { method: 'POST' },
+  )
+  return data.case
+}
+
+export async function archiveCase(caseId: string): Promise<CaseItem> {
+  const data = await request<{ case: CaseItem }>(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/archive`,
+    { method: 'POST' },
+  )
   return data.case
 }
 

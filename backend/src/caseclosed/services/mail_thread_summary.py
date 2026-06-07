@@ -241,7 +241,7 @@ def handle_mail_thread_summary(
                     ensure_ascii=True,
                     sort_keys=True,
                 ),
-                translation_text=string_or_none(output.get("translation")),
+                translation_text=None,
                 language="ja",
                 llm_run_id=llm_run.id,
                 created_at=now,
@@ -258,7 +258,7 @@ def handle_mail_thread_summary(
                 ensure_ascii=True,
                 sort_keys=True,
             )
-            summary.translation_text = string_or_none(output.get("translation"))
+            summary.translation_text = None
             summary.llm_run_id = llm_run.id
             summary.updated_at = now
             summary.version += 1
@@ -319,6 +319,9 @@ def thread_summary_message_payload(
     message: GmailMessage,
     auto_state: MailAutoState,
 ) -> dict[str, object]:
+    current_body_text, _quoted_reply_context = split_quoted_reply_sections(
+        message.body_text or ""
+    )
     return {
         "message_id": message.id,
         "gmail_message_id": message.gmail_message_id,
@@ -328,7 +331,7 @@ def thread_summary_message_payload(
         "to_addresses_json": message.to_addresses_json,
         "cc_addresses_json": message.cc_addresses_json,
         "snippet": message.snippet,
-        "body_text": strip_quoted_reply_sections(message.body_text or ""),
+        "body_text": current_body_text,
         "importance": auto_state.effective_importance,
     }
 
@@ -344,13 +347,25 @@ def json_list(value: str | None) -> list[object]:
 
 
 def strip_quoted_reply_sections(body_text: str) -> str:
+    current_body_text, _quoted_reply_context = split_quoted_reply_sections(body_text)
+    return current_body_text
+
+
+def split_quoted_reply_sections(body_text: str) -> tuple[str, str]:
     lines = body_text.splitlines()
     kept_lines: list[str] = []
+    quoted_lines: list[str] = []
+    in_quoted_reply = False
     for line in lines:
+        if in_quoted_reply:
+            quoted_lines.append(line)
+            continue
         if looks_like_quoted_reply_intro(line):
-            break
+            in_quoted_reply = True
+            quoted_lines.append(line)
+            continue
         kept_lines.append(line)
-    return "\n".join(kept_lines).strip()
+    return "\n".join(kept_lines).strip(), "\n".join(quoted_lines).strip()
 
 
 def looks_like_quoted_reply_intro(line: str) -> bool:

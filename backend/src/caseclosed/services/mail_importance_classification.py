@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from sqlalchemy import select
 
+from caseclosed.db.models import AppSetting
 from caseclosed.db import runtime
 from caseclosed.db.models import GmailMessage
 from caseclosed.db.models import Job
@@ -16,10 +17,66 @@ from caseclosed.services.mail_summary import SUMMARY_TARGET_IMPORTANCE
 from caseclosed.services.mail_summary import enqueue_mail_summary_job
 
 FUNCTION_TYPE = "mail_importance_classification"
+USER_PROFILE_KEY = "user_profile"
 
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex}"
+
+
+def profile_text_lines(value: object) -> list[str]:
+    if not isinstance(value, str):
+        return []
+    return [line.strip() for line in value.splitlines() if line.strip()]
+
+
+def read_mail_importance_profile_context(session) -> dict[str, object]:
+    setting = session.scalar(select(AppSetting).where(AppSetting.key == USER_PROFILE_KEY))
+    if setting is None:
+        return {}
+    try:
+        data = json.loads(setting.value_json)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    context: dict[str, object] = {}
+    for key in (
+        "display_name",
+        "affiliation",
+        "academic_title",
+        "lab_or_group",
+        "research_fields",
+        "priority_keywords",
+        "low_priority_keywords",
+        "important_senders_or_domains",
+        "expected_response_policy",
+        "unavailable_times",
+        "llm_self_description",
+        "mail_importance_notes",
+    ):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip() != "":
+            context[key] = value.strip()
+    for key in (
+        "teaching_responsibilities",
+        "committee_roles",
+        "administrative_roles",
+        "important_projects",
+    ):
+        lines = profile_text_lines(data.get(key))
+        if lines:
+            context[key] = lines
+    aliases = data.get("email_aliases")
+    if isinstance(aliases, list):
+        context["email_aliases"] = [
+            value for value in aliases if isinstance(value, str) and value.strip() != ""
+        ]
+    primary_email = data.get("primary_email")
+    if isinstance(primary_email, str) and primary_email.strip() != "":
+        context["primary_email"] = primary_email.strip()
+    return context
 
 
 def handle_mail_importance_classification(
@@ -55,6 +112,7 @@ def handle_mail_importance_classification(
                 "effective_importance": "pinned",
             }
 
+        profile_context = read_mail_importance_profile_context(session)
         provider_response = llm_provider.complete_json(
             function_type=FUNCTION_TYPE,
             input_payload={
@@ -64,6 +122,7 @@ def handle_mail_importance_classification(
                 "snippet": message.snippet,
                 "body_text": message.body_text,
                 "additional_instruction": llm_instruction,
+                "profile_context": profile_context,
             },
         )
         suggested_importance = str(provider_response.output["importance"])
@@ -74,10 +133,13 @@ def handle_mail_importance_classification(
         }
         if llm_instruction is not None:
             input_source["has_contact_instruction"] = True
+        if profile_context:
+            input_source["has_profile_context"] = True
 
         input_diagnostic = {
             "has_body_text": message.body_text is not None,
             "has_snippet": message.snippet is not None,
+            "has_profile_context": bool(profile_context),
         }
         if llm_instruction is not None:
             input_diagnostic["contact_instruction"] = llm_instruction

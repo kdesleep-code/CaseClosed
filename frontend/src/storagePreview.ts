@@ -135,6 +135,17 @@ export function isPreviewablePdfFile({
   return normalizedContentType === 'application/pdf' || fileExtension(filename) === 'pdf'
 }
 
+export function isPreviewableVideoFile({
+  contentType,
+  filename,
+}: {
+  contentType: string | null
+  filename: string | null
+}) {
+  const normalizedContentType = contentType?.toLowerCase().split(';', 1)[0].trim()
+  return normalizedContentType === 'video/mp4' || fileExtension(filename) === 'mp4'
+}
+
 export function isPreviewableMarkdownFile({
   contentType,
   filename,

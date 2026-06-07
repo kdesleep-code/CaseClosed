@@ -23,8 +23,9 @@ import { AppLink, navigateTo } from './navigation'
 type ContactsMode = 'list' | 'pending'
 type ContactStatus = 'active' | 'skipped' | 'spam' | 'archived'
 type PendingContactStatus = 'active' | 'archived' | 'skipped' | 'spam'
-type StatusFilter = 'all' | ContactStatus | 'mailing_list'
-type ContactKind = 'person' | 'mailing_list'
+type StatusFilter = 'all' | ContactStatus
+type ContactKind = 'person' | 'mailing_list' | 'service'
+type ContactKindFilter = 'person' | 'mailing_list' | 'service'
 type SenderResolutionMode = 'self' | 'reply_to'
 type ContactMailImportanceRuleAction = 'llm' | 'fixed' | 'llm_with_instruction'
 type ContactMailImportanceRuleValue = 'pinned' | 'high' | 'middle' | 'low'
@@ -43,12 +44,22 @@ export type ContactsInitialData =
 
 const maxCustomTabs = 4
 const maxCustomTabNameLength = 12
+const reservedContactRoleTags = new Set([
+  'collaborator',
+  'lab-alumni',
+  'lab-member',
+  'supervised-student',
+])
 const defaultContactAvatarUrl = new URL(
   './assets/default-contact-avatar.svg',
   import.meta.url,
 ).href
 const defaultMailingListAvatarUrl = new URL(
   './assets/default-mailing-list-avatar.svg',
+  import.meta.url,
+).href
+const defaultServiceAvatarUrl = new URL(
+  './assets/default-service-avatar.svg',
   import.meta.url,
 ).href
 const defaultSpamAvatarUrl = new URL(
@@ -78,6 +89,24 @@ function isMailingListContact(contact: Contact) {
   return (contact.kind ?? 'person') === 'mailing_list'
 }
 
+function isServiceContact(contact: Contact) {
+  return (contact.kind ?? 'person') === 'service'
+}
+
+function contactKind(contact: Contact): ContactKind {
+  return contact.kind ?? 'person'
+}
+
+function matchesContactKindFilter(contact: Contact, kindFilter: ContactKindFilter) {
+  if (kindFilter === 'person') {
+    return !isMailingListContact(contact) && !isServiceContact(contact)
+  }
+  if (kindFilter === 'mailing_list') {
+    return isMailingListContact(contact)
+  }
+  return isServiceContact(contact)
+}
+
 function formatContactDate(value: string | null | undefined) {
   if (value === undefined || value === null || value.trim() === '') {
     return t('common.none')
@@ -102,6 +131,9 @@ function contactSortReference(contact: Contact, sortMode: ContactSortMode) {
 function defaultAvatarUrlForContact(contact: Contact) {
   if (contact.status === 'spam') {
     return defaultSpamAvatarUrl
+  }
+  if (isServiceContact(contact)) {
+    return defaultServiceAvatarUrl
   }
   return isMailingListContact(contact)
     ? defaultMailingListAvatarUrl
@@ -128,13 +160,16 @@ function normalizeTag(value: string) {
   return value.trim().toLowerCase()
 }
 
+function isReservedContactRoleTag(tag: string) {
+  return reservedContactRoleTags.has(normalizeTag(tag))
+}
+
+function contactTagClassName(tag: string) {
+  return isReservedContactRoleTag(tag) ? 'is-reserved-contact-tag' : undefined
+}
+
 function customTabMatches(contact: Contact, expression: string) {
-  const terms = expression
-    .trim()
-    .replace(/^\{|\}$/g, '')
-    .split('&')
-    .map((term) => term.trim())
-    .filter(Boolean)
+  const terms = customTabExpressionTerms(expression)
   const tags = new Set(contact.tags.map(normalizeTag))
 
   if (terms.length === 0) {
@@ -147,6 +182,40 @@ function customTabMatches(contact: Contact, expression: string) {
     }
     return tags.has(normalizeTag(term))
   })
+}
+
+function customTabExpressionTerms(expression: string) {
+  return expression
+    .trim()
+    .replace(/^\{|\}$/g, '')
+    .split('&')
+    .map((term) => term.trim())
+    .filter(Boolean)
+}
+
+function tagsUsedInCustomTabs(customTabs: ContactCustomTab[]) {
+  const usedTags = new Set<string>()
+  for (const tab of customTabs) {
+    for (const term of customTabExpressionTerms(tab.expression)) {
+      const tag = term.startsWith('!') ? term.slice(1) : term
+      const normalized = normalizeTag(tag)
+      if (normalized !== '') {
+        usedTags.add(normalized)
+      }
+    }
+  }
+  return usedTags
+}
+
+function shouldKeepContactTagFilterOpen(
+  tag: string,
+  count: number,
+  customTabTags: Set<string>,
+) {
+  return (
+    !/^\d/.test(tag.trim()) &&
+    (count >= 3 || customTabTags.has(normalizeTag(tag)))
+  )
 }
 
 function parseTags(value: string) {
@@ -198,7 +267,9 @@ function ContactsView({
   const [isMergeToolOpen, setIsMergeToolOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedTagFilter, setSelectedTagFilter] = useState<string | null>(null)
+  const [isTagFilterExpanded, setIsTagFilterExpanded] = useState(false)
   const [sortMode, setSortMode] = useState<ContactSortMode>('name')
+  const [kindFilter, setKindFilter] = useState<ContactKindFilter>('person')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('active')
   const [customTabs, setCustomTabs] = useState<ContactCustomTab[]>([])
   const [activeCustomTabId, setActiveCustomTabId] = useState<string | null>(null)
@@ -339,20 +410,11 @@ function ContactsView({
       handledDeepLinkRef.current = deepLinkKey
       setSearchQuery('')
       setSelectedTagFilter(null)
+      setKindFilter(contactKind(linkedContact))
       setStatusFilter(
-        isMailingListContact(linkedContact)
-          ? linkedContact.status === 'active'
-            ? 'mailing_list'
-            : linkedContact.status === 'archived'
-              ? 'archived'
-              : linkedContact.status === 'skipped'
-                ? 'skipped'
-                : linkedContact.status === 'spam'
-                  ? 'spam'
-                  : 'all'
-          : linkedContact.status === 'active'
-            ? 'active'
-            : 'all',
+        linkedContact.status === 'active'
+          ? 'active'
+          : (linkedContact.status as ContactStatus),
       )
       setActiveCustomTabId(null)
       setIsCustomTabEditorOpen(false)
@@ -365,6 +427,7 @@ function ContactsView({
       handledDeepLinkRef.current = deepLinkKey
       setSearchQuery('')
       setSelectedTagFilter(null)
+      setKindFilter('person')
       setStatusFilter('all')
       setActiveCustomTabId(null)
       setIsCustomTabEditorOpen(false)
@@ -514,10 +577,10 @@ function ContactsView({
         user_memo: '',
         status,
         kind,
-        sender_resolution_mode: kind === 'person' ? 'self' : senderResolution,
+        sender_resolution_mode: kind === 'mailing_list' ? senderResolution : 'self',
         mailing_list_recipient_expression: null,
-        mail_importance_rule_action: 'llm',
-        mail_importance_rule_importance: null,
+        mail_importance_rule_action: kind === 'service' ? 'fixed' : 'llm',
+        mail_importance_rule_importance: kind === 'service' ? 'low' : null,
         mail_importance_rule_instruction: null,
         tags: [],
         email_addresses: [
@@ -539,6 +602,13 @@ function ContactsView({
 
   function handleStatusTabClick(nextStatusFilter: StatusFilter) {
     setStatusFilter(nextStatusFilter)
+    setActiveCustomTabId(null)
+    setIsCustomTabEditorOpen(false)
+  }
+
+  function handleKindFilterClick(nextKindFilter: ContactKindFilter) {
+    setKindFilter(nextKindFilter)
+    setSelectedTagFilter(null)
     setActiveCustomTabId(null)
     setIsCustomTabEditorOpen(false)
   }
@@ -629,7 +699,7 @@ function ContactsView({
         status: detailStatus,
         kind: detailKind,
         sender_resolution_mode:
-          detailKind === 'person' ? 'self' : detailSenderResolutionMode,
+          detailKind === 'mailing_list' ? detailSenderResolutionMode : 'self',
         mailing_list_recipient_expression:
           detailKind === 'mailing_list'
             ? detailMailingListRecipientExpression
@@ -866,14 +936,11 @@ function ContactsView({
 
   async function handleMergeContactsTool(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    const sourceContact = contacts.find(
-      (contact) =>
-        !isMailingListContact(contact) && contact.display_name === mergeSourceQuery,
+    const sourceContact = mergeToolContacts.find(
+      (contact) => contact.display_name === mergeSourceQuery,
     )
-    const destinationContact = contacts.find(
-      (contact) =>
-        !isMailingListContact(contact) &&
-        contact.display_name === mergeDestinationQuery,
+    const destinationContact = mergeToolContacts.find(
+      (contact) => contact.display_name === mergeDestinationQuery,
     )
     if (
       sourceContact === undefined ||
@@ -964,17 +1031,54 @@ function ContactsView({
   }
 
   const activeCustomTab = customTabs.find((tab) => tab.id === activeCustomTabId)
+  const customTabPreviewExpression = isCustomTabEditorOpen
+    ? customTabExpression.trim()
+    : null
   const selectedContact = contacts.find((contact) => contact.id === selectedContactId)
   const selectedIsMailingList =
     selectedContact !== undefined && isMailingListContact(selectedContact)
+  const selectedIsService =
+    selectedContact !== undefined && isServiceContact(selectedContact)
   const moveTargetContacts = contacts.filter(
     (contact) =>
       contact.id !== selectedContactId &&
-      isMailingListContact(contact) === selectedIsMailingList,
+      selectedContact !== undefined &&
+      contactKind(contact) === contactKind(selectedContact),
   )
-  const mergeToolContacts = contacts.filter(
-    (contact) => !isMailingListContact(contact) && contact.status === 'active',
-  )
+  const contactMatchesCurrentTabs = (contact: Contact) => {
+    if (customTabPreviewExpression !== null) {
+      return (
+        kindFilter === 'person' &&
+        contactKind(contact) === 'person' &&
+        customTabMatches(contact, customTabPreviewExpression)
+      )
+    }
+    if (activeCustomTab !== undefined) {
+      return (
+        kindFilter === 'person' &&
+        contactKind(contact) === 'person' &&
+        customTabMatches(contact, activeCustomTab.expression)
+      )
+    }
+    if (!matchesContactKindFilter(contact, kindFilter)) {
+      return false
+    }
+    if (statusFilter !== 'all' && contact.status !== statusFilter) {
+      return false
+    }
+    return true
+  }
+  const mergeToolContacts = contacts
+    .filter((contact) => contactKind(contact) === 'person' || contactKind(contact) === 'service')
+    .filter(contactMatchesCurrentTabs)
+    .filter(
+      (contact) =>
+        selectedTagFilter === null ||
+        contact.tags.some((tag) => tag === selectedTagFilter),
+    )
+    .toSorted((first, second) =>
+      first.display_name.localeCompare(second.display_name),
+    )
   const mergeDestinationContacts = mergeToolContacts.filter(
     (contact) => contact.display_name !== mergeSourceQuery,
   )
@@ -991,12 +1095,10 @@ function ContactsView({
     selectedContact.email_addresses.every(
       (emailAddress) => emailAddress.has_inbound_message_history !== true,
     )
-  const baseVisibleKindContacts = contacts.filter((contact) =>
-    statusFilter === 'mailing_list'
-      ? isMailingListContact(contact)
-      : !isMailingListContact(contact),
+  const tagSourceContacts = contacts.filter(
+    (contact) => contactKind(contact) === 'person',
   )
-  const tagCounts = [...baseVisibleKindContacts.reduce((counts, contact) => {
+  const tagCounts = [...tagSourceContacts.reduce((counts, contact) => {
     for (const tag of contact.tags) {
       counts.set(tag, (counts.get(tag) ?? 0) + 1)
     }
@@ -1004,36 +1106,43 @@ function ContactsView({
   }, new Map<string, number>())].sort(([firstTag], [secondTag]) =>
     firstTag.localeCompare(secondTag),
   )
+  const customTabTags = tagsUsedInCustomTabs(customTabs)
+  const primaryTagCounts = tagCounts.filter(
+    ([tag, count]) =>
+      shouldKeepContactTagFilterOpen(tag, count, customTabTags) ||
+      tag === selectedTagFilter,
+  )
+  const collapsedTagCounts = tagCounts.filter(
+    ([tag]) => !primaryTagCounts.some(([primaryTag]) => primaryTag === tag),
+  )
+  const visibleTagCounts = isTagFilterExpanded
+    ? [...primaryTagCounts, ...collapsedTagCounts]
+    : primaryTagCounts
+  const areTagFiltersInteractive = kindFilter === 'person'
   const activeListTabId =
     activeCustomTabId === null
       ? isCustomTabEditorOpen
         ? 'add'
         : statusFilter
       : activeCustomTabId
-  const customTabPreviewExpression = isCustomTabEditorOpen
-    ? customTabExpression.trim()
-    : null
   const visibleContacts = contacts
     .filter((contact) => {
       if (customTabPreviewExpression !== null) {
-        if (isMailingListContact(contact)) {
+        if (kindFilter !== 'person' || contactKind(contact) !== 'person') {
           return false
         }
         return customTabMatches(contact, customTabPreviewExpression)
       }
       if (activeCustomTab !== undefined) {
-        if (isMailingListContact(contact)) {
+        if (kindFilter !== 'person' || contactKind(contact) !== 'person') {
           return false
         }
         return customTabMatches(contact, activeCustomTab.expression)
       }
-      if (statusFilter === 'mailing_list') {
-        return isMailingListContact(contact) && contact.status === 'active'
-      }
-      if (statusFilter !== 'all' && contact.status !== statusFilter) {
+      if (!matchesContactKindFilter(contact, kindFilter)) {
         return false
       }
-      if (isMailingListContact(contact) && contact.status === 'active') {
+      if (statusFilter !== 'all' && contact.status !== statusFilter) {
         return false
       }
       return true
@@ -1060,7 +1169,7 @@ function ContactsView({
         contact.status,
         contact.kind ?? 'person',
         contact.sender_resolution_mode ?? 'self',
-        isMailingListContact(contact) ? '' : contact.tags.join(' '),
+        contactKind(contact) === 'mailing_list' ? '' : contact.tags.join(' '),
         contact.mailing_list_recipient_expression ?? '',
         ...contact.email_addresses.map((address) => address.email_address),
       ]
@@ -1185,7 +1294,7 @@ function ContactsView({
                     </div>
                     <div className="pending-toggle-field">
                       <span>{t('contacts.kind.label')}</span>
-                    <div className="pending-contact-buttons">
+                    <div className="pending-contact-buttons pending-contact-kind-buttons">
                       <button
                         aria-pressed={pendingKind(item) === 'person'}
                         onClick={() =>
@@ -1209,6 +1318,18 @@ function ContactsView({
                         type="button"
                       >
                         {t('contacts.kind.mailingList')}
+                      </button>
+                      <button
+                        aria-pressed={pendingKind(item) === 'service'}
+                        onClick={() =>
+                          setPendingKinds((currentKinds) => ({
+                            ...currentKinds,
+                            [item.email_address]: 'service',
+                          }))
+                        }
+                        type="button"
+                      >
+                        {t('contacts.kind.service')}
                       </button>
                     </div>
                     </div>
@@ -1301,29 +1422,51 @@ function ContactsView({
                       value={searchQuery}
                     />
                   </label>
-                  {tagCounts.length > 0 && (
-                    <div
-                      aria-label={t('contacts.tagFilters.label')}
-                      className="contact-tag-filters"
-                    >
-                      {tagCounts.map(([tag, count]) => (
-                        <button
-                          aria-label={`${tag} ${count}`}
-                          aria-pressed={selectedTagFilter === tag}
-                          key={tag}
-                          onClick={() =>
-                            setSelectedTagFilter((currentTag) =>
-                              currentTag === tag ? null : tag,
-                            )
-                          }
-                          type="button"
-                        >
-                          {tag}
-                          <span>{count}</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                  <div
+                    aria-hidden={tagCounts.length === 0 ? true : undefined}
+                    aria-label={
+                      tagCounts.length > 0 ? t('contacts.tagFilters.label') : undefined
+                    }
+                    className={`contact-tag-filters${
+                      tagCounts.length === 0 ? ' contact-tag-filters-placeholder' : ''
+                    }${
+                      areTagFiltersInteractive ? '' : ' contact-tag-filters-disabled'
+                    }`}
+                  >
+                    {visibleTagCounts.map(([tag, count]) => (
+                      <button
+                        aria-label={`${tag} ${count}`}
+                        aria-pressed={selectedTagFilter === tag}
+                        className={contactTagClassName(tag)}
+                        disabled={!areTagFiltersInteractive}
+                        key={tag}
+                        onClick={() =>
+                          setSelectedTagFilter((currentTag) =>
+                            currentTag === tag ? null : tag,
+                          )
+                        }
+                        type="button"
+                      >
+                        {tag}
+                        <span>{count}</span>
+                      </button>
+                    ))}
+                    {collapsedTagCounts.length > 0 && (
+                      <button
+                        aria-expanded={isTagFilterExpanded}
+                        className="contact-tag-filter-toggle"
+                        disabled={!areTagFiltersInteractive}
+                        onClick={() => setIsTagFilterExpanded((expanded) => !expanded)}
+                        type="button"
+                      >
+                        {isTagFilterExpanded
+                          ? t('contacts.tagFilters.less')
+                          : t('contacts.tagFilters.more', {
+                              count: String(collapsedTagCounts.length),
+                            })}
+                      </button>
+                    )}
+                  </div>
                 </div>
                 <label className="contact-sort">
                   <span>{t('contacts.sort.label')}</span>
@@ -1460,6 +1603,28 @@ function ContactsView({
 
             <section aria-labelledby="contacts-heading" className="contact-list-workspace">
               <div
+                aria-label={t('contacts.kindSwitcher.label')}
+                className="contact-kind-switcher"
+                role="tablist"
+              >
+                {(['person', 'mailing_list', 'service'] as const).map((filter) => (
+                  <button
+                    aria-selected={kindFilter === filter}
+                    id={`contact-kind-tab-${filter}`}
+                    key={filter}
+                    onClick={() => handleKindFilterClick(filter)}
+                    role="tab"
+                    type="button"
+                  >
+                    {filter === 'person'
+                      ? t('contacts.kind.person')
+                      : filter === 'mailing_list'
+                        ? t('contacts.kind.mailingList')
+                        : t('contacts.kind.service')}
+                  </button>
+                ))}
+              </div>
+              <div
                 aria-label={t('contacts.list.views')}
                 className="contact-list-tabs"
                 role="tablist"
@@ -1482,24 +1647,25 @@ function ContactsView({
                       {filter === 'all' ? t('common.all') : t('common.active')}
                     </button>
                   ))}
-                  {customTabs.map((tab) => (
-                    <button
-                      aria-controls="contact-list-panel"
-                      aria-selected={!isCustomTabEditorOpen && activeCustomTabId === tab.id}
-                      id={`contact-list-tab-${tab.id}`}
-                      key={tab.id}
-                      onClick={() => {
-                        setActiveCustomTabId(tab.id)
-                        setStatusFilter('all')
-                        setIsCustomTabEditorOpen(false)
-                      }}
-                      role="tab"
-                      type="button"
-                    >
-                      {tab.label}
-                    </button>
-                  ))}
-                  {customTabs.length < maxCustomTabs && (
+                  {kindFilter === 'person' &&
+                    customTabs.map((tab) => (
+                      <button
+                        aria-controls="contact-list-panel"
+                        aria-selected={!isCustomTabEditorOpen && activeCustomTabId === tab.id}
+                        id={`contact-list-tab-${tab.id}`}
+                        key={tab.id}
+                        onClick={() => {
+                          setActiveCustomTabId(tab.id)
+                          setStatusFilter('all')
+                          setIsCustomTabEditorOpen(false)
+                        }}
+                        role="tab"
+                        type="button"
+                      >
+                        {tab.label}
+                      </button>
+                    ))}
+                  {kindFilter === 'person' && customTabs.length < maxCustomTabs && (
                     <button
                       aria-controls="contact-list-panel"
                       aria-selected={isCustomTabEditorOpen}
@@ -1513,20 +1679,6 @@ function ContactsView({
                   )}
                 </div>
                 <div className="contact-list-tabs-right">
-                  <button
-                    aria-controls="contact-list-panel"
-                    aria-selected={
-                      !isCustomTabEditorOpen &&
-                      activeCustomTabId === null &&
-                      statusFilter === 'mailing_list'
-                    }
-                    id="contact-list-tab-mailing_list"
-                    onClick={() => handleStatusTabClick('mailing_list')}
-                    role="tab"
-                    type="button"
-                  >
-                    {t('contacts.kind.mailingList')}
-                  </button>
                   {(['archived', 'skipped', 'spam'] as const).map((filter) => (
                     <button
                       aria-controls="contact-list-panel"
@@ -1674,7 +1826,9 @@ function ContactsView({
                                   <>
                                     <span>{contact.status}</span>
                                     {contact.tags.map((tag) => (
-                                      <span key={tag}>{tag}</span>
+                                      <span className={contactTagClassName(tag)} key={tag}>
+                                        {tag}
+                                      </span>
                                     ))}
                                   </>
                                 )}
@@ -1894,7 +2048,7 @@ function ContactsView({
                                       <h3>{t('contacts.relatedCases.heading')}</h3>
                                       <p>{t('contacts.relatedCases.empty')}</p>
                                     </div>
-                                    {!selectedIsMailingList && (
+                                    {!selectedIsMailingList && !selectedIsService && (
                                       <div className="contact-ai-memo-readonly">
                                         <span>{t('contacts.aiMemo')}</span>
                                         <p>
@@ -1932,7 +2086,7 @@ function ContactsView({
                                     <p>{selectedContact.user_memo ?? t('contacts.detail.noMemo')}</p>
                                   </div>
                                   )}
-                                  {!selectedIsMailingList && (
+                                  {!selectedIsMailingList && !selectedIsService && (
                                     <div>
                                       <span>{t('contacts.aiMemo')}</span>
                                       <p>

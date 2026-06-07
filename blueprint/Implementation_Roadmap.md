@@ -587,7 +587,7 @@ DB:
 - storage_operation_history
 - storage_object_versions
 - file_version_diffs
-- file_links（Phase 7のCase連携で拡張）
+- file_links（Phase 7でCase-Fileの明示的な多対多参照として実装）
 - file_security_rules（LLM Policy本格化時に拡張）
 - file_summaries
 - attachment_fetch_jobs（専用テーブルは未採用。現状は `jobs.job_type = mail_attachment_fetch` で実装）
@@ -689,92 +689,127 @@ LLM:
 
 ## Phase 7: Case連携
 
+Status: Fixed（2026-06-07時点）
+
 ### 目的
 
-Mail / Contact / FileをCaseへ流し込めるようにする。
+Mail / Contact / FileをCaseへ手動で流し込み、Case詳細を「案件の基地」として使えるようにする。
+
+初期運用ではLLMによる自動Case判定を行わない。まず手動Assignで運用し、手間が大きくなった段階で候補提示またはLLM自動判定を追加する。
+
+ただし、ユーザーが明示した「この送信者からのメールはこのCaseへ入れる」という単純ルールはPhase 7に含める。これはLLM判定ではなく、手動Assignを補助する明示ルールとして扱う。
 
 ### 実装対象
 
 DB:
 
-- case_candidate_rules
-- case_mail_links
-- case_file_links
-- case_tool_links（Case右ガジェットの外部ツールリンク。Phase 7ではUI先行でもよい）
-- contact_case_links
-- case_context_versions
+- case_mail_links（Thread単位の手動Assign）
+- case_auto_assign_rules（送信者メールアドレスに基づく明示ルールAssign）
+- case_tool_links（Case右ガジェットの外部ツールリンク）
+- case_stakeholders（ContactとCaseの関係。contact_case_links相当）
+- case_context_versions（Current Situation生成結果）
+- Case専用Storage Directory（File連携の初期実装）
+- file_links（同一Storage objectを複数Case/通常Storageから参照するための明示リンク）
+
+後続扱い:
+
+- case_candidate_rules（自動Case判定を再開する場合）
 
 API:
 
-- `GET /case-candidate-rules`
-- `POST /case-candidate-rules`
-- `POST /mails/{id}/run-case-selection`
-- `GET /cases/{id}/mails`
-- `POST /cases/{id}/mails`
-- `DELETE /cases/{id}/mails/{message_id}`
-- `GET /cases/{id}/files`（Phase 7でStorage object連携として設計）
-- `POST /cases/{id}/files`（Phase 7でStorage object連携として設計）
+- `GET /cases/{id}/mail-links`
+- `GET /cases/{id}/auto-assign-rules`
+- `POST /cases/{id}/auto-assign-rules`
+- `DELETE /cases/{id}/auto-assign-rules/{rule_id}`
+- `POST /mails/{id}/cases`
+- `DELETE /mails/{id}/cases/{case_id}`
+- `POST /cases/{id}/current-situation`
 - `GET /cases/{id}/tools`
 - `POST /cases/{id}/tools`
 - `PATCH /cases/{id}/tools/{tool_id}`
 - `DELETE /cases/{id}/tools/{tool_id}`
+- `GET /cases/{id}/files`
+- `POST /cases/{id}/files/{storage_object_id}/link`
+- `DELETE /cases/{id}/files/{storage_object_id}/link`
+
+保留:
+
+- `GET /case-candidate-rules`
+- `POST /case-candidate-rules`
+- `POST /mails/{id}/run-case-selection`
 
 画面:
 
-- Mail詳細のCase候補表示
+- Mail詳細のCaseバッジ表示・手動Assign
 - Case詳細内Mail一覧
-- Case詳細内File一覧
+- Case詳細内Assigned Mail検索・一括Assign・Remove
+- Case詳細Assigned Mail画面からのAuto Assign Rule追加・削除
 - Case詳細内Stored Files Window（Case専用Storage Directory配下を表示）
 - Case詳細Overview / Current Situation / Case Tools / Calendarガジェット
+- Case詳細Stakeholders
 - Bucket Case表示
 
 LLM:
 
+- case_current_situation_summary
+
+保留:
+
 - mail_case_selection
-- case_current_situation_summary（初期はUI枠のみでも可）
 
 ### 完了条件
 
-- High / MiddleのみCase判定される
-- Low / Skip / Pending / Pinnedは自動Case判定されない
-- Caseが関連メール集合を持つ形で表示される
-- Inbox requiredはInboxへ入る
-- no_case_neededはCaseリンクなし
+- Caseが関連メールThread集合を持つ形で表示される
 - ユーザーが手動でCaseリンクを修正できる
-- Case判定がユーザー確定値を上書きしない
-- 関連ファイルもCaseに紐づけられる
+- LLM自動Case判定を行わないため、ユーザー確定値が勝手に上書きされない
+- 明示Auto Assign Ruleは、受信時にSPAM判定されていない全メールへ適用される。Skip扱いの送信者も対象に含む
+- 明示Auto Assign Ruleは、ArchivedでないCaseを対象に適用される。Completed Caseは対象に含む
+- 関連ファイルはCase専用Storage Directoryへ保存・表示できる
+- 既存Storage objectをCaseへ明示リンクでき、同一ファイルを通常Storageや別Caseからも参照できる
+- Case詳細のStored Files Windowで削除操作する際は、「このCaseから除外」と「ファイル本体を削除」を区別する
 - 各Caseが専用Storage Directoryを持ち、Caseが存在する限り削除できない
 - Case詳細が「案件の基地」として機能し、Overview / 状況説明 / Mail入口 / Task入口 / Files / Calendar / Toolsが見える
 - Case Toolsは「アイコン + URL」の単純な外部リンクとして扱い、Caseごとに並べ替え・追加・削除できる
+- Current Situationは、ユーザーがRefreshした時だけ、Overview / 関連メールThread要約 / Task接続点 / Calendar接続点 / File Digestから生成される
 
 ### レビュー観点
 
-- Case判定が勝手に変な上書きをしないか
-- Inbox required / no_case_neededの判断が自然か
+- 手動Assignの手間が許容範囲か
 - Case詳細が案件の基地として機能しているか
 - メールとファイルを辿りやすいか
 - Overviewが「このCaseの意図・完了条件」を思い出す場所として機能しているか
 - Current Situationが、久しぶりに開いたCaseの状況把握に役立つか
 - Toolsガジェットが邪魔にならず、外部ツールへ素早く飛べるか
 
+### Phase 7で明示的に保留するもの
+
+- 自動Case判定 / 候補提示
+- case_candidate_rules
+- Task実データ接続
+- Calendar実データ接続
+
 ---
 
 ## Phase 8: Case / Task中核
 
+Status: Next priority
+
 ### 目的
 
-案件管理アプリとして機能させる。
+Taskを実データとして扱い、Case詳細を実際の作業管理に接続する。
+
+Phase 7でCaseの基地UIとMail/File連携は概ね固まったため、Phase 8ではTaskを最優先で実装する。Case Series / Create next Caseは重要だが、Taskの作成・完了・論理削除・Case Closed条件より後に扱ってよい。
 
 ### 実装対象
 
 DB:
 
-- case_series
 - tasks
 - task_links
 - task_suggestions
-- task_work_blocks
 - case_tags
+- task_work_blocks（Calendar作業ブロック接続時に拡張）
+- case_series
 - cases.series_id
 - cases.series_label
 - cases.previous_case_id
@@ -816,6 +851,15 @@ LLM:
 - mail_task_suggestion
 - subtask_suggestionは後続でも可
 
+初期実装順:
+
+1. Taskテーブル / API / 画面
+2. Case詳細へのTask一覧・次Task・完了状況接続
+3. Case Closed時の未完了Task制約
+4. メールからTask作成
+5. mail_task_suggestion
+6. Case Series / Create next Case
+
 ### 完了条件
 
 - Caseを作成・編集できる
@@ -845,9 +889,13 @@ LLM:
 
 ## Phase 9: Calendar連携
 
+Status: Next after Task foundation
+
 ### 目的
 
 メールから予定化し、Case/TaskとGoogle Calendarをつなぐ。
+
+Phase 8でTask基盤を作った後、早めにCalendar連携へ進む。Case Current SituationにはCalendar接続点を先に用意済みのため、Calendar実データが入った時点でCase状況説明にも反映できる。
 
 ### 実装対象
 
@@ -1338,11 +1386,15 @@ Gmail本文をDB保存できる
 Pending中はLLM自動処理が止まる
 ```
 
-現状はPhase 4を越えて、Phase 5のMail Intelligence、Phase 6のStorage基盤、Phase 7のCase詳細UI基盤、Phase 10のGmail送信機能の一部まで先行実装済みである。
+現状はPhase 4を越えて、Phase 5のMail Intelligence、Phase 6のStorage基盤、Phase 7のCase連携基盤、Phase 10のGmail送信機能の一部まで先行実装済みである。
 
 Phase 6のStorage基盤は、手元ファイル・メール添付・Contact画像・Storage一覧/詳細/検索/ディレクトリ・添付元メール参照・LLM input許可切替・物理削除・Storage操作履歴・ファイル更新バージョン管理・LLM Digest・Version Differenceまで実装済みである。
 
-Phase 7のCase UI基盤は、Case一覧/詳細、Case Genre、Case専用Storage Directory、Overview、Current Situation枠、Mail/Task入口カード、右ガジェットCalendar、Case ToolsアイコンランチャーまでUI先行で実装済みである。Case Toolsは「アイコン + URL」の単純なリンク集合として扱い、通常表示はアイコンのみ、設定時に追加・削除・ドラッグ並べ替えを行う方針とする。
+Phase 7のCase連携基盤はFix扱いとする。Case一覧/詳細、Case Genre、Case専用Storage Directory、file_linksによる同一Storage objectの複数Case参照、Overview / Open When / Closed When / tags、Stakeholders、Current Situation手動生成、Mail Thread手動Assign / Remove、Case詳細Assigned Mail検索、Stored Files Window、右ガジェットCalendar枠、Case Toolsアイコンランチャーまで実装済みである。Case Toolsは「アイコン + URL」の単純なリンク集合として扱い、通常表示はアイコンのみ、設定時に追加・削除・ドラッグ並べ替えを行う方針とする。
+
+Current Situationは自動生成せず、ユーザーが「今どうなっていたか」を確認したい時にRefreshを押して生成する。入力にはCase概要、関連メールThread要約、Task接続点、Calendar接続点、Case Storage内File Digestを含める。Task / Calendarは現時点では接続点のみであり、実データ接続はPhase 8 / 9で行う。
+
+LLM自動Case判定はPhase 7では実装しない。まず手動Assignと明示Auto Assign Rule運用を優先し、実運用で手間が大きい場合に、候補提示またはLLM自動判定として後続追加する。
 
 Caseの繰り返し案件は、同一Caseへ毎年Taskを自動追加する方式ではなく、`case_series` に属する「同系列の別Case」として扱う。前年・前回Caseをテンプレートに次回Caseを作成し、元Caseは次回Case作成後にClosedへ進める運用を基本とする。
 
@@ -1351,12 +1403,12 @@ Phase 6で未実装として残すもの:
 ```text
 □ file_security_meta_classification
 ■ file_summary
-□ Storage設定UIの本格化（Phase 9）
+□ Storage設定UIの本格化（Phase 9以降）
 □ 保存失敗・取得失敗のMaintenance表示強化
-□ Phase 7のCase連携に合わせたfile_links拡張
+■ file_linksによる明示的な多対多File参照
 ```
 
-次の主目標はPhase 7/8として、CaseへのMail/Task/Calendar実データ接続、Case Series / Create next Case、Current Situation生成を段階的に実装することとする。`file_security_meta_classification` は引き続き保留し、Storage設定UI・Maintenance表示強化はPhase 9以降で扱う。
+次の主目標はPhase 8のTask中核実装である。Taskテーブル/API/画面、Case詳細へのTask接続、Case Closed条件、メールからTask作成を優先する。Task基盤が入ったら、Phase 9のCalendar実データ接続へ早めに進む。Case Series / Create next Case、自動Case判定は実用上の必要度を見ながら後続で扱う。`file_security_meta_classification` は引き続き保留し、Storage設定UI・Maintenance表示強化はPhase 9以降で扱う。
 
 Phase 6開始時に特に確認する:
 

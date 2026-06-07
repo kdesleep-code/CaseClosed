@@ -870,24 +870,50 @@ Caseが保持するメール集合を表現する関連テーブル。
 
 概念上は「メールが案件に紐づく」ではなく、「Caseが関連メールを持つ」と捉える。Gmail本文・スレッド等の一次情報は `gmail_messages` / `gmail_threads` に保持し、Case側から参照する。
 
-自動判定では、1メールにつき主Caseを1つ作る。ユーザー手動操作では、同じメールを別Caseのメール集合へコピー表示できるようにする。
+Phase 7 Fix時点では、手動Assignおよび明示Auto Assign Ruleにより、Thread内の各メールへCaseリンクを作る。LLMによる主Case自動判定は保留する。
 
 ```text
 id                  TEXT PRIMARY KEY
 case_id              TEXT NOT NULL REFERENCES cases(id)
 message_id           TEXT NOT NULL REFERENCES gmail_messages(id)
-link_role            TEXT NOT NULL   -- primary/copy
-source               TEXT NOT NULL   -- user/llm/rule/system
 created_at           TEXT NOT NULL
-created_by           TEXT NOT NULL
+updated_at           TEXT NOT NULL
+version              INTEGER NOT NULL DEFAULT 1
 ```
 
 ### 制約
 
-- `link_role = primary` は1メールにつき1つまで。
-- `link_role = copy` は複数可。
 - 1つのCaseは複数のメールを持てる。
-- `Pinned` メールはCase候補抽出・Case判定対象外。ただしユーザー手動リンクは可。
+- 1つのメール/Threadを複数Caseのメール集合へ表示してよい。
+- `Pinned` メールはLLM Case候補抽出・LLM Case判定対象外。ただしユーザー手動リンクと明示Auto Assign Ruleは可。
+
+## 6.6.1 case_auto_assign_rules
+
+ユーザーが明示的に作成するCaseへの自動Assignルール。
+LLMによるCase判定とは別扱いとし、受信時に条件一致すれば対象CaseへThreadを追加する。
+
+```text
+id                  TEXT PRIMARY KEY
+case_id              TEXT NOT NULL REFERENCES cases(id)
+rule_type            TEXT NOT NULL   -- 初期実装は sender_email
+rule_value           TEXT NOT NULL   -- 正規化済みメールアドレス
+label                TEXT NULL
+is_enabled           INTEGER NOT NULL DEFAULT 1
+created_at           TEXT NOT NULL
+updated_at           TEXT NOT NULL
+version              INTEGER NOT NULL DEFAULT 1
+UNIQUE(case_id, rule_type, rule_value)
+```
+
+適用条件:
+
+- 受信メールの `from_address` が `rule_value` と一致する。
+- SPAM判定されていないメールを対象とする。
+- Contactが `skipped` の送信者も対象に含む。
+- Contactが `spam` の送信者、および件名 `[SPAM]` 判定されたメールは対象外。
+- 対象Caseは `archived_at IS NULL`。
+- Completed Case（`closed_at IS NOT NULL`）も対象に含む。
+- 既存リンクは重複作成しない。
 
 ## 6.7 mail_summaries
 
@@ -1036,7 +1062,7 @@ Mailing Listアドレスを宛先として使う場合に、将来そのアド�
 例:
 
 ```text
-{筑波大学&学生&!KDE}
+{筑波大学&学生&!lab-member}
 ```
 
 Phase 3時点では保存・表示のみでよい。実際の宛先展開はメール送信機能実装時に扱う。
@@ -1228,7 +1254,7 @@ updated_at               TEXT NOT NULL
 例:
 
 ```text
-KDE&秘書
+lab-member&秘書
 CCS&委員会
 ```
 
@@ -1466,20 +1492,25 @@ Storage詳細のVersion Differenceでは、表示中バージョンに至る差�
 ## 9.7 file_links
 
 ファイルとCase/Task/Mail等の関連。
-Phase 7のCase連携で拡張する。
+
+Phase 7時点では、Case専用Storage Directoryに加えて、同一Storage objectを複数Caseから参照するための明示リンクとして利用する。
+Case詳細のStored Files Windowでは、Case専用Directory配下のStorage objectと、`linked_type = case` のactiveな `file_links` を合わせて表示する。
 
 ```text
 id                  TEXT PRIMARY KEY
 storage_object_id    TEXT NOT NULL REFERENCES storage_objects(id)
 linked_type          TEXT NOT NULL   -- case/task/mail/contact
 linked_id            TEXT NOT NULL
-link_source          TEXT NOT NULL   -- user/system/mail_attachment/generated
+label                TEXT NULL
+status               TEXT NOT NULL DEFAULT 'active'
 created_at           TEXT NOT NULL
-deleted_at           TEXT NULL
+updated_at           TEXT NOT NULL
+version              INTEGER NOT NULL DEFAULT 1
 ```
 
-メール添付由来ファイルは、添付元メールのCaseリンクに応じて表示Caseが変わる。  
-そのため、メール添付ファイルについては `file_links` を固定所属として使うのではなく、メールリンク経由の表示も許す。
+Caseからファイルを除外する場合は、対象Caseの `file_links` を `deleted` にする。  
+対象ファイルがそのCase専用Directory配下に実体所属している場合は、Caseから除外するとStorage rootへ戻す。  
+ファイル本体削除時はStorage objectを `deleted` にし、当該Storage objectに紐づくactiveな `file_links` も `deleted` にする。
 
 ## 9.8 file_security_rules
 
@@ -2387,10 +2418,10 @@ handover_log_generation
 9. ユーザーがHighにした場合、Gmailスター付与の `external_operations` を作る。
 10. LLMがHighにした場合も、Gmailスター付与の `external_operations` を作る。
 11. Pending判定はFromアドレスのみを対象とする。
-12. Pending中は重要度判定・Case判定・自動要約を止める。
+12. Pending中は重要度判定・LLM Case判定・自動要約を止める。
 13. Lowは自動要約しない。
-14. 自動Case判定は1メール1案件。
-15. 手動で別Caseへのコピーリンクを許す。
+14. LLM自動Case判定を使う場合は1メール1案件を基本とする。Phase 7 Fix時点では保留。
+15. 手動Assignと明示Auto Assign Ruleでは、別Caseへの複数リンクを許す。
 16. `no_case_needed` はCaseリンクなし。
 17. `inbox_required` はInboxへ自動紐づけ。
 18. `external_operations.unknown` は自動再実行しない。

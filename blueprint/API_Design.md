@@ -1,4 +1,4 @@
-# CaseClosed API詳細設計書
+﻿# CaseClosed API詳細設計書
 
 Version: 0.3  
 作成日: 2026-05-22  
@@ -481,8 +481,35 @@ Response data:
 仕様:
 
 - Caseが持つ関連メール集合を `related_mails` として返す。
-- `primary` と `copy` を区別して返す。
+- Phase 7 Fix時点では、手動Assign / 明示Auto Assign Ruleで作成された関連メールThreadを返す。
 - ファイルカード表示を含む場合はファイル exposure log を記録する。
+
+## 6.2.1 Case Auto Assign Rules
+
+```http
+GET /api/v1/cases/{case_id}/auto-assign-rules
+POST /api/v1/cases/{case_id}/auto-assign-rules
+DELETE /api/v1/cases/{case_id}/auto-assign-rules/{rule_id}
+```
+
+POST request:
+
+```json
+{
+  "sender_email": "papers@example.com"
+}
+```
+
+仕様:
+
+- Phase 7 Fix時点では `sender_email` 条件のみ扱う。
+- メール受信時、Archivedになっていない全Caseの有効Ruleを参照する。
+- Completed Caseは判定対象に含む。
+- メール側はSPAM判定されていない全メールを対象とする。
+- Skip扱いの送信者も対象に含み、Contact `spam` および件名 `[SPAM]` 判定は対象外とする。
+- 条件一致時は対象CaseへThread単位で関連メールを追加する。
+- 既存リンクがある場合は重複作成しない。
+- LLM Case判定とは別の明示ルールであり、LLMコストは発生しない。
 
 ## 6.3 Case作成
 
@@ -877,7 +904,7 @@ Request:
 - `High` にした場合はGmailスター付与 `external_operation` を作成する。
 - `Pinned` はGmailスターと無関係。
 - `Skip` はProcessedとは別扱い。
-- 手動でHigh/Middleへ変更した場合はCase判定Jobを発火する。
+- Phase 7 Fix時点では自動Case判定Jobを発火しない。手動Assign運用を優先し、必要になった場合に候補提示または自動判定を追加する。
 
 Phase 4初期の外部接続前実装では、Gmailスター付与などの外部副作用はまだ作らず、`mail_user_state.user_importance` と `mail_auto_state.effective_importance` の更新だけを行う。
 
@@ -1733,7 +1760,7 @@ POST /api/v1/follow-up-watches/{watch_id}/create-reminder-task
 
 # 13. File / Storage API
 
-Phase 6時点の現行実装は、`files` テーブルを分けず `storage_objects` をファイル系列として扱う。Case連携APIはPhase 7で拡張する。
+現行実装は、`files` テーブルを分けず `storage_objects` をファイル系列として扱う。Case専用Storage Directoryを維持しつつ、複数Case / 通常Storageから同一ファイルを参照する場合は `file_links` を使う。
 
 ## 13.1 Storage一覧
 
@@ -1775,6 +1802,21 @@ GET /api/v1/storage/objects/{storage_object_id}
 ```http
 GET /files/{storage_object_id}
 ```
+
+## 13.2.1 Case file links
+
+```http
+GET /api/v1/cases/{case_id}/files
+POST /api/v1/cases/{case_id}/files/{storage_object_id}/link
+DELETE /api/v1/cases/{case_id}/files/{storage_object_id}/link
+```
+
+仕様:
+
+- `GET` は、Case専用Storage Directory配下のactive Storage objectと、`file_links.linked_type = case` / `linked_id = case_id` / `status = active` のStorage objectを合わせて返す。
+- `POST` は、既存Storage objectをCaseへリンクする。Storage object本体の `directory_id` は変更しない。
+- `DELETE` は、そのCaseから対象Storage objectを除外する。対象がCase専用Storage Directory配下に実体所属している場合はStorage rootへ戻す。
+- ファイル本体の削除は通常の `DELETE /api/v1/storage/objects/{storage_object_id}` を使う。この場合、当該ファイルのCaseリンクもすべて削除扱いになる。
 
 ## 13.3 ファイルアップロード
 
@@ -2037,8 +2079,11 @@ POST /api/v1/mails/{message_id}/summarize
 ## 14.5 Case Context更新
 
 ```http
-POST /api/v1/cases/{case_id}/update-context
+POST /api/v1/cases/{case_id}/current-situation
 ```
+
+Phase 7 Fix時点では、Case Current Situationの手動生成APIとして扱う。
+ユーザーがCase詳細でRefreshした時のみ実行し、`case_context_versions` に結果を保存する。
 
 ## 14.6 Contact Context更新
 
@@ -2559,9 +2604,10 @@ Closedにする              POST /cases/{id}/close
 再オープン                POST /cases/{id}/reopen
 アーカイブ                POST /cases/{id}/archive
 メール一覧                GET /cases/{id}/mails
+Auto Assign Rule         GET/POST/DELETE /cases/{id}/auto-assign-rules
 Task作成                  POST /tasks
-ファイル連携              Phase 7でStorage object連携として設計
-Context更新               POST /cases/{id}/update-context
+ファイル連携              GET/POST/DELETE /cases/{id}/files...
+Context更新               POST /cases/{id}/current-situation
 引継ぎログ生成            後続: POST /cases/{id}/handover-report
 ```
 
@@ -2704,7 +2750,7 @@ API実装時に迷った場合は、以下を優先する。
 11. Caseは削除しない。
 12. Caseの完了はClosed、Taskの完了はCompletedと呼ぶ。
 13. PinnedはGmailスターと無関係に扱う。
-14. Lowは自動要約・自動Case判定しない。
+14. Lowは自動要約・LLM自動Case判定しない。明示Auto Assign Ruleはユーザー設定として別扱い。
 15. LLM入力全文はログに保存しない。
 ```
 

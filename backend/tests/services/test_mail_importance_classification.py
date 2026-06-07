@@ -346,6 +346,136 @@ def test_mail_importance_classification_keeps_llm_skip_as_skip(
     assert auto_row[2] == result["llm_run_id"]
 
 
+def test_mail_importance_classification_uses_profile_context(
+    client,
+    database_path: Path,
+) -> None:
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings (id, key, value_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "setting_user_profile_test",
+                "user_profile",
+                json.dumps(
+                    {
+                        "display_name": "Kazumasa Horie",
+                        "affiliation": "University of Tsukuba",
+                        "research_fields": "sleep medicine, medical AI",
+                        "teaching_responsibilities": (
+                            "Student international conference support\n"
+                            "Medical AI lectures"
+                        ),
+                        "committee_roles": "Public relations committee",
+                        "important_projects": "Home sleep monitoring project",
+                        "mail_importance_notes": (
+                            "Prioritize student, committee, and review requests."
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+                "2026-06-03T19:00:00+09:00",
+            ),
+        )
+        connection.commit()
+
+    client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Profile Context Sender",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "profile.context@example.com", "is_primary": True}
+            ],
+        },
+    )
+    ingest_response = client.post(
+        MOCK_MAILS_URL,
+        json={
+            "gmail_message_id": "gmail_profile_context_1",
+            "gmail_thread_id": "thread_profile_context",
+            "subject": "Student review request",
+            "from_address": "profile.context@example.com",
+            "received_at": "2026-05-23T12:18:00+09:00",
+            "body_text": "Please review the student conference abstract.",
+        },
+    )
+    message_id = ingest_response.json()["data"]["message_id"]
+    job_id = ingest_response.json()["data"]["queued_job_id"]
+
+    class CapturingProvider:
+        provider_name = "test"
+        model_name = "profile-context-provider"
+
+        def __init__(self) -> None:
+            self.payloads: list[dict[str, object]] = []
+
+        def complete_json(self, *, function_type, input_payload):
+            assert function_type == "mail_importance_classification"
+            self.payloads.append(input_payload)
+            return LlmProviderResponse(
+                output={"importance": "middle"},
+                output_preview="middle",
+                prompt_tokens=1,
+                completion_tokens=1,
+                total_tokens=2,
+                estimated_cost=0.0,
+            )
+
+    provider = CapturingProvider()
+    importance_module = importlib.import_module(
+        "caseclosed.services.mail_importance_classification"
+    )
+    orchestrator_module = importlib.import_module("caseclosed.services.orchestrator")
+    orchestrator = orchestrator_module.Orchestrator(
+        worker_id="worker-mail-importance-profile-context",
+        handlers={
+            "mail_importance_classification": lambda job: (
+                importance_module.handle_mail_importance_classification(
+                    job,
+                    provider=provider,
+                )
+            )
+        },
+    )
+
+    assert orchestrator.run_once() == job_id
+    assert len(provider.payloads) == 1
+    profile_context = provider.payloads[0]["profile_context"]
+    assert profile_context["research_fields"] == "sleep medicine, medical AI"
+    assert profile_context["teaching_responsibilities"] == [
+        "Student international conference support",
+        "Medical AI lectures",
+    ]
+    assert profile_context["important_projects"] == ["Home sleep monitoring project"]
+    assert profile_context["mail_importance_notes"] == (
+        "Prioritize student, committee, and review requests."
+    )
+
+    with sqlite3.connect(database_path) as connection:
+        llm_run_row = connection.execute(
+            """
+            SELECT input_source_json, input_diagnostic_json
+            FROM llm_runs
+            WHERE function_type = 'mail_importance_classification'
+            """,
+        ).fetchone()
+        auto_row = connection.execute(
+            """
+            SELECT suggested_importance, effective_importance
+            FROM mail_auto_state
+            WHERE message_id = ?
+            """,
+            (message_id,),
+        ).fetchone()
+
+    assert json.loads(llm_run_row[0])["has_profile_context"] is True
+    assert json.loads(llm_run_row[1])["has_profile_context"] is True
+    assert auto_row == ("middle", "middle")
+
+
 def test_high_or_middle_mail_queues_and_stores_mock_summary(
     client,
     database_path: Path,
@@ -462,7 +592,7 @@ def test_high_or_middle_mail_queues_and_stores_mock_summary(
     assert len(detail_summary_items) == 1
     assert detail_summary_items[0]["message_id"] == message_id
     assert detail_summary_items[0]["summary_text"].startswith("Review summary target")
-    assert detail_summary_items[0]["translation_text"] is not None
+    assert detail_summary_items[0]["translation_text"] is None
     assert list_response.json()["data"]["items"][0]["summary"].startswith(
         "Review summary target"
     )
@@ -843,13 +973,11 @@ def test_openai_mail_summary_provider_is_used_when_profile_is_configured(
     assert sent_payload["model"] == "gpt-summary-test"
     assert sent_payload["text"]["format"]["name"] == "mail_summary"
     assert "homepage address" in sent_payload["instructions"]
-    assert "translation must be a faithful Japanese translation of the full email body" in (
-        sent_payload["instructions"]
-    )
+    assert "Full-body translation is disabled" in sent_payload["instructions"]
     assert "Please summarize and translate this message today." in sent_payload["input"]
     assert summary_row[0:3] == (
         "本日中の要約依頼。",
-        "本日中にこのメッセージを要約し翻訳してください。",
+        None,
         "ja",
     )
     assert llm_run_row[0:3] == ("mail_summary", "openai", "gpt-summary-test")
@@ -985,7 +1113,7 @@ def test_openai_mail_thread_summary_provider_is_used_when_profile_is_configured(
     assert "Please review this whole thread today." in sent_payload["input"]
     assert thread_summary_row[0:3] == (
         "スレッド全体のレビュー依頼。",
-        "本日中にスレッド全体をレビューしてください。",
+        None,
         "ja",
     )
     assert llm_run_row[0:3] == (

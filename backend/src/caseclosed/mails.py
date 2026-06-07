@@ -17,7 +17,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session as DatabaseSession
 
 from caseclosed.auth import json_error
+from caseclosed.contact_selectors import resolve_recipient_selectors
 from caseclosed.db.models import AppSetting
+from caseclosed.db.models import Case
+from caseclosed.db.models import CaseMailLink
 from caseclosed.db.models import Contact
 from caseclosed.db.models import ContactEmailAddress
 from caseclosed.db.models import ContactTag
@@ -98,6 +101,10 @@ class MockMailIngestRequest(BaseModel):
     gmail_link: str | None = None
     gmail_labels: list[str] | None = None
     external_starred: bool = False
+
+
+class MailThreadCaseAssignRequest(BaseModel):
+    case_id: str
 
 
 class MailImportanceRequest(BaseModel):
@@ -1082,6 +1089,43 @@ def get_mail_bundle(
     return message, user_state, auto_state
 
 
+def thread_messages(session: DatabaseSession, thread_id: str) -> list[GmailMessage]:
+    return session.scalars(
+        select(GmailMessage)
+        .where(GmailMessage.thread_id == thread_id)
+        .order_by(GmailMessage.received_at, GmailMessage.id)
+    ).all()
+
+
+def mail_thread_case_link_items(
+    session: DatabaseSession,
+    thread_id: str,
+) -> list[dict[str, object]]:
+    rows = session.execute(
+        select(Case)
+        .join(CaseMailLink, CaseMailLink.case_id == Case.id)
+        .join(GmailMessage, GmailMessage.id == CaseMailLink.message_id)
+        .where(GmailMessage.thread_id == thread_id)
+        .group_by(Case.id)
+        .order_by(Case.is_system_case.desc(), Case.updated_at.desc(), Case.name.asc())
+    ).scalars().all()
+    return [
+        {
+            "id": case.id,
+            "case_id": case.id,
+            "title": case.name,
+        }
+        for case in rows
+    ]
+
+
+def ensure_case_for_mail_assignment(session: DatabaseSession, case_id: str) -> Case:
+    case = session.get(Case, case_id)
+    if case is None:
+        raise json_error(404, "NOT_FOUND", "Case not found.")
+    return case
+
+
 def normalize_importance(value: str) -> str:
     normalized = value.strip().lower()
     if normalized == "pinned":
@@ -1325,18 +1369,17 @@ def aggregate_thread_rows(
     )
 
 
-def needs_action_thread_ids(
-    rows: list[tuple[GmailMessage, MailUserState, MailAutoState]],
-) -> set[str]:
-    return {
-        message.thread_id
-        for message, user_state, auto_state in rows
-        if not message_is_sent(message)
+def row_needs_action(
+    row: tuple[GmailMessage, MailUserState, MailAutoState],
+) -> bool:
+    message, user_state, auto_state = row
+    return (
+        not message_is_sent(message)
         and auto_state.pending_reason is None
         and user_state.processed_status != "processed"
         and (user_state.user_importance or auto_state.effective_importance)
         in {"high", "middle"}
-    }
+    )
 
 
 def send_only_requests(session: DatabaseSession) -> list[MailSendRequest]:
@@ -1486,7 +1529,7 @@ def detail_data(
             session,
             thread_message_ids,
         ),
-        "case_links": [],
+        "case_links": mail_thread_case_link_items(session, message.thread_id),
         "attachments": unique_thread_attachments(attachments_by_message_id),
         "drafts": [],
         "available_actions": available_actions(user_state, auto_state),
@@ -1550,7 +1593,7 @@ def list_item_data(
         ),
         "attachment_count": attachment_count,
         "has_attachments": attachment_count > 0,
-        "case_links": [],
+        "case_links": mail_thread_case_link_items(session, message.thread_id),
         "summary": None
         if is_sent or effective_importance not in SUMMARY_TARGET_IMPORTANCE
         else (
@@ -1848,7 +1891,9 @@ def send_mail(
     payload: MailSendRequestPayload,
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
-    to_addresses = normalize_address_list(payload.to_addresses)
+    to_addresses = normalize_address_list(
+        resolve_recipient_selectors(session, payload.to_addresses)
+    )
     if len(to_addresses) == 0:
         raise json_error(422, "VALIDATION_ERROR", "At least one recipient is required.")
 
@@ -1882,11 +1927,15 @@ def send_mail(
         status="scheduled_mock",
         to_addresses_json=json.dumps(to_addresses, ensure_ascii=True),
         cc_addresses_json=json.dumps(
-            normalize_address_list(payload.cc_addresses),
+            normalize_address_list(
+                resolve_recipient_selectors(session, payload.cc_addresses)
+            ),
             ensure_ascii=True,
         ),
         bcc_addresses_json=json.dumps(
-            normalize_address_list(payload.bcc_addresses),
+            normalize_address_list(
+                resolve_recipient_selectors(session, payload.bcc_addresses)
+            ),
             ensure_ascii=True,
         ),
         subject=payload.subject,
@@ -1957,9 +2006,15 @@ def generate_mail_draft(
     payload: MailDraftGenerationRequest,
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
-    to_addresses = normalize_address_list(payload.to_addresses)
-    cc_addresses = normalize_address_list(payload.cc_addresses)
-    bcc_addresses = normalize_address_list(payload.bcc_addresses)
+    to_addresses = normalize_address_list(
+        resolve_recipient_selectors(session, payload.to_addresses)
+    )
+    cc_addresses = normalize_address_list(
+        resolve_recipient_selectors(session, payload.cc_addresses)
+    )
+    bcc_addresses = normalize_address_list(
+        resolve_recipient_selectors(session, payload.bcc_addresses)
+    )
     all_recipient_addresses = to_addresses + cc_addresses + bcc_addresses
     if len(all_recipient_addresses) == 0:
         raise json_error(422, "VALIDATION_ERROR", "At least one recipient is required.")
@@ -2237,17 +2292,12 @@ def list_mails(
             if row[0].thread_id in matching_thread_ids
         ]
 
-    matching_needs_action_thread_ids = (
-        needs_action_thread_ids(all_rows) if needs_action else set()
-    )
+    if needs_action:
+        all_rows = [row for row in all_rows if row_needs_action(row)]
 
     aggregated_rows = aggregate_thread_rows(all_rows)
     if needs_action:
-        aggregated_rows = [
-            row
-            for row in aggregated_rows
-            if row[0].thread_id in matching_needs_action_thread_ids
-        ]
+        pass
     else:
         if normalized_processed in {"0", "unprocessed"}:
             aggregated_rows = [
@@ -2691,6 +2741,79 @@ def get_mail_day_stats(
             "sent_count": sent_count,
         },
     }
+
+
+@router.get("/{message_id}/case-links")
+def get_mail_thread_case_links(
+    message_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    message, _user_state, _auto_state = get_mail_bundle(session, message_id)
+    return {
+        "ok": True,
+        "data": {"items": mail_thread_case_link_items(session, message.thread_id)},
+    }
+
+
+@router.post("/{message_id}/case-links")
+def assign_mail_thread_to_case(
+    message_id: str,
+    payload: MailThreadCaseAssignRequest,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    message, user_state, auto_state = get_mail_bundle(session, message_id)
+    case = ensure_case_for_mail_assignment(session, payload.case_id)
+    now = jst_iso()
+    messages = thread_messages(session, message.thread_id)
+    message_ids = [thread_message.id for thread_message in messages]
+    existing_message_ids = set(
+        session.scalars(
+            select(CaseMailLink.message_id)
+            .where(CaseMailLink.case_id == case.id)
+            .where(CaseMailLink.message_id.in_(message_ids))
+        ).all()
+    )
+    for thread_message in messages:
+        if thread_message.id in existing_message_ids:
+            continue
+        session.add(
+            CaseMailLink(
+                id=new_id("case_mail_link"),
+                case_id=case.id,
+                message_id=thread_message.id,
+                created_at=now,
+                updated_at=now,
+                version=1,
+            )
+        )
+    case.updated_at = now
+    case.version += 1
+    session.commit()
+    return {"ok": True, "data": detail_data(session, message, user_state, auto_state)}
+
+
+@router.delete("/{message_id}/case-links/{case_id}")
+def unassign_mail_thread_from_case(
+    message_id: str,
+    case_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    message, user_state, auto_state = get_mail_bundle(session, message_id)
+    case = ensure_case_for_mail_assignment(session, case_id)
+    message_ids = [thread_message.id for thread_message in thread_messages(session, message.thread_id)]
+    links = session.scalars(
+        select(CaseMailLink)
+        .where(CaseMailLink.case_id == case.id)
+        .where(CaseMailLink.message_id.in_(message_ids))
+    ).all()
+    for link in links:
+        session.delete(link)
+    if links:
+        now = jst_iso()
+        case.updated_at = now
+        case.version += 1
+    session.commit()
+    return {"ok": True, "data": detail_data(session, message, user_state, auto_state)}
 
 
 @router.get("/{message_id}")

@@ -32,6 +32,7 @@ from caseclosed.auth import json_error
 from caseclosed.db.models import Case
 from caseclosed.db.models import Contact
 from caseclosed.db.models import FileIconSetting
+from caseclosed.db.models import FileLink
 from caseclosed.db.models import FileSummary
 from caseclosed.db.models import FileVersionDiff
 from caseclosed.db.models import GmailMessage
@@ -46,6 +47,7 @@ from caseclosed.db.models import StorageLocation
 from caseclosed.db.models import StorageObject
 from caseclosed.db.models import StorageObjectVersion
 from caseclosed.db.models import StorageOperationHistory
+from caseclosed.db.runtime import case_storage_directory_id
 from caseclosed.db.runtime import get_session
 from caseclosed.db.runtime import jst_iso
 from caseclosed.settings import get_storage_root
@@ -122,6 +124,10 @@ class StorageObjectLlmInputPatch(BaseModel):
 
 class StorageObjectDirectoryPatch(BaseModel):
     directory_id: str | None = None
+
+
+class StorageObjectCaseLinkCreate(BaseModel):
+    case_id: str
 
 
 class StorageDirectoryCreate(BaseModel):
@@ -294,6 +300,8 @@ def storage_source_mail_data(
 def storage_object_data(
     storage_object: StorageObject,
     session: DatabaseSession | None = None,
+    *,
+    display_source: str | None = None,
 ) -> dict[str, object]:
     data = {
         "id": storage_object.id,
@@ -312,12 +320,18 @@ def storage_object_data(
         "updated_at": storage_object.updated_at,
         "file_updated_at": storage_object.file_updated_at,
     }
+    if display_source is not None:
+        data["display_source"] = display_source
     if session is not None:
         data["source_mail"] = storage_source_mail_data(
             session,
             storage_object.source_message_id,
         )
         data["directory_path"] = storage_directory_path(session, storage_object.directory_id)
+        data["physical_directory_id"] = storage_object.directory_id
+        data["physical_directory_path"] = data["directory_path"]
+        storage_directory_param = storage_object.directory_id or "root"
+        data["physical_directory_url"] = f"/storage?directory={storage_directory_param}"
         file_icon = file_icon_for_filename(session, storage_object.original_filename)
         data["file_icon_setting_id"] = file_icon.id if file_icon is not None else None
         data["file_icon_url"] = (
@@ -504,6 +518,130 @@ def storage_directory_descendant_ids(
         descendant_ids.add(current_id)
         stack.extend(children.get(current_id, []))
     return descendant_ids
+
+
+def storage_directory_case_id(
+    session: DatabaseSession,
+    directory_id: str | None,
+) -> str | None:
+    current = ensure_storage_directory(session, directory_id)
+    seen: set[str] = set()
+    while current is not None:
+        if current.id in seen:
+            return None
+        seen.add(current.id)
+        if current.directory_kind == "case" and current.case_id is not None:
+            return current.case_id
+        current = ensure_storage_directory(session, current.parent_id)
+    return None
+
+
+def storage_object_linked_case_data(
+    case: Case,
+    *,
+    source: str,
+    file_link: FileLink | None = None,
+) -> dict[str, object]:
+    return {
+        "case_id": case.id,
+        "case_name": case.name,
+        "source": source,
+        "file_link_id": file_link.id if file_link is not None else None,
+        "created_at": file_link.created_at if file_link is not None else None,
+        "updated_at": file_link.updated_at if file_link is not None else case.updated_at,
+        "case_url": f"/cases/{case.id}",
+    }
+
+
+def storage_object_linked_case_items(
+    session: DatabaseSession,
+    storage_object: StorageObject,
+) -> list[dict[str, object]]:
+    items_by_case_id: dict[str, dict[str, object]] = {}
+    physical_case_id = storage_directory_case_id(session, storage_object.directory_id)
+    if physical_case_id is not None:
+        physical_case = session.get(Case, physical_case_id)
+        if physical_case is not None:
+            items_by_case_id[physical_case.id] = storage_object_linked_case_data(
+                physical_case,
+                source="physical",
+            )
+
+    rows = session.execute(
+        select(FileLink, Case)
+        .join(Case, Case.id == FileLink.linked_id)
+        .where(FileLink.storage_object_id == storage_object.id)
+        .where(FileLink.linked_type == "case")
+        .where(FileLink.status == "active")
+        .order_by(FileLink.created_at.desc(), FileLink.id.desc())
+    ).all()
+    for file_link, case in rows:
+        if case.id in items_by_case_id:
+            continue
+        items_by_case_id[case.id] = storage_object_linked_case_data(
+            case,
+            source="link",
+            file_link=file_link,
+        )
+
+    return sorted(
+        items_by_case_id.values(),
+        key=lambda item: (str(item["case_name"]).lower(), str(item["case_id"])),
+    )
+
+
+def storage_case_for_directory_id(
+    session: DatabaseSession,
+    directory_id: str | None,
+) -> Case | None:
+    if directory_id is None:
+        return None
+    case_id = storage_directory_case_id(session, directory_id)
+    if case_id is None:
+        return None
+    return session.get(Case, case_id)
+
+
+def storage_linked_case_directory_objects(
+    session: DatabaseSession,
+    case: Case,
+    directory_id: str,
+    *,
+    status: str,
+    location_id: str,
+    exclude_ids: set[str],
+    limit: int,
+) -> list[StorageObject]:
+    if limit <= 0:
+        return []
+    linked_directory_conditions = [FileLink.directory_id == directory_id]
+    if directory_id == case_storage_directory_id(case.id):
+        linked_directory_conditions.append(FileLink.directory_id.is_(None))
+    statement = (
+        select(StorageObject)
+        .join(FileLink, FileLink.storage_object_id == StorageObject.id)
+        .where(FileLink.linked_type == "case")
+        .where(FileLink.linked_id == case.id)
+        .where(FileLink.status == "active")
+        .where(or_(*linked_directory_conditions))
+        .where(StorageObject.scope == "managed")
+        .where(StorageObject.id.not_in(exclude_ids))
+        .order_by(StorageObject.created_at.desc(), StorageObject.id.desc())
+        .limit(limit)
+    )
+    if status != "all":
+        statement = statement.where(StorageObject.status == status)
+    if location_id != "all":
+        statement = statement.where(StorageObject.location_id == location_id)
+    return session.scalars(statement).all()
+
+
+def sort_storage_objects_for_directory(items: list[StorageObject]) -> list[StorageObject]:
+    return sorted(
+        items,
+        key=lambda item: (item.created_at, item.id),
+        reverse=True,
+    )
 
 
 def storage_file_extension(filename: str | None) -> str | None:
@@ -1048,6 +1186,15 @@ def delete_storage_object(
 ) -> None:
     file_deleted = delete_storage_object_file(storage_object, session)
     version_files_deleted = delete_storage_object_version_files(storage_object, session)
+    active_file_links = session.scalars(
+        select(FileLink)
+        .where(FileLink.storage_object_id == storage_object.id)
+        .where(FileLink.status == "active")
+    ).all()
+    for file_link in active_file_links:
+        file_link.status = "deleted"
+        file_link.updated_at = now
+        file_link.version += 1
     storage_object.status = "deleted"
     storage_object.updated_at = now
     storage_object.version += 1
@@ -1059,6 +1206,7 @@ def delete_storage_object(
         details={
             "physical_file_deleted": file_deleted,
             "version_files_deleted": version_files_deleted,
+            "deleted_file_link_count": len(active_file_links),
         },
     )
 
@@ -2670,11 +2818,34 @@ def list_storage_objects(
     else:
         statement = statement.where(StorageObject.directory_id == normalized_directory_id)
     objects = session.scalars(statement.limit(safe_limit)).all()
+    linked_object_ids: set[str] = set()
+    case = storage_case_for_directory_id(session, normalized_directory_id)
+    if case is not None:
+        linked_objects = storage_linked_case_directory_objects(
+            session,
+            case,
+            normalized_directory_id,
+            status=status,
+            location_id=location_id,
+            exclude_ids={storage_object.id for storage_object in objects},
+            limit=safe_limit,
+        )
+        linked_object_ids = {storage_object.id for storage_object in linked_objects}
+        objects = sort_storage_objects_for_directory(
+            [*objects, *linked_objects]
+        )[:safe_limit]
     return {
         "ok": True,
         "data": {
             "items": [
-                storage_object_data(storage_object, session) for storage_object in objects
+                storage_object_data(
+                    storage_object,
+                    session,
+                    display_source="link"
+                    if storage_object.id in linked_object_ids
+                    else "physical",
+                )
+                for storage_object in objects
             ]
         },
     }
@@ -2867,8 +3038,41 @@ def update_storage_object_directory(
         raise json_error(404, "NOT_FOUND", "Storage object not found.")
     old_directory_id = storage_object.directory_id
     directory = ensure_storage_directory(session, payload.directory_id)
-    storage_object.directory_id = directory.id if directory is not None else None
+    new_directory_id = directory.id if directory is not None else None
     now = jst_iso()
+    old_case_id = storage_directory_case_id(session, old_directory_id)
+    target_case_id = storage_directory_case_id(session, new_directory_id)
+    physical_target_case_id = storage_directory_case_id(session, storage_object.directory_id)
+    if target_case_id is not None and physical_target_case_id != target_case_id:
+        active_case_link = session.scalar(
+            select(FileLink)
+            .where(FileLink.storage_object_id == storage_object.id)
+            .where(FileLink.linked_type == "case")
+            .where(FileLink.linked_id == target_case_id)
+            .where(FileLink.status == "active")
+            .order_by(FileLink.created_at.asc(), FileLink.id.asc())
+            .limit(1)
+        )
+        if active_case_link is not None:
+            new_directory_id = active_case_link.directory_id or case_storage_directory_id(
+                target_case_id
+            )
+
+    storage_object.directory_id = new_directory_id
+    moved_into_case_id = storage_directory_case_id(session, storage_object.directory_id)
+    redundant_file_links: list[FileLink] = []
+    if moved_into_case_id is not None:
+        redundant_file_links = session.scalars(
+            select(FileLink)
+            .where(FileLink.storage_object_id == storage_object.id)
+            .where(FileLink.linked_type == "case")
+            .where(FileLink.linked_id == moved_into_case_id)
+            .where(FileLink.status == "active")
+        ).all()
+        for file_link in redundant_file_links:
+            file_link.status = "deleted"
+            file_link.updated_at = now
+            file_link.version += 1
     storage_object.updated_at = now
     storage_object.version += 1
     record_storage_operation(
@@ -2879,12 +3083,157 @@ def update_storage_object_directory(
         details={
             "old_directory_id": old_directory_id,
             "new_directory_id": storage_object.directory_id,
+            "deleted_redundant_case_file_link_count": len(redundant_file_links),
+            "old_case_id": old_case_id,
         },
     )
     session.commit()
     return {
         "ok": True,
         "data": {"storage_object": storage_object_data(storage_object, session)},
+    }
+
+
+@router.get("/objects/{storage_object_id}/linked-cases")
+def list_storage_object_linked_cases(
+    storage_object_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    storage_object = session.get(StorageObject, storage_object_id)
+    if (
+        storage_object is None
+        or storage_object.status != "active"
+        or storage_object.scope != "managed"
+    ):
+        raise json_error(404, "NOT_FOUND", "Storage object not found.")
+    return {
+        "ok": True,
+        "data": {
+            "items": storage_object_linked_case_items(session, storage_object),
+        },
+    }
+
+
+@router.post("/objects/{storage_object_id}/linked-cases")
+def create_storage_object_case_link(
+    storage_object_id: str,
+    payload: StorageObjectCaseLinkCreate,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    storage_object = session.get(StorageObject, storage_object_id)
+    if (
+        storage_object is None
+        or storage_object.status != "active"
+        or storage_object.scope != "managed"
+    ):
+        raise json_error(404, "NOT_FOUND", "Storage object not found.")
+    case = session.get(Case, payload.case_id)
+    if case is None:
+        raise json_error(404, "NOT_FOUND", "Case not found.")
+
+    now = jst_iso()
+    physical_case_id = storage_directory_case_id(session, storage_object.directory_id)
+    existing_link = session.scalar(
+        select(FileLink)
+        .where(FileLink.storage_object_id == storage_object.id)
+        .where(FileLink.linked_type == "case")
+        .where(FileLink.linked_id == case.id)
+        .order_by(FileLink.created_at.asc(), FileLink.id.asc())
+        .limit(1)
+    )
+    link_changed = False
+    if physical_case_id != case.id:
+        if existing_link is None:
+            existing_link = FileLink(
+                id=f"file_link_{uuid4().hex}",
+                storage_object_id=storage_object.id,
+                linked_type="case",
+                linked_id=case.id,
+                label=None,
+                status="active",
+                created_at=now,
+                updated_at=now,
+                version=1,
+            )
+            session.add(existing_link)
+            link_changed = True
+        elif existing_link.status != "active":
+            existing_link.status = "active"
+            existing_link.updated_at = now
+            existing_link.version += 1
+            link_changed = True
+
+    if link_changed:
+        case.updated_at = now
+        case.version += 1
+        record_storage_operation(
+            session,
+            operation_type="case_linked",
+            now=now,
+            storage_object=storage_object,
+            details={"case_id": case.id, "case_name": case.name},
+        )
+        session.commit()
+
+    return {
+        "ok": True,
+        "data": {
+            "items": storage_object_linked_case_items(session, storage_object),
+        },
+    }
+
+
+@router.delete("/objects/{storage_object_id}/linked-cases/{case_id}")
+def delete_storage_object_case_link(
+    storage_object_id: str,
+    case_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    storage_object = session.get(StorageObject, storage_object_id)
+    if (
+        storage_object is None
+        or storage_object.status != "active"
+        or storage_object.scope != "managed"
+    ):
+        raise json_error(404, "NOT_FOUND", "Storage object not found.")
+    case = session.get(Case, case_id)
+    if case is None:
+        raise json_error(404, "NOT_FOUND", "Case not found.")
+
+    now = jst_iso()
+    active_links = session.scalars(
+        select(FileLink)
+        .where(FileLink.storage_object_id == storage_object.id)
+        .where(FileLink.linked_type == "case")
+        .where(FileLink.linked_id == case.id)
+        .where(FileLink.status == "active")
+    ).all()
+    for file_link in active_links:
+        file_link.status = "deleted"
+        file_link.updated_at = now
+        file_link.version += 1
+
+    if active_links:
+        case.updated_at = now
+        case.version += 1
+        record_storage_operation(
+            session,
+            operation_type="case_unlinked",
+            now=now,
+            storage_object=storage_object,
+            details={
+                "case_id": case.id,
+                "case_name": case.name,
+                "deleted_file_link_count": len(active_links),
+            },
+        )
+        session.commit()
+
+    return {
+        "ok": True,
+        "data": {
+            "items": storage_object_linked_case_items(session, storage_object),
+        },
     }
 
 

@@ -16,17 +16,21 @@ import {
   isPreviewableMarkdownFile,
   isPreviewablePdfFile,
   isPreviewableTextFile,
+  isPreviewableVideoFile,
   isPreviewableZipFile,
 } from './storagePreview'
 import {
   createStorageDirectory,
   deleteStorageDirectory,
   deleteStorageObject,
+  deleteStorageObjectCaseLink,
   deleteOlderStorageObjectVersions,
+  createStorageObjectCaseLink,
   getStorageObject,
   getStorageObjectArchiveTree,
   getStorageObjectLlmDigest,
   getStorageObjectVersionArchiveTree,
+  listStorageObjectLinkedCases,
   listStorageObjectVersions,
   listStorageDirectories,
   listStorageObjects,
@@ -42,6 +46,9 @@ import type { StorageDirectory } from './phase3Api'
 import type { StorageObjectVersion } from './phase3Api'
 import type { StorageSourceMail } from './phase3Api'
 import type { FileSummary, FileVersionDiff } from './phase3Api'
+import type { StorageObjectLinkedCase } from './phase3Api'
+import { listCases } from './phase7Api'
+import type { CaseItem } from './phase7Api'
 
 type StoragePreviewFile = {
   id: string
@@ -215,6 +222,13 @@ function isPreviewablePdf(object: StoragePreviewFile) {
   })
 }
 
+function isPreviewableVideo(object: StoragePreviewFile) {
+  return isPreviewableVideoFile({
+    contentType: object.content_type,
+    filename: object.original_filename,
+  })
+}
+
 function isPreviewableMarkdown(object: StoragePreviewFile) {
   return isPreviewableMarkdownFile({
     contentType: object.content_type,
@@ -247,6 +261,12 @@ function storageSourceLabel(object: StorageObject) {
     return t('storage.source.mailAttachment')
   }
   return t('common.none')
+}
+
+function linkedCaseSourceLabel(source: string) {
+  if (source === 'physical') return t('storage.linkedCases.source.physical')
+  if (source === 'link') return t('storage.linkedCases.source.link')
+  return source
 }
 
 function storageSourceMailSender(mail: StorageSourceMail) {
@@ -385,7 +405,9 @@ export function StorageObjectCard({
     <button
       aria-label={t('storage.openFile', { name: filename })}
       aria-selected={selected}
-      className={`storage-object-card button-loading-dot${busy ? ' is-loading' : ''}`}
+      className={`storage-object-card button-loading-dot${
+        object.display_source === 'link' ? ' storage-object-card-linked' : ''
+      }${busy ? ' is-loading' : ''}`}
       data-storage-object-id={object.id}
       draggable
       disabled={busy}
@@ -496,6 +518,14 @@ function StorageObjectDetailView({ storageObjectId }: { storageObjectId: string 
   const [fileSummaryStatus, setFileSummaryStatus] = useState<
     'idle' | 'loading' | 'loaded' | 'missing' | 'failed'
   >('idle')
+  const [linkedCases, setLinkedCases] = useState<StorageObjectLinkedCase[]>([])
+  const [linkedCasesStatus, setLinkedCasesStatus] = useState<
+    'idle' | 'loading' | 'loaded' | 'failed'
+  >('idle')
+  const [isLinkedCasesEditing, setIsLinkedCasesEditing] = useState(false)
+  const [linkedCaseInput, setLinkedCaseInput] = useState('')
+  const [caseSuggestions, setCaseSuggestions] = useState<CaseItem[]>([])
+  const [linkedCasesBusy, setLinkedCasesBusy] = useState(false)
   const [deleteBusy, setDeleteBusy] = useState(false)
   const [versionBusy, setVersionBusy] = useState(false)
   const [isVersionDragOver, setIsVersionDragOver] = useState(false)
@@ -619,13 +649,53 @@ function StorageObjectDetailView({ storageObjectId }: { storageObjectId: string 
         setFileSummary(null)
         setFileSummaryIsStale(false)
         setFileSummaryStaleReason(null)
-        setFileVersionDiff(null)
-        setFileSummaryStatus('failed')
-      })
+      setFileVersionDiff(null)
+      setFileSummaryStatus('failed')
+    })
     return () => {
       isMounted = false
     }
   }, [object, selectedVersionId])
+
+  useEffect(() => {
+    if (object === null) {
+      setLinkedCases([])
+      setLinkedCasesStatus('idle')
+      return undefined
+    }
+    let isMounted = true
+    setLinkedCases([])
+    setLinkedCasesStatus('loading')
+    listStorageObjectLinkedCases(object.id)
+      .then((items) => {
+        if (!isMounted) return
+        setLinkedCases(items)
+        setLinkedCasesStatus('loaded')
+      })
+      .catch(() => {
+        if (!isMounted) return
+        setLinkedCases([])
+        setLinkedCasesStatus('failed')
+      })
+    return () => {
+      isMounted = false
+    }
+  }, [object])
+
+  useEffect(() => {
+    if (!isLinkedCasesEditing) return undefined
+    let isMounted = true
+    listCases('all')
+      .then((items) => {
+        if (isMounted) setCaseSuggestions(items)
+      })
+      .catch(() => {
+        if (isMounted) setCaseSuggestions([])
+      })
+    return () => {
+      isMounted = false
+    }
+  }, [isLinkedCasesEditing])
 
   useEffect(() => {
     const selectedVersion = versions.find((version) => version.id === selectedVersionId) ?? null
@@ -664,6 +734,58 @@ function StorageObjectDetailView({ storageObjectId }: { storageObjectId: string 
       isMounted = false
     }
   }, [object, selectedVersionId, versions])
+
+  function selectedLinkedCaseCandidate() {
+    const normalizedInput = linkedCaseInput.trim().toLowerCase()
+    if (normalizedInput === '') return null
+    return (
+      caseSuggestions.find(
+        (item) =>
+          item.name.toLowerCase() === normalizedInput ||
+          item.id.toLowerCase() === normalizedInput,
+      ) ?? null
+    )
+  }
+
+  async function handleAddLinkedCase() {
+    if (object === null || linkedCasesBusy) return
+    const candidate = selectedLinkedCaseCandidate()
+    if (candidate === null) {
+      setError(t('storage.linkedCases.invalidCase'))
+      return
+    }
+    setLinkedCasesBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const items = await createStorageObjectCaseLink(object.id, candidate.id)
+      setLinkedCases(items)
+      setLinkedCaseInput('')
+      setNotice(t('storage.linkedCases.added', { name: candidate.name }))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setLinkedCasesBusy(false)
+    }
+  }
+
+  async function handleDeleteLinkedCase(item: StorageObjectLinkedCase) {
+    if (object === null || linkedCasesBusy) return
+    setLinkedCasesBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const items = await deleteStorageObjectCaseLink(object.id, item.case_id)
+      setLinkedCases(items)
+      const nextObject = await getStorageObject(object.id)
+      setObject(nextObject)
+      setNotice(t('storage.linkedCases.deleted', { name: item.case_name }))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setLinkedCasesBusy(false)
+    }
+  }
 
   async function handleDownloadPreview(target: StoragePreviewFile) {
     setDownloadBusyId(target.id)
@@ -957,6 +1079,82 @@ function StorageObjectDetailView({ storageObjectId }: { storageObjectId: string 
               {object.source_mail !== undefined && object.source_mail !== null && (
                 <StorageSourceMailCard mail={object.source_mail} />
               )}
+              <section className="storage-linked-cases-card">
+                <div className="section-heading">
+                  <div>
+                    <h2>{t('storage.linkedCases.heading')}</h2>
+                    <p>{t('storage.linkedCases.body')}</p>
+                  </div>
+                  <button
+                    aria-pressed={isLinkedCasesEditing}
+                    className="storage-linked-cases-settings-button"
+                    onClick={() => setIsLinkedCasesEditing((current) => !current)}
+                    type="button"
+                  >
+                    <img alt="" src={settingsGearIconUrl} />
+                  </button>
+                </div>
+                <div className="storage-linked-cases-path">
+                  <span>{t('storage.linkedCases.physicalPath')}</span>
+                  <AppLink href={object.physical_directory_url ?? '/storage?directory=root'}>
+                    {directoryPathLabel(object.physical_directory_path ?? object.directory_path)}
+                  </AppLink>
+                </div>
+                {isLinkedCasesEditing && (
+                  <div className="storage-linked-cases-editor">
+                    <label>
+                      <span>{t('storage.linkedCases.caseName')}</span>
+                      <input
+                        list={`linked-case-suggestions-${object.id}`}
+                        onChange={(event) => setLinkedCaseInput(event.target.value)}
+                        placeholder={t('storage.linkedCases.placeholder')}
+                        type="text"
+                        value={linkedCaseInput}
+                      />
+                    </label>
+                    <datalist id={`linked-case-suggestions-${object.id}`}>
+                      {caseSuggestions.map((item) => (
+                        <option key={item.id} value={item.name} />
+                      ))}
+                    </datalist>
+                    <button
+                      className={`button-loading-dot${
+                        linkedCasesBusy ? ' is-loading' : ''
+                      }`}
+                      disabled={linkedCasesBusy || selectedLinkedCaseCandidate() === null}
+                      onClick={() => void handleAddLinkedCase()}
+                      type="button"
+                    >
+                      {t('storage.linkedCases.add')}
+                    </button>
+                  </div>
+                )}
+                {linkedCasesStatus === 'loading' ? (
+                  <p>{t('storage.linkedCases.loading')}</p>
+                ) : linkedCasesStatus === 'failed' ? (
+                  <p>{t('storage.linkedCases.failed')}</p>
+                ) : linkedCases.length === 0 ? (
+                  <p>{t('storage.linkedCases.empty')}</p>
+                ) : (
+                  <div className="storage-linked-cases-list">
+                    {linkedCases.map((item) => (
+                      <div className="storage-linked-case-item" key={item.case_id}>
+                        <AppLink href={item.case_url}>{item.case_name}</AppLink>
+                        <span>{linkedCaseSourceLabel(item.source)}</span>
+                        {isLinkedCasesEditing && item.source !== 'physical' && (
+                          <button
+                            disabled={linkedCasesBusy}
+                            onClick={() => void handleDeleteLinkedCase(item)}
+                            type="button"
+                          >
+                            {t('storage.linkedCases.delete')}
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
               <div
                 className={`storage-file-preview storage-version-drop-zone button-loading-dot${
                   versionBusy ? ' is-loading' : ''
@@ -1008,6 +1206,15 @@ function StorageObjectDetailView({ storageObjectId }: { storageObjectId: string 
                     src={previewFile.url}
                     title={previewFile.original_filename ?? t('storage.detail.file')}
                   />
+                ) : isPreviewableVideo(previewFile) ? (
+                  <video
+                    className="storage-video-preview"
+                    controls
+                    preload="metadata"
+                    src={previewFile.url}
+                  >
+                    {t('storage.preview.unavailable')}
+                  </video>
                 ) : isPreviewableZip(previewFile) ? (
                   <StorageArchivePreview
                     status={archiveTreeStatus}
@@ -1518,6 +1725,14 @@ function StorageListView() {
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const isSearchMode = searchQuery.trim() !== '' || extensionFilter !== null
+
+  useEffect(() => {
+    function syncDirectoryFromLocation() {
+      setCurrentDirectoryId(directoryIdFromLocation())
+    }
+    window.addEventListener('popstate', syncDirectoryFromLocation)
+    return () => window.removeEventListener('popstate', syncDirectoryFromLocation)
+  }, [])
 
   async function refreshStorage() {
     setError(null)

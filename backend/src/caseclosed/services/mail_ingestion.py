@@ -8,6 +8,9 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DatabaseSession
 
+from caseclosed.db.models import Case
+from caseclosed.db.models import CaseAutoAssignRule
+from caseclosed.db.models import CaseMailLink
 from caseclosed.db.models import Contact
 from caseclosed.db.models import ContactEmailAddress
 from caseclosed.db.models import GmailMessage
@@ -253,6 +256,15 @@ def ingest_mock_mail(
             version=1,
         )
     )
+    if (
+        not is_sent
+        and not subject_marked_spam
+        and not (
+            sender_resolution.resolved_contact is not None
+            and sender_resolution.resolved_contact.status == "spam"
+        )
+    ):
+        apply_case_auto_assign_rules(session, message, now)
     session.commit()
 
     return MailIngestionResult(
@@ -268,6 +280,62 @@ def ingest_mock_mail(
         queued_job_id=queued_job_id,
         queued_contact_ai_memo_job_id=queued_contact_ai_memo_job_id,
     )
+
+
+def apply_case_auto_assign_rules(
+    session: DatabaseSession,
+    message: GmailMessage,
+    now: str,
+) -> None:
+    sender_email = normalize_email_address(message.from_address)
+    if sender_email == "":
+        return
+    rules = session.execute(
+        select(CaseAutoAssignRule, Case)
+        .join(Case, Case.id == CaseAutoAssignRule.case_id)
+        .where(CaseAutoAssignRule.rule_type == "sender_email")
+        .where(CaseAutoAssignRule.rule_value == sender_email)
+        .where(CaseAutoAssignRule.is_enabled == 1)
+        .where(Case.archived_at.is_(None))
+    ).all()
+    if not rules:
+        return
+
+    thread_messages = session.scalars(
+        select(GmailMessage)
+        .where(GmailMessage.thread_id == message.thread_id)
+        .order_by(GmailMessage.received_at, GmailMessage.id)
+    ).all()
+    message_ids = [thread_message.id for thread_message in thread_messages]
+    if not message_ids:
+        return
+
+    for _rule, case in rules:
+        existing_message_ids = set(
+            session.scalars(
+                select(CaseMailLink.message_id)
+                .where(CaseMailLink.case_id == case.id)
+                .where(CaseMailLink.message_id.in_(message_ids))
+            ).all()
+        )
+        added = False
+        for thread_message in thread_messages:
+            if thread_message.id in existing_message_ids:
+                continue
+            session.add(
+                CaseMailLink(
+                    id=new_id("case_mail_link"),
+                    case_id=case.id,
+                    message_id=thread_message.id,
+                    created_at=now,
+                    updated_at=now,
+                    version=1,
+                )
+            )
+            added = True
+        if added:
+            case.updated_at = now
+            case.version += 1
 
 
 def upsert_message_attachments(

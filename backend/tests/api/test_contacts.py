@@ -63,6 +63,68 @@ def test_contact_can_be_created_and_listed(client, database_path: Path) -> None:
     assert detail_data["related_cases"] == []
 
 
+def test_reserved_contact_role_tags_can_be_used(client) -> None:
+    response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Role Tagged Contact",
+            "status": "active",
+            "kind": "person",
+            "sender_resolution_mode": "self",
+            "tags": ["supervised-student", "lab-alumni", "collaborator"],
+            "email_addresses": [
+                {"email_address": "role-tagged@example.com", "is_primary": True}
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["tags"] == [
+        "collaborator",
+        "lab-alumni",
+        "supervised-student",
+    ]
+
+
+def test_mailing_list_reserved_tag_is_still_rejected(client) -> None:
+    response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Forbidden Tag Contact",
+            "status": "active",
+            "kind": "person",
+            "sender_resolution_mode": "self",
+            "tags": ["mailing-list"],
+            "email_addresses": [
+                {"email_address": "forbidden-tag@example.com", "is_primary": True}
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_advisees_tag_can_be_used_as_regular_tag(client) -> None:
+    response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Advisees Tagged Contact",
+            "status": "active",
+            "kind": "person",
+            "sender_resolution_mode": "self",
+            "tags": ["Advisees"],
+            "email_addresses": [
+                {"email_address": "advisees-tagged@example.com", "is_primary": True}
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["tags"] == ["Advisees"]
+
+
+
 def test_contact_custom_tabs_are_persisted(client) -> None:
     initial_response = client.get(f"{CONTACTS_URL}/custom-tabs")
     update_response = client.put(
@@ -145,6 +207,72 @@ def test_mailing_list_contact_can_choose_sender_resolution_mode(
 
     assert delete_email_response.status_code == 409
     assert primary_response.status_code == 409
+
+
+def test_service_contact_allows_multiple_addresses_and_tags(
+    client,
+    database_path: Path,
+) -> None:
+    response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "PayPal",
+            "status": "active",
+            "kind": "service",
+            "sender_resolution_mode": "self",
+            "mailing_list_recipient_expression": "{should-not-persist}",
+            "tags": ["payment", "service"],
+            "email_addresses": [
+                {"email_address": "notice@paypal.example", "is_primary": True},
+                {"email_address": "support@paypal.example", "is_primary": False},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["kind"] == "service"
+    assert data["sender_resolution_mode"] == "self"
+    assert data["mailing_list_recipient_expression"] is None
+    assert data["mail_importance_rule_action"] == "fixed"
+    assert data["mail_importance_rule_importance"] == "low"
+    assert data["tags"] == ["payment", "service"]
+    assert [item["email_address"] for item in data["email_addresses"]] == [
+        "notice@paypal.example",
+        "support@paypal.example",
+    ]
+
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT
+                kind, sender_resolution_mode, mailing_list_recipient_expression,
+                mail_importance_rule_action, mail_importance_rule_importance
+            FROM contacts
+            WHERE id = ?
+            """,
+            (data["id"],),
+        ).fetchone()
+
+    assert row == ("service", "self", None, "fixed", "low")
+
+
+def test_service_contact_rejects_reply_to_sender_resolution(client) -> None:
+    response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "No Reply Service",
+            "status": "active",
+            "kind": "service",
+            "sender_resolution_mode": "reply_to",
+            "email_addresses": [
+                {"email_address": "no-reply@example.com", "is_primary": True}
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
 def test_mailing_list_contact_rejects_contact_tags(client) -> None:
@@ -633,19 +761,66 @@ def test_duplicate_contact_display_name_gets_number_suffix(client) -> None:
     assert second_response.json()["data"]["display_name"] == "Duplicate Name_2"
 
 
-def test_only_active_person_contacts_can_be_merged(client) -> None:
-    active_id = client.post(
+def test_service_contacts_can_be_merged(client) -> None:
+    source_id = client.post(
         CONTACTS_URL,
-        json={"display_name": "Active Merge", "status": "active"},
+        json={
+            "display_name": "Same Service",
+            "status": "skipped",
+            "kind": "service",
+            "email_addresses": [
+                {"email_address": "source-service@example.com", "is_primary": True}
+            ],
+        },
     ).json()["data"]["id"]
-    skipped_id = client.post(
+    target_id = client.post(
         CONTACTS_URL,
-        json={"display_name": "Skipped Merge", "status": "skipped"},
+        json={
+            "display_name": "Same Service",
+            "status": "skipped",
+            "kind": "service",
+            "email_addresses": [
+                {"email_address": "target-service@example.com", "is_primary": True}
+            ],
+        },
     ).json()["data"]["id"]
 
     response = client.post(
-        f"{CONTACTS_URL}/{skipped_id}/merge",
-        json={"target_contact_id": active_id},
+        f"{CONTACTS_URL}/{source_id}/merge",
+        json={"target_contact_id": target_id},
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["deleted_contact_id"] == source_id
+    assert data["target_contact"]["kind"] == "service"
+    assert sorted(
+        email_address["email_address"]
+        for email_address in data["target_contact"]["email_addresses"]
+    ) == ["source-service@example.com", "target-service@example.com"]
+
+
+def test_mailing_list_contacts_cannot_be_merged(client) -> None:
+    source_id = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Source List",
+            "status": "active",
+            "kind": "mailing_list",
+        },
+    ).json()["data"]["id"]
+    target_id = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Target List",
+            "status": "active",
+            "kind": "mailing_list",
+        },
+    ).json()["data"]["id"]
+
+    response = client.post(
+        f"{CONTACTS_URL}/{source_id}/merge",
+        json={"target_contact_id": target_id},
     )
 
     assert response.status_code == 409

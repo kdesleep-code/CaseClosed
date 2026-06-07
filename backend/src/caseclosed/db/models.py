@@ -4,6 +4,7 @@ from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
 from sqlalchemy import Float
 from sqlalchemy import Text
+from sqlalchemy import UniqueConstraint
 from sqlalchemy.orm import Mapped
 from sqlalchemy.orm import mapped_column
 
@@ -66,6 +67,21 @@ class CaseMailLink(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
 
+class CaseAutoAssignRule(Base):
+    __tablename__ = "case_auto_assign_rules"
+    __table_args__ = (UniqueConstraint("case_id", "rule_type", "rule_value"),)
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), nullable=False)
+    rule_type: Mapped[str] = mapped_column(Text, nullable=False)
+    rule_value: Mapped[str] = mapped_column(Text, nullable=False)
+    label: Mapped[str | None] = mapped_column(Text)
+    is_enabled: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
 class CaseEvent(Base):
     __tablename__ = "case_events"
 
@@ -79,6 +95,20 @@ class CaseEvent(Base):
     occurred_at: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     metadata_json: Mapped[str | None] = mapped_column(Text)
+
+
+class CaseContextVersion(Base):
+    __tablename__ = "case_context_versions"
+    __table_args__ = (UniqueConstraint("case_id", "version_no"),)
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), nullable=False)
+    version_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    context_markdown: Mapped[str] = mapped_column(Text, nullable=False)
+    source_event_until_at: Mapped[str | None] = mapped_column(Text)
+    llm_run_id: Mapped[str | None] = mapped_column(ForeignKey("llm_runs.id"))
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class CaseStakeholder(Base):
@@ -442,6 +472,24 @@ class FileVersionDiff(Base):
     added_lines_json: Mapped[str] = mapped_column(Text, nullable=False)
     removed_lines_json: Mapped[str] = mapped_column(Text, nullable=False)
     coverage_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class FileLink(Base):
+    __tablename__ = "file_links"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    storage_object_id: Mapped[str] = mapped_column(
+        ForeignKey("storage_objects.id"),
+        nullable=False,
+    )
+    linked_type: Mapped[str] = mapped_column(Text, nullable=False)
+    linked_id: Mapped[str] = mapped_column(Text, nullable=False)
+    directory_id: Mapped[str | None] = mapped_column(Text)
+    label: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
