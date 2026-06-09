@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from datetime import date
+from functools import cmp_to_key
 from uuid import uuid4
 
 from fastapi import APIRouter
@@ -23,8 +25,10 @@ from caseclosed.db.models import CaseEvent
 from caseclosed.db.models import CaseGenre
 from caseclosed.db.models import CaseMailLink
 from caseclosed.db.models import CaseStakeholder
+from caseclosed.db.models import CaseToolIconSetting
 from caseclosed.db.models import CaseToolLink
 from caseclosed.db.models import Contact
+from caseclosed.db.models import ContactEmailAddress
 from caseclosed.db.models import FileLink
 from caseclosed.db.models import FileSummary
 from caseclosed.db.models import GmailMessage
@@ -36,13 +40,21 @@ from caseclosed.db.models import MailUserState
 from caseclosed.db.models import AuditLog
 from caseclosed.db.models import StorageDirectory
 from caseclosed.db.models import StorageObject
+from caseclosed.db.models import Task
 from caseclosed.db.runtime import case_storage_directory_id
 from caseclosed.db.runtime import ensure_case_storage_directory
 from caseclosed.db.runtime import get_session
 from caseclosed.db.runtime import jst_iso
 from caseclosed.email_addressing import normalize_email_address
+from caseclosed.services.llm_provider import FUNCTION_TYPE_CASE_PREFILL_GENERATION
+from caseclosed.services.llm_provider import OpenAIProviderError
 from caseclosed.services.llm_provider import build_case_current_situation_provider
+from caseclosed.services.llm_provider import build_case_prefill_provider
+from caseclosed.storage import delete_storage_object
+from caseclosed.storage import prepare_file_icon_image
 from caseclosed.storage import record_storage_operation
+from caseclosed.storage import save_storage_object
+from caseclosed.storage import storage_object_url
 from caseclosed.storage import storage_object_data
 
 router = APIRouter(prefix="/api/v1/cases", tags=["cases"])
@@ -60,13 +72,18 @@ CASE_BALL_STATUSES = {"user", "other", "date_wait", "stalled", "none"}
 class CaseCreate(BaseModel):
     name: str
     description: str | None = None
+    open_when_date: str | None = None
+    open_when_text: str | None = None
+    closed_when_text: str | None = None
     progress_status: str = "not_started"
-    ball_status: str = "none"
+    ball_status: str | None = None
     genre_id: str | None = None
+    tags: list[str] | None = None
 
 
 class CaseUpdate(BaseModel):
     description: str | None = None
+    open_when_date: str | None = None
     open_when_text: str | None = None
     closed_when_text: str | None = None
     tags: list[str] | None = None
@@ -113,6 +130,25 @@ class CaseToolLinkReorder(BaseModel):
     tool_link_ids: list[str]
 
 
+class CaseToolIconSettingCreate(BaseModel):
+    icon_filename: str | None = None
+    icon_content_type: str
+    icon_data_base64: str
+    match_url: str
+
+
+class CaseToolIconSettingUpdate(BaseModel):
+    icon_filename: str | None = None
+    icon_content_type: str | None = None
+    icon_data_base64: str | None = None
+    match_url: str | None = None
+
+
+class CasePrefillPayload(BaseModel):
+    prompt: str = Field(min_length=1)
+    current_fields: dict[str, object] | None = None
+
+
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex}"
 
@@ -142,6 +178,23 @@ def normalized_optional_text(value: str | None) -> str | None:
     return stripped if stripped != "" else None
 
 
+def normalized_optional_date(value: str | None) -> str | None:
+    stripped = normalized_optional_text(value)
+    if stripped is None:
+        return None
+    try:
+        return date.fromisoformat(stripped).isoformat()
+    except ValueError as exc:
+        raise json_error(422, "VALIDATION_ERROR", "Open when must be a date.") from exc
+
+
+def is_case_open_by_date(case: Case, today: str | None = None) -> bool:
+    if case.open_when_date is None:
+        return True
+    current_date = today or jst_iso()[:10]
+    return case.open_when_date <= current_date
+
+
 def normalize_case_tags(values: list[str] | None) -> list[str]:
     if values is None:
         return []
@@ -161,6 +214,81 @@ def normalize_case_tags(values: list[str] | None) -> list[str]:
     if len(tags) > 12:
         raise json_error(422, "VALIDATION_ERROR", "Too many case tags.")
     return tags
+
+
+def normalize_case_prefill_output(output: dict[str, object]) -> dict[str, object]:
+    tags_value = output.get("tags")
+    tags = normalize_case_tags(tags_value if isinstance(tags_value, list) else None)
+    return {
+        "name": normalized_optional_text(str(output.get("name") or "")),
+        "description": normalized_optional_text(str(output.get("description") or "")),
+        "open_when_date": normalized_optional_date(
+            str(output.get("open_when_date"))
+            if output.get("open_when_date") is not None
+            else None
+        ),
+        "closed_when_text": normalized_optional_text(
+            str(output.get("closed_when_text") or "")
+        ),
+        "tags": tags,
+        "reasoning_summary": normalized_optional_text(
+            str(output.get("reasoning_summary") or "")
+        ),
+        "warnings": output.get("warnings") if isinstance(output.get("warnings"), list) else [],
+    }
+
+
+def run_case_prefill(
+    session: DatabaseSession,
+    input_payload: dict[str, object],
+) -> tuple[dict[str, object], str]:
+    provider = build_case_prefill_provider()
+    now = jst_iso()
+    try:
+        provider_response = provider.complete_json(
+            function_type=FUNCTION_TYPE_CASE_PREFILL_GENERATION,
+            input_payload=input_payload,
+        )
+        status = "succeeded"
+        error_type = None
+        error_message = None
+        output = provider_response.output
+    except OpenAIProviderError as exc:
+        provider_response = None
+        status = "failed"
+        error_type = exc.__class__.__name__
+        error_message = str(exc)
+        output = {}
+    llm_run = LlmRun(
+        id=new_id("llm_run"),
+        function_type=FUNCTION_TYPE_CASE_PREFILL_GENERATION,
+        provider_name=provider.provider_name,
+        model_name=provider.model_name,
+        prompt_version_id=None,
+        input_hash=None,
+        input_source_json=json.dumps(input_payload, ensure_ascii=False),
+        input_diagnostic_json=None,
+        applied_instruction_rule_ids_json=None,
+        output_json=json.dumps(output, ensure_ascii=False) if output else None,
+        output_text_preview=provider_response.output_preview if provider_response else None,
+        status=status,
+        error_type=error_type,
+        error_message=error_message,
+        retry_count=0,
+        max_retry_count=0,
+        prompt_tokens=provider_response.prompt_tokens if provider_response else None,
+        completion_tokens=provider_response.completion_tokens if provider_response else None,
+        total_tokens=provider_response.total_tokens if provider_response else None,
+        estimated_cost=provider_response.estimated_cost if provider_response else None,
+        started_at=now,
+        finished_at=now,
+        created_at=now,
+    )
+    session.add(llm_run)
+    session.flush()
+    if status != "succeeded":
+        raise json_error(502, "LLM_PREFILL_FAILED", error_message or "Case prefill failed.")
+    return normalize_case_prefill_output(output), llm_run.id
 
 
 def case_tags(case: Case) -> list[str]:
@@ -186,8 +314,109 @@ def genre_data(genre: CaseGenre) -> dict[str, object]:
     }
 
 
+OPEN_TASK_STATUSES = {"not_started", "in_progress"}
+TASK_PRIORITY_RANKS = {"high": 0, "middle": 1, "low": 2}
+
+
+def case_task_data(task: Task) -> dict[str, object]:
+    return {
+        "id": task.id,
+        "case_id": task.case_id,
+        "title": task.title,
+        "description": task.description,
+        "done_when_text": task.done_when_text,
+        "status": task.status,
+        "priority": task.priority,
+        "due_at": task.due_at,
+        "estimate_minutes": task.estimate_minutes,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+    }
+
+
+def compare_case_tasks(left: Task, right: Task) -> int:
+    left_due = left.due_at or "9999-12-31T23:59:59+09:00"
+    right_due = right.due_at or "9999-12-31T23:59:59+09:00"
+    if left_due != right_due:
+        return -1 if left_due < right_due else 1
+    left_priority_rank = TASK_PRIORITY_RANKS.get(left.priority, 1)
+    right_priority_rank = TASK_PRIORITY_RANKS.get(right.priority, 1)
+    if left_priority_rank != right_priority_rank:
+        return left_priority_rank - right_priority_rank
+    left_status_rank = 0 if left.status == "in_progress" else 1
+    right_status_rank = 0 if right.status == "in_progress" else 1
+    if left_status_rank != right_status_rank:
+        return left_status_rank - right_status_rank
+    if left.updated_at != right.updated_at:
+        return -1 if left.updated_at > right.updated_at else 1
+    return -1 if left.id < right.id else 1 if left.id > right.id else 0
+
+
+def task_is_actionable_for_case(task: Task, today: str | None = None) -> bool:
+    if task.deleted_at is not None:
+        return False
+    if task.status not in OPEN_TASK_STATUSES:
+        return False
+    if task.start_at is None:
+        return True
+    current_date = today or jst_iso()[:10]
+    return task.start_at[:10] <= current_date
+
+
+def case_open_tasks(session: DatabaseSession, case_id: str) -> list[Task]:
+    tasks = session.scalars(
+        select(Task)
+        .where(Task.case_id == case_id)
+        .where(Task.deleted_at.is_(None))
+        .where(Task.status.in_(OPEN_TASK_STATUSES))
+    ).all()
+    today = jst_iso()[:10]
+    tasks = [task for task in tasks if task_is_actionable_for_case(task, today)]
+    return sorted(tasks, key=cmp_to_key(compare_case_tasks))
+
+
+def case_task_counts(session: DatabaseSession, case_id: str) -> tuple[int, int]:
+    open_tasks = case_open_tasks(session, case_id)
+    now = jst_iso()
+    overdue_count = sum(
+        1 for task in open_tasks if task.due_at is not None and task.due_at < now
+    )
+    return len(open_tasks), overdue_count
+
+
+def case_has_open_mail(session: DatabaseSession, case_id: str) -> bool:
+    open_mail_id = session.scalar(
+        select(CaseMailLink.message_id)
+        .outerjoin(MailUserState, MailUserState.message_id == CaseMailLink.message_id)
+        .where(CaseMailLink.case_id == case_id)
+        .where(or_(MailUserState.id.is_(None), MailUserState.processed_status != "processed"))
+        .limit(1)
+    )
+    return open_mail_id is not None
+
+
+def case_effective_ball_status(
+    case: Case,
+    session: DatabaseSession | None = None,
+) -> str:
+    if case.closed_at is not None or case.archived_at is not None:
+        return "none"
+    if not is_case_open_by_date(case):
+        return "none"
+    if session is None:
+        return case.ball_status
+    if case_open_tasks(session, case.id):
+        return "user"
+    if case_has_open_mail(session, case.id):
+        return "user"
+    return "none"
+
+
 def case_data(case: Case, session: DatabaseSession | None = None) -> dict[str, object]:
     mail_count = 0
+    open_task_count = 0
+    overdue_task_count = 0
+    next_task: dict[str, object] | None = None
     if session is not None:
         mail_count = session.scalar(
             select(func.count(func.distinct(GmailMessage.thread_id)))
@@ -195,26 +424,35 @@ def case_data(case: Case, session: DatabaseSession | None = None) -> dict[str, o
             .join(GmailMessage, GmailMessage.id == CaseMailLink.message_id)
             .where(CaseMailLink.case_id == case.id)
         ) or 0
+        open_tasks = case_open_tasks(session, case.id)
+        open_task_count = len(open_tasks)
+        now = jst_iso()
+        overdue_task_count = sum(
+            1 for task in open_tasks if task.due_at is not None and task.due_at < now
+        )
+        if open_tasks:
+            next_task = case_task_data(open_tasks[0])
     return {
         "id": case.id,
         "genre_id": case.genre_id,
         "name": case.name,
         "description": case.description,
+        "open_when_date": case.open_when_date,
         "open_when_text": case.open_when_text,
         "closed_when_text": case.closed_when_text,
         "progress_status": case.progress_status,
-        "ball_status": case.ball_status,
+        "ball_status": case_effective_ball_status(case, session),
         "closed_at": case.closed_at,
         "archived_at": case.archived_at,
         "is_system_case": bool(case.is_system_case),
         "system_case_key": case.system_case_key,
         "tags": case_tags(case),
         "mail_count": mail_count,
-        "open_task_count": 0,
-        "overdue_task_count": 0,
+        "open_task_count": open_task_count,
+        "overdue_task_count": overdue_task_count,
         "file_count": 0,
         "storage_directory_id": case_storage_directory_id(case.id),
-        "next_task": None,
+        "next_task": next_task,
         "next_calendar_event": None,
         "created_at": case.created_at,
         "updated_at": case.updated_at,
@@ -699,13 +937,41 @@ def restore_case_open_state(session: DatabaseSession, case: Case) -> None:
     )
 
 
-def case_stakeholder_data(stakeholder: CaseStakeholder, contact: Contact) -> dict[str, object]:
+def primary_contact_email(
+    session: DatabaseSession,
+    contact_id: str,
+) -> str | None:
+    primary = session.scalar(
+        select(ContactEmailAddress.email_address)
+        .where(ContactEmailAddress.contact_id == contact_id)
+        .where(ContactEmailAddress.resolution_status == "active")
+        .where(ContactEmailAddress.is_primary == 1)
+        .order_by(ContactEmailAddress.email_address.asc())
+        .limit(1)
+    )
+    if primary is not None:
+        return primary
+    return session.scalar(
+        select(ContactEmailAddress.email_address)
+        .where(ContactEmailAddress.contact_id == contact_id)
+        .where(ContactEmailAddress.resolution_status == "active")
+        .order_by(ContactEmailAddress.email_address.asc())
+        .limit(1)
+    )
+
+
+def case_stakeholder_data(
+    stakeholder: CaseStakeholder,
+    contact: Contact,
+    session: DatabaseSession,
+) -> dict[str, object]:
     return {
         "id": stakeholder.id,
         "case_id": stakeholder.case_id,
         "contact_id": stakeholder.contact_id,
         "contact_display_name": contact.display_name,
         "contact_avatar_url": contact.avatar_url,
+        "contact_primary_email": primary_contact_email(session, contact.id),
         "role": stakeholder.role,
         "sort_order": stakeholder.sort_order,
         "created_at": stakeholder.created_at,
@@ -722,7 +988,7 @@ def stakeholder_items(session: DatabaseSession, case_id: str) -> list[dict[str, 
         .where(Contact.deleted_at.is_(None))
         .order_by(CaseStakeholder.sort_order.asc(), CaseStakeholder.created_at.asc())
     ).all()
-    return [case_stakeholder_data(stakeholder, contact) for stakeholder, contact in rows]
+    return [case_stakeholder_data(stakeholder, contact, session) for stakeholder, contact in rows]
 
 
 def tool_icon_label_from_url(url: str) -> str:
@@ -737,12 +1003,118 @@ def tool_icon_label_from_url(url: str) -> str:
     return "".join(letters[:2]) or "TL"
 
 
-def case_tool_link_data(tool_link: CaseToolLink) -> dict[str, object]:
+def normalize_case_tool_icon_match_url(value: str | None) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized == "":
+        raise json_error(422, "VALIDATION_ERROR", "Match URL is required.")
+    if len(normalized) > 512:
+        raise json_error(422, "VALIDATION_ERROR", "Match URL is too long.")
+    return normalized
+
+
+def case_tool_icon_url(setting: CaseToolIconSetting | None) -> str | None:
+    if setting is None:
+        return None
+    if setting.storage_object_id is not None:
+        return storage_object_url(setting.storage_object_id)
+    return setting.icon_data_url
+
+
+def case_tool_icon_setting_data(setting: CaseToolIconSetting) -> dict[str, object]:
+    return {
+        "id": setting.id,
+        "storage_object_id": setting.storage_object_id,
+        "icon_filename": setting.icon_filename,
+        "icon_content_type": setting.icon_content_type,
+        "icon_url": case_tool_icon_url(setting),
+        "icon_data_url": setting.icon_data_url,
+        "match_url": setting.match_url,
+        "created_at": setting.created_at,
+        "updated_at": setting.updated_at,
+        "version": setting.version,
+    }
+
+
+def case_tool_icon_for_url(
+    session: DatabaseSession,
+    url: str,
+) -> CaseToolIconSetting | None:
+    normalized_url = url.strip().lower()
+    if normalized_url == "":
+        return None
+    settings = session.scalars(
+        select(CaseToolIconSetting).order_by(
+            CaseToolIconSetting.created_at.asc(),
+            CaseToolIconSetting.id.asc(),
+        )
+    ).all()
+    matches = [
+        setting
+        for setting in settings
+        if setting.match_url != "" and setting.match_url in normalized_url
+    ]
+    if len(matches) == 0:
+        return None
+    return max(matches, key=lambda setting: len(setting.match_url))
+
+
+def save_case_tool_icon_storage_object(
+    session: DatabaseSession,
+    *,
+    filename: str | None,
+    content_type: str,
+    data_base64: str,
+    now: str,
+) -> StorageObject:
+    resized_content_type, resized_data = prepare_file_icon_image(
+        content_type=content_type,
+        data_base64=data_base64,
+    )
+    return save_storage_object(
+        session,
+        scope="case-tool-icons",
+        filename=filename,
+        content_type=resized_content_type,
+        data=resized_data,
+        now=now,
+    )
+
+
+def delete_case_tool_icon_storage_object_if_unused(
+    session: DatabaseSession,
+    *,
+    storage_object_id: str | None,
+    setting_id: str | None = None,
+    now: str,
+) -> None:
+    if storage_object_id is None:
+        return
+    statement = select(func.count(CaseToolIconSetting.id)).where(
+        CaseToolIconSetting.storage_object_id == storage_object_id
+    )
+    if setting_id is not None:
+        statement = statement.where(CaseToolIconSetting.id != setting_id)
+    if session.scalar(statement) != 0:
+        return
+    storage_object = session.get(StorageObject, storage_object_id)
+    if (
+        storage_object is None
+        or storage_object.status != "active"
+        or storage_object.scope != "case-tool-icons"
+    ):
+        return
+    delete_storage_object(storage_object, session=session, now=now)
+
+
+def case_tool_link_data(session: DatabaseSession, tool_link: CaseToolLink) -> dict[str, object]:
+    icon_setting = case_tool_icon_for_url(session, tool_link.url)
     return {
         "id": tool_link.id,
         "case_id": tool_link.case_id,
         "url": tool_link.url,
         "icon_label": tool_link.icon_label,
+        "icon_setting_id": icon_setting.id if icon_setting is not None else None,
+        "icon_url": case_tool_icon_url(icon_setting),
         "sort_order": tool_link.sort_order,
         "created_at": tool_link.created_at,
         "updated_at": tool_link.updated_at,
@@ -756,7 +1128,7 @@ def tool_link_items(session: DatabaseSession, case_id: str) -> list[dict[str, ob
         .where(CaseToolLink.case_id == case_id)
         .order_by(CaseToolLink.sort_order.asc(), CaseToolLink.created_at.asc())
     ).all()
-    return [case_tool_link_data(tool_link) for tool_link in tool_links]
+    return [case_tool_link_data(session, tool_link) for tool_link in tool_links]
 
 
 def ensure_case_exists(session: DatabaseSession, case_id: str) -> Case:
@@ -772,26 +1144,37 @@ def list_cases(
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
     statement = select(Case)
+    should_filter_open_date = False
+    should_filter_ball: str | None = None
     if status == "user_ball":
         statement = (
             statement.where(Case.closed_at.is_(None))
             .where(Case.archived_at.is_(None))
-            .where(Case.ball_status == "user")
         )
+        should_filter_open_date = True
+        should_filter_ball = "user"
     elif status == "waiting":
         statement = (
             statement.where(Case.closed_at.is_(None))
             .where(Case.archived_at.is_(None))
-            .where(Case.ball_status != "user")
         )
+        should_filter_open_date = True
+        should_filter_ball = "waiting"
     elif status == "completed":
         statement = statement.where(
-            (Case.closed_at.is_not(None)) | (Case.archived_at.is_not(None))
+            Case.closed_at.is_not(None)
+        ).where(
+            Case.archived_at.is_(None)
+        )
+    elif status == "not_started":
+        statement = statement.where(Case.closed_at.is_(None)).where(
+            Case.archived_at.is_(None)
         )
     elif status == "open":
         statement = statement.where(Case.closed_at.is_(None)).where(
             Case.archived_at.is_(None)
         )
+        should_filter_open_date = True
     elif status == "closed":
         statement = statement.where(Case.closed_at.is_not(None)).where(
             Case.archived_at.is_(None)
@@ -808,7 +1191,36 @@ def list_cases(
             Case.created_at.desc(),
         )
     ).all()
+    today = jst_iso()[:10]
+    if should_filter_open_date:
+        cases = [case for case in cases if is_case_open_by_date(case, today)]
+    if status == "not_started":
+        cases = [case for case in cases if not is_case_open_by_date(case, today)]
+    if should_filter_ball == "user":
+        cases = [case for case in cases if case_effective_ball_status(case, session) == "user"]
+    elif should_filter_ball == "waiting":
+        cases = [case for case in cases if case_effective_ball_status(case, session) != "user"]
     return {"ok": True, "data": {"items": [case_data(case, session) for case in cases]}}
+
+
+@router.post("/prefill")
+def prefill_case(
+    payload: CasePrefillPayload,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    input_payload: dict[str, object] = {
+        "prompt": payload.prompt.strip(),
+        "current_fields": payload.current_fields or {},
+    }
+    prefill, llm_run_id = run_case_prefill(session, input_payload)
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "prefill": prefill,
+            "llm_run_id": llm_run_id,
+        },
+    }
 
 
 @router.get("/genres")
@@ -890,6 +1302,115 @@ def delete_case_genre(
     return {"ok": True, "data": {"deleted": True}}
 
 
+@router.get("/tool-icons")
+def list_case_tool_icon_settings(
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    settings = session.scalars(
+        select(CaseToolIconSetting).order_by(
+            CaseToolIconSetting.match_url.asc(),
+            CaseToolIconSetting.created_at.asc(),
+        )
+    ).all()
+    return {
+        "ok": True,
+        "data": {"items": [case_tool_icon_setting_data(setting) for setting in settings]},
+    }
+
+
+@router.post("/tool-icons")
+def create_case_tool_icon_setting(
+    payload: CaseToolIconSettingCreate,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    match_url = normalize_case_tool_icon_match_url(payload.match_url)
+    now = jst_iso()
+    icon_object = save_case_tool_icon_storage_object(
+        session,
+        filename=payload.icon_filename,
+        content_type=payload.icon_content_type,
+        data_base64=payload.icon_data_base64,
+        now=now,
+    )
+    setting = CaseToolIconSetting(
+        id=new_id("case_tool_icon_setting"),
+        storage_object_id=icon_object.id,
+        icon_filename=payload.icon_filename,
+        icon_content_type=icon_object.content_type or payload.icon_content_type,
+        icon_data_url=None,
+        match_url=match_url,
+        created_at=now,
+        updated_at=now,
+        version=1,
+    )
+    session.add(setting)
+    session.commit()
+    return {"ok": True, "data": {"tool_icon": case_tool_icon_setting_data(setting)}}
+
+
+@router.patch("/tool-icons/{tool_icon_id}")
+def update_case_tool_icon_setting(
+    tool_icon_id: str,
+    payload: CaseToolIconSettingUpdate,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    setting = session.get(CaseToolIconSetting, tool_icon_id)
+    if setting is None:
+        raise json_error(404, "NOT_FOUND", "Case tool icon setting not found.")
+    old_storage_object_id = setting.storage_object_id
+    now = jst_iso()
+    if payload.match_url is not None:
+        setting.match_url = normalize_case_tool_icon_match_url(payload.match_url)
+    if payload.icon_data_base64 is not None:
+        if payload.icon_content_type is None:
+            raise json_error(422, "VALIDATION_ERROR", "Icon content type is required.")
+        icon_object = save_case_tool_icon_storage_object(
+            session,
+            filename=payload.icon_filename,
+            content_type=payload.icon_content_type,
+            data_base64=payload.icon_data_base64,
+            now=now,
+        )
+        setting.storage_object_id = icon_object.id
+        setting.icon_filename = payload.icon_filename
+        setting.icon_content_type = icon_object.content_type or payload.icon_content_type
+        setting.icon_data_url = None
+    elif payload.icon_filename is not None:
+        setting.icon_filename = payload.icon_filename
+    setting.updated_at = now
+    setting.version += 1
+    session.flush()
+    delete_case_tool_icon_storage_object_if_unused(
+        session,
+        storage_object_id=old_storage_object_id,
+        setting_id=setting.id,
+        now=now,
+    )
+    session.commit()
+    return {"ok": True, "data": {"tool_icon": case_tool_icon_setting_data(setting)}}
+
+
+@router.delete("/tool-icons/{tool_icon_id}")
+def delete_case_tool_icon_setting(
+    tool_icon_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    setting = session.get(CaseToolIconSetting, tool_icon_id)
+    if setting is None:
+        raise json_error(404, "NOT_FOUND", "Case tool icon setting not found.")
+    storage_object_id = setting.storage_object_id
+    now = jst_iso()
+    session.delete(setting)
+    session.flush()
+    delete_case_tool_icon_storage_object_if_unused(
+        session,
+        storage_object_id=storage_object_id,
+        now=now,
+    )
+    session.commit()
+    return {"ok": True, "data": {"deleted": True}}
+
+
 @router.get("/{case_id}")
 def get_case(
     case_id: str,
@@ -912,7 +1433,7 @@ def get_case(
         "data": {
             "case": case_data(case, session),
             "related_mails": case_mail_link_items(session, case.id),
-            "tasks": [],
+            "tasks": [case_task_data(task) for task in case_open_tasks(session, case.id)],
             "calendar_events": [],
             "contacts": [],
             "files": [],
@@ -1312,7 +1833,7 @@ def create_case_stakeholder(
     )
     session.add(stakeholder)
     session.commit()
-    return {"ok": True, "data": {"stakeholder": case_stakeholder_data(stakeholder, contact)}}
+    return {"ok": True, "data": {"stakeholder": case_stakeholder_data(stakeholder, contact, session)}}
 
 
 @router.patch("/{case_id}/stakeholders/{stakeholder_id}")
@@ -1334,7 +1855,7 @@ def update_case_stakeholder(
     if contact is None:
         raise json_error(404, "NOT_FOUND", "Contact not found.")
     session.commit()
-    return {"ok": True, "data": {"stakeholder": case_stakeholder_data(stakeholder, contact)}}
+    return {"ok": True, "data": {"stakeholder": case_stakeholder_data(stakeholder, contact, session)}}
 
 
 @router.post("/{case_id}/stakeholders/reorder")
@@ -1417,7 +1938,7 @@ def create_case_tool_link(
     )
     session.add(tool_link)
     session.commit()
-    return {"ok": True, "data": {"tool_link": case_tool_link_data(tool_link)}}
+    return {"ok": True, "data": {"tool_link": case_tool_link_data(session, tool_link)}}
 
 
 @router.post("/{case_id}/tool-links/reorder")
@@ -1470,6 +1991,22 @@ def delete_case(
         raise json_error(409, "SYSTEM_CASE_PROTECTED", "System Case cannot be deleted.")
 
     now = jst_iso()
+    case_tasks = session.scalars(
+        select(Task)
+        .where(Task.case_id == case.id)
+        .where(Task.deleted_at.is_(None))
+    ).all()
+    for task in case_tasks:
+        task.deleted_at = now
+        task.deleted_reason = "case_deleted"
+        task.updated_at = now
+        task.version += 1
+        if task.storage_directory_id is not None:
+            task_directory = session.get(StorageDirectory, task.storage_directory_id)
+            if task_directory is not None:
+                task_directory.status = "deleted"
+                task_directory.updated_at = now
+                task_directory.version += 1
     session.execute(delete(CaseToolLink).where(CaseToolLink.case_id == case.id))
     session.execute(delete(CaseStakeholder).where(CaseStakeholder.case_id == case.id))
     session.execute(delete(CaseMailLink).where(CaseMailLink.case_id == case.id))
@@ -1504,6 +2041,19 @@ def complete_case(
     case = ensure_case_exists(session, case_id)
     if case.is_system_case:
         raise json_error(409, "SYSTEM_CASE_PROTECTED", "System Case cannot be completed.")
+    open_task_id = session.scalar(
+        select(Task.id)
+        .where(Task.case_id == case.id)
+        .where(Task.deleted_at.is_(None))
+        .where(Task.status.not_in(("completed", "canceled")))
+        .limit(1)
+    )
+    if open_task_id is not None:
+        raise json_error(
+            409,
+            "OPEN_TASKS",
+            "Case cannot be completed while open Tasks remain.",
+        )
     now = jst_iso()
     if case.closed_at is None:
         previous_progress_status = case.progress_status
@@ -1593,7 +2143,12 @@ def update_case(
         raise json_error(404, "NOT_FOUND", "Case not found.")
 
     case.description = normalized_optional_text(payload.description)
-    case.open_when_text = normalized_optional_text(payload.open_when_text)
+    case.open_when_date = normalized_optional_date(
+        payload.open_when_date
+        if payload.open_when_date is not None
+        else payload.open_when_text
+    )
+    case.open_when_text = None
     case.closed_when_text = normalized_optional_text(payload.closed_when_text)
     if payload.tags is not None:
         case.tags_json = json.dumps(normalize_case_tags(payload.tags), ensure_ascii=False)
@@ -1614,8 +2169,6 @@ def create_case(
         raise json_error(422, "VALIDATION_ERROR", "Case name is required.")
     if payload.progress_status not in CASE_PROGRESS_STATUSES:
         raise json_error(422, "VALIDATION_ERROR", "Unsupported progress status.")
-    if payload.ball_status not in CASE_BALL_STATUSES:
-        raise json_error(422, "VALIDATION_ERROR", "Unsupported ball status.")
     if payload.genre_id is not None and session.get(CaseGenre, payload.genre_id) is None:
         raise json_error(422, "VALIDATION_ERROR", "Case genre not found.")
 
@@ -1629,10 +2182,16 @@ def create_case(
             if payload.description is not None and payload.description.strip() != ""
             else None
         ),
+        open_when_date=normalized_optional_date(
+            payload.open_when_date
+            if payload.open_when_date is not None
+            else payload.open_when_text
+        ),
         open_when_text=None,
-        closed_when_text=None,
+        closed_when_text=normalized_optional_text(payload.closed_when_text),
+        tags_json=json.dumps(normalize_case_tags(payload.tags), ensure_ascii=False),
         progress_status=payload.progress_status,
-        ball_status=payload.ball_status,
+        ball_status="none",
         closed_at=None,
         archived_at=None,
         is_system_case=0,

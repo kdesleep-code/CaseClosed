@@ -337,7 +337,7 @@ def test_google_gmail_import_unloaded_by_date_imports_matching_received_and_sent
     assert sent_auto_row == ("processed", "read", "sent")
 
 
-def test_google_gmail_auto_import_stops_at_latest_loaded_message(
+def test_google_gmail_auto_import_scans_past_loaded_message_until_previous_23(
     client,
     database_path,
     monkeypatch,
@@ -447,11 +447,16 @@ def test_google_gmail_auto_import_stops_at_latest_loaded_message(
         "gmail_api_get_json",
         fake_gmail_api_get_json,
     )
+    monkeypatch.setattr(
+        google_integration,
+        "jst_now",
+        lambda: datetime(2026, 5, 28, 13, 0, tzinfo=runtime.JST),
+    )
 
     with runtime.SessionLocal() as session:
         result = google_integration.run_google_gmail_auto_import_once(session)
 
-    assert result["imported_count"] == 0
+    assert result["imported_count"] == 1
     with sqlite3.connect(database_path) as connection:
         imported = connection.execute(
             "SELECT subject FROM gmail_messages WHERE gmail_message_id = ?",
@@ -464,8 +469,8 @@ def test_google_gmail_auto_import_stops_at_latest_loaded_message(
             ).fetchone()[0]
         )
 
-    assert imported is None
-    assert settings["last_imported_count"] == 0
+    assert imported == ("Auto import gap",)
+    assert settings["last_imported_count"] == 1
     assert settings["last_error"] is None
 
 

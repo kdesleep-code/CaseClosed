@@ -56,6 +56,7 @@ import {
   listCaseToolLinks,
   listCaseGenres,
   listCases,
+  prefillCase,
   regenerateCaseCurrentSituation,
   reorderCaseToolLinks,
   reorderCaseStakeholders,
@@ -289,12 +290,22 @@ function CaseRow({ genres, item }: { genres: CaseGenre[]; item: CaseItem }) {
   )
 }
 
-function CaseStorageWindow({
+export function CaseStorageWindow({
   caseId,
   rootDirectoryId,
+  rootListMode = 'case',
+  rootLabel = t('cases.storage.root'),
+  heading = t('storage.objects'),
+  body = t('cases.storage.body'),
+  deleteMode = 'case',
 }: {
   caseId: string
   rootDirectoryId: string
+  rootListMode?: 'case' | 'directory'
+  rootLabel?: string
+  heading?: string
+  body?: string
+  deleteMode?: 'case' | 'physical'
 }) {
   const [currentDirectoryId, setCurrentDirectoryId] = useState(rootDirectoryId)
   const [objects, setObjects] = useState<StorageObject[]>([])
@@ -322,7 +333,7 @@ function CaseStorageWindow({
 
   async function refreshStorage() {
     const [nextObjects, nextDirectories] = await Promise.all([
-      currentDirectoryId === rootDirectoryId
+      rootListMode === 'case' && currentDirectoryId === rootDirectoryId
         ? listCaseFiles(caseId)
         : listStorageObjects({ directory_id: currentDirectoryId, limit: 200 }),
       listStorageDirectories(currentDirectoryId),
@@ -483,6 +494,31 @@ function CaseStorageWindow({
   }
 
   async function handleDelete(object: StorageObject) {
+    if (deleteMode === 'physical') {
+      if (
+        !window.confirm(
+          t('storage.delete.confirm', { name: object.original_filename ?? object.id }),
+        )
+      ) {
+        return
+      }
+      setDeleteBusyId(object.id)
+      setError(null)
+      setNotice(null)
+      try {
+        await deleteStorageObject(object.id)
+        setObjects((currentObjects) =>
+          currentObjects.filter((currentObject) => currentObject.id !== object.id),
+        )
+        setSelectedObjectId((currentId) => (currentId === object.id ? null : currentId))
+        setNotice(t('storage.deleted', { name: object.original_filename ?? object.id }))
+      } catch (requestError) {
+        setError(describeError(requestError))
+      } finally {
+        setDeleteBusyId(null)
+      }
+      return
+    }
     const choice = window.prompt(
       t('cases.storage.deleteChoice', { name: object.original_filename ?? object.id }),
       'exclude',
@@ -672,7 +708,7 @@ function CaseStorageWindow({
           onDrop={(event) => handleDirectoryDrop(event, rootDirectoryId)}
           type="button"
         >
-          {t('cases.storage.root')}
+          {rootLabel}
         </button>
         {visibleBreadcrumbs.map((directory) => (
           <button
@@ -697,9 +733,9 @@ function CaseStorageWindow({
       >
         <div className="section-heading case-storage-drop-heading">
           <div>
-            <h2>{t('storage.objects')}</h2>
+            <h2>{heading}</h2>
           </div>
-          <p>{t('cases.storage.body')}</p>
+          <p>{body}</p>
         </div>
         <div className="storage-object-grid">
           {directories.map((directory) => (
@@ -1435,7 +1471,11 @@ function CaseToolsGadget({
                 target={tool.url.startsWith('http') ? '_blank' : undefined}
                 title={tool.url}
               >
-                <span>{tool.icon_label}</span>
+                {tool.icon_url !== null && tool.icon_url !== '' ? (
+                  <img alt="" aria-hidden="true" src={tool.icon_url} />
+                ) : (
+                  <span>{tool.icon_label}</span>
+                )}
               </a>
               {isSettingsOpen && (
                 <button
@@ -1516,18 +1556,12 @@ function CaseListView() {
     let isMounted = true
     Promise.all([
       listCaseGenres(),
-      listCases('user_ball'),
-      listCases('waiting'),
-      listCases('completed'),
+      listCases('all'),
     ])
-      .then(([nextGenres, userBallCases, waitingCases, completedCases]) => {
+      .then(([nextGenres, nextAllCases]) => {
         if (!isMounted) return
         setGenres(nextGenres)
-        const mergedCases = new Map<string, CaseItem>()
-        ;[...userBallCases, ...waitingCases, ...completedCases].forEach((item) => {
-          mergedCases.set(item.id, item)
-        })
-        setAllCases(Array.from(mergedCases.values()))
+        setAllCases(nextAllCases)
       })
       .catch((requestError) => {
         if (isMounted) setError(describeError(requestError))
@@ -1659,8 +1693,21 @@ function CaseListView() {
         <div className="case-main-layout">
           <section aria-labelledby="case-list-heading" className="case-list-workspace">
             <nav aria-label={t('cases.statusFilter')} className="case-tabs" role="tablist">
-              <div>
-                {(['user_ball', 'waiting', 'completed'] as CaseListStatus[]).map((tab) => (
+              <div className="case-tab-group case-tab-group-primary">
+                {(['user_ball', 'waiting'] as CaseListStatus[]).map((tab) => (
+                  <button
+                    aria-selected={status === tab}
+                    key={tab}
+                    onClick={() => setStatus(tab)}
+                    role="tab"
+                    type="button"
+                  >
+                    {t(`cases.tab.${tab}`)}
+                  </button>
+                ))}
+              </div>
+              <div className="case-tab-group case-tab-group-secondary">
+                {(['not_started', 'completed', 'archived'] as CaseListStatus[]).map((tab) => (
                   <button
                     aria-selected={status === tab}
                     key={tab}
@@ -1870,6 +1917,7 @@ function CaseDetailView({ caseId }: { caseId: string }) {
   const [isOverviewSaving, setIsOverviewSaving] = useState(false)
   const [isCaseStateBusy, setIsCaseStateBusy] = useState(false)
   const [isCurrentSituationRefreshing, setIsCurrentSituationRefreshing] = useState(false)
+  const [isCurrentSituationExpanded, setIsCurrentSituationExpanded] = useState(true)
   const [isDeletingCase, setIsDeletingCase] = useState(false)
   const [deleteMenuPosition, setDeleteMenuPosition] = useState<{
     x: number
@@ -1918,7 +1966,7 @@ function CaseDetailView({ caseId }: { caseId: string }) {
   function startOverviewEdit() {
     if (item === null) return
     setOverviewDraft(item.description ?? '')
-    setOpenWhenDraft(item.open_when_text ?? '')
+    setOpenWhenDraft(item.open_when_date ?? '')
     setClosedWhenDraft(item.closed_when_text ?? '')
     setTagDraft(item.tags.join(', '))
     setIsOverviewEditing(true)
@@ -1949,7 +1997,8 @@ function CaseDetailView({ caseId }: { caseId: string }) {
     try {
       const updatedCase = await updateCase(caseId, {
         description: overviewDraft.trim() === '' ? null : overviewDraft,
-        open_when_text: openWhenDraft.trim() === '' ? null : openWhenDraft,
+        open_when_date: openWhenDraft.trim() === '' ? null : openWhenDraft,
+        open_when_text: null,
         closed_when_text: closedWhenDraft.trim() === '' ? null : closedWhenDraft,
         tags: parseTagDraft(tagDraft),
       })
@@ -2127,14 +2176,14 @@ function CaseDetailView({ caseId }: { caseId: string }) {
                     <dt>{t('cases.overview.openWhen')}</dt>
                     <dd>
                       {isOverviewEditing ? (
-                        <textarea
+                        <input
                           aria-label={t('cases.overview.openWhen')}
                           onChange={(event) => setOpenWhenDraft(event.target.value)}
-                          rows={3}
+                          type="date"
                           value={openWhenDraft}
                         />
                       ) : (
-                        item.open_when_text ?? t('cases.overview.openWhenEmpty')
+                        item.open_when_date ?? t('cases.overview.openWhenEmpty')
                       )}
                     </dd>
                   </div>
@@ -2161,40 +2210,55 @@ function CaseDetailView({ caseId }: { caseId: string }) {
                     <span>{t('cases.aiStatus.eyebrow')}</span>
                     <h2>{t('cases.aiStatus.heading')}</h2>
                   </div>
-                  <button
-                    className={`button-loading-dot${
-                      isCurrentSituationRefreshing ? ' is-loading' : ''
-                    }`}
-                    disabled={isCurrentSituationRefreshing}
-                    onClick={handleCurrentSituationRefresh}
-                    type="button"
-                  >
-                    {isCurrentSituationRefreshing
-                      ? t('cases.aiStatus.refreshing')
-                      : t('cases.aiStatus.refresh')}
-                  </button>
+                  <div className="case-ai-status-actions">
+                    <button
+                      aria-expanded={isCurrentSituationExpanded}
+                      onClick={() => setIsCurrentSituationExpanded((current) => !current)}
+                      type="button"
+                    >
+                      {isCurrentSituationExpanded
+                        ? t('common.collapse')
+                        : t('common.expand')}
+                    </button>
+                    <button
+                      className={`button-loading-dot${
+                        isCurrentSituationRefreshing ? ' is-loading' : ''
+                      }`}
+                      disabled={isCurrentSituationRefreshing}
+                      onClick={handleCurrentSituationRefresh}
+                      type="button"
+                    >
+                      {isCurrentSituationRefreshing
+                        ? t('cases.aiStatus.refreshing')
+                        : t('cases.aiStatus.refresh')}
+                    </button>
+                  </div>
                 </div>
-                {detail.current_situation === null || detail.current_situation === undefined ? (
-                  <p>{t('cases.aiStatus.empty')}</p>
-                ) : (
+                {isCurrentSituationExpanded && (
                   <>
-                    <pre className="case-ai-status-text">
-                      {detail.current_situation.context_markdown}
-                    </pre>
-                    <p className="case-ai-status-meta">
-                      {t('cases.aiStatus.version', {
-                        version: detail.current_situation.version_no,
-                        time: formatDateTime(detail.current_situation.created_at),
-                      })}
-                    </p>
+                    {detail.current_situation === null || detail.current_situation === undefined ? (
+                      <p>{t('cases.aiStatus.empty')}</p>
+                    ) : (
+                      <>
+                        <pre className="case-ai-status-text">
+                          {detail.current_situation.context_markdown}
+                        </pre>
+                        <p className="case-ai-status-meta">
+                          {t('cases.aiStatus.version', {
+                            version: detail.current_situation.version_no,
+                            time: formatDateTime(detail.current_situation.created_at),
+                          })}
+                        </p>
+                      </>
+                    )}
+                    <div className="case-ai-status-grid">
+                      <span>{t('cases.aiStatus.source.mail')}</span>
+                      <span>{t('cases.aiStatus.source.task')}</span>
+                      <span>{t('cases.aiStatus.source.calendar')}</span>
+                      <span>{t('cases.aiStatus.source.file')}</span>
+                    </div>
                   </>
                 )}
-                <div className="case-ai-status-grid">
-                  <span>{t('cases.aiStatus.source.mail')}</span>
-                  <span>{t('cases.aiStatus.source.task')}</span>
-                  <span>{t('cases.aiStatus.source.calendar')}</span>
-                  <span>{t('cases.aiStatus.source.file')}</span>
-                </div>
               </section>
               <div className="case-workbench-grid">
                 <CaseWorkbenchPanel
@@ -2224,11 +2288,15 @@ function CaseDetailView({ caseId }: { caseId: string }) {
                 </CaseWorkbenchPanel>
                 <CaseWorkbenchPanel
                   actionLabel={t('cases.task.new')}
+                  actionHref={`/tasks/new?case_id=${encodeURIComponent(item.id)}`}
                   count={item.open_task_count}
                   eyebrow={t('cases.section.tasks')}
                   title={t('cases.task.window')}
                 >
-                  <div className="case-task-lane">
+                  <AppLink
+                    className="case-task-lane case-task-lane-link"
+                    href={`/tasks?case_id=${encodeURIComponent(item.id)}`}
+                  >
                     <div>
                       <span>{t('cases.task.next')}</span>
                       <strong>{item.next_task?.title ?? t('cases.card.none')}</strong>
@@ -2238,7 +2306,7 @@ function CaseDetailView({ caseId }: { caseId: string }) {
                       <span>{t('cases.task.overdue')}</span>
                       <strong>{item.overdue_task_count}</strong>
                     </div>
-                  </div>
+                  </AppLink>
                 </CaseWorkbenchPanel>
               </div>
               <CaseStorageWindow caseId={item.id} rootDirectoryId={item.storage_directory_id} />
@@ -2329,9 +2397,14 @@ function CaseDetailView({ caseId }: { caseId: string }) {
 function CaseCreateView() {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
-  const [ballStatus, setBallStatus] = useState('none')
+  const [openWhenText, setOpenWhenText] = useState('')
+  const [closedWhenText, setClosedWhenText] = useState('')
+  const [tagText, setTagText] = useState('')
   const [genres, setGenres] = useState<CaseGenre[]>([])
   const [genreId, setGenreId] = useState('')
+  const [llmPrompt, setLlmPrompt] = useState('')
+  const [llmNotice, setLlmNotice] = useState<string | null>(null)
+  const [isPrefilling, setIsPrefilling] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -2349,6 +2422,23 @@ function CaseCreateView() {
     }
   }, [])
 
+  function parseCaseTagInput(value: string) {
+    const tags: string[] = []
+    const seen = new Set<string>()
+    value
+      .split(/[,\n]/)
+      .map((tag) => tag.trim())
+      .filter(Boolean)
+      .forEach((tag) => {
+        const key = tag.toLocaleLowerCase()
+        if (!seen.has(key)) {
+          seen.add(key)
+          tags.push(tag)
+        }
+      })
+    return tags
+  }
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setIsSubmitting(true)
@@ -2357,15 +2447,57 @@ function CaseCreateView() {
       const created = await createCase({
         name,
         description: description.trim() === '' ? null : description,
+        open_when_date: openWhenText.trim() === '' ? null : openWhenText,
+        open_when_text: null,
+        closed_when_text: closedWhenText.trim() === '' ? null : closedWhenText,
         progress_status: 'not_started',
-        ball_status: ballStatus,
         genre_id: genreId === '' ? null : genreId,
+        tags: parseCaseTagInput(tagText),
       })
       navigateTo(`/cases/${encodeURIComponent(created.id)}`)
     } catch (requestError) {
       setError(describeError(requestError))
     } finally {
       setIsSubmitting(false)
+    }
+  }
+
+  async function handleLlmPrefill() {
+    const prompt = llmPrompt.trim()
+    if (prompt === '' || isPrefilling) return
+    setIsPrefilling(true)
+    setError(null)
+    setLlmNotice(null)
+    try {
+      const { prefill } = await prefillCase({
+        prompt,
+        current_fields: {
+          name,
+          description,
+          open_when_date: openWhenText,
+          closed_when_text: closedWhenText,
+          tags: parseCaseTagInput(tagText),
+          genre_id: genreId,
+        },
+      })
+      if (name.trim() === '' && prefill.name !== null) setName(prefill.name)
+      if (description.trim() === '' && prefill.description !== null) {
+        setDescription(prefill.description)
+      }
+      if (openWhenText.trim() === '' && prefill.open_when_date !== null) {
+        setOpenWhenText(prefill.open_when_date)
+      }
+      if (closedWhenText.trim() === '' && prefill.closed_when_text !== null) {
+        setClosedWhenText(prefill.closed_when_text)
+      }
+      if (tagText.trim() === '' && prefill.tags.length > 0) {
+        setTagText(prefill.tags.join(', '))
+      }
+      setLlmNotice(t('cases.create.llmApplied'))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsPrefilling(false)
     }
   }
 
@@ -2389,49 +2521,126 @@ function CaseCreateView() {
           </div>
         )}
 
-        <form className="case-form" onSubmit={handleSubmit}>
-          <label>
-            <span>{t('cases.name')}</span>
-            <input
-              autoFocus
-              onChange={(event) => setName(event.target.value)}
-              required
-              type="text"
-              value={name}
-            />
-          </label>
-          <label>
-            <span>{t('cases.description')}</span>
-            <textarea
-              onChange={(event) => setDescription(event.target.value)}
-              rows={5}
-              value={description}
-            />
-          </label>
-          <label>
-            <span>{t('cases.genre.select')}</span>
-            <select onChange={(event) => setGenreId(event.target.value)} value={genreId}>
-              <option value="">{t('cases.genre.none')}</option>
+        <form className="case-create-layout" onSubmit={handleSubmit}>
+          <section className="case-create-main">
+            <section className="case-overview-panel case-create-overview-panel">
+              <div className="case-overview-main">
+                <div>
+                  <div className="case-overview-title-row">
+                    <h2>{t('cases.section.overview')}</h2>
+                  </div>
+                </div>
+                <label>
+                  <span>{t('cases.name')}</span>
+                  <input
+                    autoFocus
+                    onChange={(event) => setName(event.target.value)}
+                    required
+                    type="text"
+                    value={name}
+                  />
+                </label>
+                <label>
+                  <span>{t('cases.description')}</span>
+                  <textarea
+                    onChange={(event) => setDescription(event.target.value)}
+                    rows={5}
+                    value={description}
+                  />
+                </label>
+                <label className="case-overview-tags-field">
+                  <span>{t('cases.tags')}</span>
+                  <input
+                    onChange={(event) => setTagText(event.target.value)}
+                    placeholder={t('cases.tags.placeholder')}
+                    value={tagText}
+                  />
+                </label>
+              </div>
+              <dl>
+                <div>
+                  <dt>{t('cases.overview.openWhen')}</dt>
+                  <dd>
+                    <input
+                      onChange={(event) => setOpenWhenText(event.target.value)}
+                      type="date"
+                      value={openWhenText}
+                    />
+                  </dd>
+                </div>
+                <div>
+                  <dt>{t('cases.overview.closedWhen')}</dt>
+                  <dd>
+                    <textarea
+                      onChange={(event) => setClosedWhenText(event.target.value)}
+                      rows={3}
+                      value={closedWhenText}
+                    />
+                  </dd>
+                </div>
+              </dl>
+            </section>
+            <section className="case-panel case-create-placeholder-panel">
+              <h2>{t('cases.aiStatus.heading')}</h2>
+              <p>{t('cases.aiStatus.empty')}</p>
+            </section>
+          </section>
+
+          <aside aria-label={t('cases.gadgets')} className="case-gadget-column">
+            <section className="case-gadget-card">
+              <h2>{t('cases.create.metaHeading')}</h2>
+              <label className="case-create-gadget-field">
+                <span>{t('cases.genre.select')}</span>
+                <select onChange={(event) => setGenreId(event.target.value)} value={genreId}>
+                  <option value="">{t('cases.genre.none')}</option>
                   {genres.map((genre) => (
                     <option key={genre.id} value={genre.id}>
                       {genre.title}
                     </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            <span>{t('cases.ball')}</span>
-            <select onChange={(event) => setBallStatus(event.target.value)} value={ballStatus}>
-              <option value="none">{t('cases.ball.none')}</option>
-              <option value="user">{t('cases.ball.user')}</option>
-              <option value="other">{t('cases.ball.other')}</option>
-              <option value="date_wait">{t('cases.ball.dateWait')}</option>
-              <option value="stalled">{t('cases.ball.stalled')}</option>
-            </select>
-          </label>
-          <button className={`button-loading-dot${isSubmitting ? ' is-loading' : ''}`} type="submit">
-            {t('cases.create')}
-          </button>
+                  ))}
+                </select>
+              </label>
+            </section>
+            <section className="case-gadget-card">
+              <h2>{t('cases.create.llmHeading')}</h2>
+              <label className="case-create-gadget-field">
+                <span>{t('cases.create.llmPrompt')}</span>
+                <textarea
+                  onChange={(event) => {
+                    setLlmPrompt(event.target.value)
+                    setLlmNotice(null)
+                  }}
+                  placeholder={t('cases.create.llmPlaceholder')}
+                  rows={5}
+                  value={llmPrompt}
+                />
+              </label>
+              {llmNotice !== null && <p className="task-gadget-empty">{llmNotice}</p>}
+              <button
+                className={`case-gadget-action button-loading-dot${isPrefilling ? ' is-loading' : ''}`}
+                disabled={isPrefilling || llmPrompt.trim() === ''}
+                onClick={() => {
+                  void handleLlmPrefill()
+                }}
+                type="button"
+              >
+                {isPrefilling ? t('cases.create.llmGenerating') : t('cases.create.llmGenerate')}
+              </button>
+            </section>
+            <section className="case-gadget-card">
+              <h2>{t('cases.detail.actions')}</h2>
+              <button
+                className={`case-gadget-action button-loading-dot${isSubmitting ? ' is-loading' : ''}`}
+                disabled={isSubmitting}
+                type="submit"
+              >
+                {t('cases.create')}
+              </button>
+              <AppLink className="case-gadget-secondary-action" href="/cases">
+                {t('common.cancel')}
+              </AppLink>
+            </section>
+          </aside>
         </form>
       </div>
     </main>
@@ -2442,6 +2651,7 @@ function CaseMailListView({ caseId }: { caseId: string }) {
   const [caseItem, setCaseItem] = useState<CaseItem | null>(null)
   const [mailLinks, setMailLinks] = useState<CaseMailLink[]>([])
   const [autoAssignRules, setAutoAssignRules] = useState<CaseAutoAssignRule[]>([])
+  const [stakeholders, setStakeholders] = useState<CaseStakeholder[]>([])
   const [mailSearchResults, setMailSearchResults] = useState<MailListItem[]>([])
   const [searchQuery, setSearchQuery] = useState('')
   const [autoRuleSenderEmail, setAutoRuleSenderEmail] = useState('')
@@ -2463,12 +2673,18 @@ function CaseMailListView({ caseId }: { caseId: string }) {
     let isMounted = true
     setIsLoading(true)
     setError(null)
-    Promise.all([getCase(caseId), listCaseMailLinks(caseId), listCaseAutoAssignRules(caseId)])
-      .then(([detail, links, rules]) => {
+    Promise.all([
+      getCase(caseId),
+      listCaseMailLinks(caseId),
+      listCaseAutoAssignRules(caseId),
+      listCaseStakeholders(caseId),
+    ])
+      .then(([detail, links, rules, nextStakeholders]) => {
         if (!isMounted) return
         setCaseItem(detail.case)
         setMailLinks(links)
         setAutoAssignRules(rules)
+        setStakeholders(nextStakeholders)
       })
       .catch((requestError) => {
         if (isMounted) setError(describeError(requestError))
@@ -2542,6 +2758,20 @@ function CaseMailListView({ caseId }: { caseId: string }) {
       .toLowerCase()
       .includes(normalizedQuery)
   })
+  const autoRuleStakeholderSuggestions = stakeholders
+    .filter((stakeholder) => stakeholder.contact_primary_email !== null)
+    .reduce<Array<{ email: string; label: string }>>((suggestions, stakeholder) => {
+      const email = stakeholder.contact_primary_email
+      if (email === null) return suggestions
+      if (suggestions.some((suggestion) => suggestion.email.toLowerCase() === email.toLowerCase())) {
+        return suggestions
+      }
+      suggestions.push({
+        email,
+        label: `${stakeholder.contact_display_name} / ${stakeholder.role}`,
+      })
+      return suggestions
+    }, [])
   const assignedThreadIds = new Set(mailLinks.map((mail) => mail.thread_id))
   const pinnedMailItems = latestCaseMailThreadItems(Object.values(pinnedMails)).toSorted(
     (first, second) => second.received_at.localeCompare(first.received_at),
@@ -3004,11 +3234,21 @@ function CaseMailListView({ caseId }: { caseId: string }) {
                 <label>
                   <span>{t('cases.mail.autoRule.senderEmail')}</span>
                   <input
+                    list="case-auto-rule-stakeholder-suggestions"
                     onChange={(event) => setAutoRuleSenderEmail(event.target.value)}
                     placeholder={t('cases.mail.autoRule.placeholder')}
                     type="email"
                     value={autoRuleSenderEmail}
                   />
+                  <datalist id="case-auto-rule-stakeholder-suggestions">
+                    {autoRuleStakeholderSuggestions.map((suggestion) => (
+                      <option
+                        key={suggestion.email}
+                        label={suggestion.label}
+                        value={suggestion.email}
+                      />
+                    ))}
+                  </datalist>
                 </label>
                 <button
                   className={`button-loading-dot${isAutoRuleSaving ? ' is-loading' : ''}`}

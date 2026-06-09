@@ -47,6 +47,7 @@ from caseclosed.db.models import StorageLocation
 from caseclosed.db.models import StorageObject
 from caseclosed.db.models import StorageObjectVersion
 from caseclosed.db.models import StorageOperationHistory
+from caseclosed.db.models import Task
 from caseclosed.db.runtime import case_storage_directory_id
 from caseclosed.db.runtime import get_session
 from caseclosed.db.runtime import jst_iso
@@ -82,7 +83,7 @@ CONTENT_TYPE_EXTENSIONS = {
 INTERNAL_STORAGE_LOCATION_ID = "storage_location_internal"
 GMAIL_ATTACHMENT_STORAGE_SCOPE = "tmp/gmail-attachments"
 NO_STORE_FILE_HEADERS = {"Cache-Control": "no-store"}
-ACTIVE_STORAGE_DIRECTORY_KINDS = ("normal", "case")
+ACTIVE_STORAGE_DIRECTORY_KINDS = ("normal", "case", "task")
 
 
 class ContactImageUpload(BaseModel):
@@ -696,6 +697,7 @@ def storage_root() -> Path:
     (root / "tmp").mkdir(parents=True, exist_ok=True)
     (root / "contact-images").mkdir(parents=True, exist_ok=True)
     (root / "file-icons").mkdir(parents=True, exist_ok=True)
+    (root / "case-tool-icons").mkdir(parents=True, exist_ok=True)
     return root
 
 
@@ -2742,6 +2744,19 @@ def delete_storage_directory(
                 409,
                 "CASE_DIRECTORY_PROTECTED",
                 "Case directory cannot be deleted while the Case exists.",
+            )
+    if directory.directory_kind == "task":
+        task_id = session.scalar(
+            select(Task.id)
+            .where(Task.storage_directory_id == directory.id)
+            .where(Task.deleted_at.is_(None))
+            .limit(1)
+        )
+        if task_id is not None:
+            raise json_error(
+                409,
+                "TASK_DIRECTORY_PROTECTED",
+                "Task directory cannot be deleted while the Task exists.",
             )
 
     to_visit = [directory]

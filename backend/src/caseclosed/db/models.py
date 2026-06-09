@@ -28,6 +28,7 @@ class Case(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     open_when_text: Mapped[str | None] = mapped_column(Text)
+    open_when_date: Mapped[str | None] = mapped_column(Text)
     closed_when_text: Mapped[str | None] = mapped_column(Text)
     progress_status: Mapped[str] = mapped_column(
         Text,
@@ -135,6 +136,119 @@ class CaseToolLink(Base):
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class CaseToolIconSetting(Base):
+    __tablename__ = "case_tool_icon_settings"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    storage_object_id: Mapped[str | None] = mapped_column(ForeignKey("storage_objects.id"))
+    icon_filename: Mapped[str | None] = mapped_column(Text)
+    icon_content_type: Mapped[str] = mapped_column(Text, nullable=False)
+    icon_data_url: Mapped[str | None] = mapped_column(Text)
+    match_url: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class Task(Base):
+    __tablename__ = "tasks"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), nullable=False)
+    storage_directory_id: Mapped[str | None] = mapped_column(ForeignKey("storage_directories.id"))
+    parent_task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id"))
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    done_when_text: Mapped[str | None] = mapped_column(Text)
+    progress_memo: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="not_started")
+    priority: Mapped[str] = mapped_column(Text, nullable=False, default="middle")
+    start_at: Mapped[str | None] = mapped_column(Text)
+    due_at: Mapped[str | None] = mapped_column(Text)
+    estimate_minutes: Mapped[int | None] = mapped_column(Integer)
+    recurrence_rule_type: Mapped[str | None] = mapped_column(Text)
+    recurrence_month_day: Mapped[int | None] = mapped_column(Integer)
+    recurrence_year_month: Mapped[int | None] = mapped_column(Integer)
+    recurrence_month_week: Mapped[int | None] = mapped_column(Integer)
+    recurrence_month_weekday: Mapped[int | None] = mapped_column(Integer)
+    recurrence_weekdays_json: Mapped[str | None] = mapped_column(Text)
+    recurrence_start_offset_days: Mapped[int | None] = mapped_column(Integer)
+    recurrence_series_id: Mapped[str | None] = mapped_column(Text)
+    recurrence_sequence: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    scheduled_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    worked_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    source_type: Mapped[str | None] = mapped_column(Text)
+    source_id: Mapped[str | None] = mapped_column(Text)
+    completed_at: Mapped[str | None] = mapped_column(Text)
+    canceled_at: Mapped[str | None] = mapped_column(Text)
+    canceled_reason: Mapped[str | None] = mapped_column(Text)
+    deleted_at: Mapped[str | None] = mapped_column(Text)
+    deleted_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class TaskLink(Base):
+    __tablename__ = "task_links"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id"), nullable=False)
+    linked_type: Mapped[str] = mapped_column(Text, nullable=False)
+    linked_id: Mapped[str | None] = mapped_column(Text)
+    url: Mapped[str | None] = mapped_column(Text)
+    label: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class TaskSuggestion(Base):
+    __tablename__ = "task_suggestions"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    case_id: Mapped[str | None] = mapped_column(ForeignKey("cases.id"))
+    source_type: Mapped[str] = mapped_column(Text, nullable=False)
+    source_id: Mapped[str] = mapped_column(Text, nullable=False)
+    suggested_title: Mapped[str] = mapped_column(Text, nullable=False)
+    suggested_detail: Mapped[str | None] = mapped_column(Text)
+    suggested_due_at: Mapped[str | None] = mapped_column(Text)
+    suggested_estimate_minutes: Mapped[int | None] = mapped_column(Integer)
+    suggested_priority_hint: Mapped[str | None] = mapped_column(Text)
+    suggestion_kind: Mapped[str] = mapped_column(Text, nullable=False, default="task")
+    parent_task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id"))
+    llm_run_id: Mapped[str | None] = mapped_column(ForeignKey("llm_runs.id"))
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    accepted_task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id"))
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class TaskWorkBlock(Base):
+    __tablename__ = "task_work_blocks"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id"), nullable=False)
+    calendar_event_link_id: Mapped[str | None] = mapped_column(Text)
+    planned_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    actual_minutes: Mapped[int | None] = mapped_column(Integer)
+    started_at: Mapped[str | None] = mapped_column(Text)
+    ended_at: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class TaskProgressEntry(Base):
+    __tablename__ = "task_progress_entries"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id"), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class FileIconSetting(Base):

@@ -27,8 +27,9 @@ import {
 } from './phase4Api'
 import type { MailAttachment, MailDetail, MailSendRequest, MailThreadMessage } from './phase4Api'
 import type { MailRecipient } from './phase4Api'
-import { listCases } from './phase7Api'
+import { isCaseOpenForSuggestion, listCases } from './phase7Api'
 import type { CaseItem } from './phase7Api'
+import { createTaskFromMail } from './phase8Api'
 import { getProfile } from './profileApi'
 
 type MailThreadViewProps = {
@@ -1197,6 +1198,7 @@ function focusMessageIdFromLocation() {
 
 function MailThreadView({ messageId }: MailThreadViewProps) {
   const caseAssignDatalistId = useId()
+  const taskCaseDatalistId = useId()
   const [detail, setDetail] = useState<MailDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -1208,6 +1210,10 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
   const [caseAssignInput, setCaseAssignInput] = useState('')
   const [caseCandidates, setCaseCandidates] = useState<CaseItem[]>([])
   const [caseAssignBusy, setCaseAssignBusy] = useState(false)
+  const [taskCasePrompt, setTaskCasePrompt] = useState<{
+    message: MailThreadMessage
+  } | null>(null)
+  const [taskCaseInput, setTaskCaseInput] = useState('')
   const [attachmentMenu, setAttachmentMenu] = useState<{
     attachment: MailAttachment
     x: number
@@ -1275,14 +1281,14 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
   }, [messageId])
 
   useEffect(() => {
-    if (!caseAssignEditing || caseCandidates.length > 0) {
+    if ((!caseAssignEditing && taskCasePrompt === null) || caseCandidates.length > 0) {
       return
     }
     let isMounted = true
     listCases('all')
       .then((items) => {
         if (isMounted) {
-          setCaseCandidates(items)
+          setCaseCandidates(items.filter((item) => isCaseOpenForSuggestion(item)))
         }
       })
       .catch((requestError) => {
@@ -1293,7 +1299,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
     return () => {
       isMounted = false
     }
-  }, [caseAssignEditing, caseCandidates.length])
+  }, [caseAssignEditing, caseCandidates.length, taskCasePrompt])
 
   useEffect(() => {
     if (
@@ -1476,8 +1482,8 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
     return getMailDetail(messageId)
   }
 
-  function selectedCaseCandidate() {
-    const query = caseAssignInput.trim()
+  function selectedCaseCandidateFor(input: string) {
+    const query = input.trim()
     if (query === '') {
       return null
     }
@@ -1492,6 +1498,10 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
       item.name.toLowerCase().startsWith(normalizedQuery),
     )
     return prefixMatches.length === 1 ? prefixMatches[0] : null
+  }
+
+  function selectedCaseCandidate() {
+    return selectedCaseCandidateFor(caseAssignInput)
   }
 
   async function handleAssignCase() {
@@ -1533,6 +1543,122 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
     return refreshUntilMailSummary(messageIdToSummarize)
   }
 
+  async function generateTaskFromMail(message: MailThreadMessage, caseId?: string | null) {
+    setBusyAction(`${message.id}-task`)
+    setError(null)
+    setNotice(null)
+    try {
+      const result = await createTaskFromMail({
+        message_id: message.id,
+        case_id: caseId ?? null,
+      })
+      setNotice(t('mail.thread.taskCreated'))
+      setTaskCasePrompt(null)
+      setTaskCaseInput('')
+      navigateTo(`/tasks/${encodeURIComponent(result.task.id)}`)
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
+  function handleTaskAction(message: MailThreadMessage) {
+    const assignedCaseLinks = detail?.case_links ?? []
+    if (assignedCaseLinks.length === 1) {
+      void generateTaskFromMail(message, assignedCaseLinks[0].case_id)
+      return
+    }
+    setTaskCasePrompt({ message })
+    setTaskCaseInput('')
+    setError(null)
+    setNotice(null)
+  }
+
+  function handleTaskCaseGenerateFromInput() {
+    if (taskCasePrompt === null) return
+    const input = taskCaseInput.trim()
+    if (input === '') {
+      void generateTaskFromMail(taskCasePrompt.message, null)
+      return
+    }
+    const selectedCase = selectedCaseCandidateFor(input)
+    if (selectedCase === null) {
+      setError(t('mail.thread.caseAssignInvalid'))
+      return
+    }
+    void generateTaskFromMail(taskCasePrompt.message, selectedCase.id)
+  }
+
+  function renderTaskCasePicker(message: MailThreadMessage) {
+    if (taskCasePrompt?.message.id !== message.id) {
+      return null
+    }
+    return (
+      <section className="mail-thread-task-case-picker">
+        <div>
+          <h3>{t('mail.thread.taskCaseHeading')}</h3>
+          <p>{t('mail.thread.taskCaseBody')}</p>
+        </div>
+        {assignedCaseLinks.length > 0 && (
+          <div className="mail-thread-task-case-options">
+            {assignedCaseLinks.map((caseLink) => (
+              <button
+                className="mail-thread-case-badge"
+                disabled={busyAction !== null}
+                key={caseLink.case_id}
+                onClick={() => void generateTaskFromMail(message, caseLink.case_id)}
+                type="button"
+              >
+                {caseLink.title}
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="mail-thread-case-editor-input">
+          <label htmlFor={`mail-thread-task-case-input-${message.id}`}>
+            {t('mail.thread.taskCaseInput')}
+          </label>
+          <input
+            autoComplete="off"
+            disabled={busyAction !== null}
+            id={`mail-thread-task-case-input-${message.id}`}
+            list={taskCaseDatalistId}
+            onChange={(event) => setTaskCaseInput(event.currentTarget.value)}
+            placeholder={t('mail.thread.taskCasePlaceholder')}
+            type="text"
+            value={taskCaseInput}
+          />
+          <datalist id={taskCaseDatalistId}>
+            {caseCandidates.map((item) => (
+              <option key={item.id} value={item.name} />
+            ))}
+          </datalist>
+          <button
+            className={`button-loading-dot${
+              busyAction === `${message.id}-task` ? ' is-loading' : ''
+            }`}
+            disabled={busyAction !== null}
+            onClick={handleTaskCaseGenerateFromInput}
+            type="button"
+          >
+            {t('mail.thread.taskCaseGenerate')}
+          </button>
+          <button
+            disabled={busyAction !== null}
+            onClick={() => {
+              setTaskCasePrompt(null)
+              setTaskCaseInput('')
+            }}
+            type="button"
+          >
+            {t('common.cancel')}
+          </button>
+        </div>
+      </section>
+    )
+  }
+
   async function updateImportanceAndRefreshSummary(
     messageIdToUpdate: string,
     importance: 'high' | 'middle' | 'low' | 'skip',
@@ -1553,6 +1679,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
     ) === true
     const hasActiveSummaryJob =
       detail?.summary_jobs?.[message.id] !== undefined
+    const taskGenerationBusy = busyAction === `${message.id}-task`
     return [
       {
         id: 'done',
@@ -1587,14 +1714,21 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
         id: key,
         label: t(key),
         disabled:
-          !['mail.thread.action.reply', 'mail.thread.action.summary'].includes(key) ||
+          ![
+            'mail.thread.action.reply',
+            'mail.thread.action.task',
+            'mail.thread.action.summary',
+          ].includes(key) ||
           busyAction !== null ||
+          (key === 'mail.thread.action.task' && message.llm_blocked === true) ||
           (key === 'mail.thread.action.summary' && isPinned) ||
           (key === 'mail.thread.action.summary' && hasSummary) ||
           (key === 'mail.thread.action.summary' && hasActiveSummaryJob),
         className:
           key === 'mail.thread.action.summary' && hasActiveSummaryJob
             ? 'mail-thread-action-quiet mail-thread-action-loading button-loading-dot is-loading'
+            : key === 'mail.thread.action.task' && taskGenerationBusy
+              ? 'mail-thread-action-quiet mail-thread-action-loading button-loading-dot is-loading'
             : 'mail-thread-action-quiet',
         title:
           key === 'mail.thread.action.summary'
@@ -1605,12 +1739,20 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
               : hasActiveSummaryJob
               ? t('mail.thread.summaryInProgress')
               : t('mail.thread.summaryMockTitle')
+            : key === 'mail.thread.action.task'
+              ? message.llm_blocked === true
+                ? llmBlockedTitle(message)
+                : t('mail.thread.taskCreateTitle')
             : key === 'mail.thread.action.reply'
               ? t('mail.thread.action.reply')
               : t('common.notImplemented'),
         onClick: () => {
           if (key === 'mail.thread.action.reply') {
             navigateTo(replyHrefFor(message, ownedEmailAddresses))
+            return
+          }
+          if (key === 'mail.thread.action.task') {
+            handleTaskAction(message)
             return
           }
           if (key !== 'mail.thread.action.summary') {
@@ -1627,16 +1769,29 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
   }
 
   function outgoingActionsFor(message: MailThreadMessage): IncomingAction[] {
+    const taskGenerationBusy = busyAction === `${message.id}-task`
     return outgoingActionKeys.map((key) => ({
       id: key,
       label: t(key),
       disabled:
-        !['mail.thread.action.followUp', 'mail.thread.action.resend'].includes(key) ||
-        busyAction !== null,
-      className: 'mail-thread-action-quiet',
+        ![
+          'mail.thread.action.followUp',
+          'mail.thread.action.resend',
+          'mail.thread.action.task',
+        ].includes(key) ||
+        busyAction !== null ||
+        (key === 'mail.thread.action.task' && message.llm_blocked === true),
+      className:
+        key === 'mail.thread.action.task' && taskGenerationBusy
+          ? 'mail-thread-action-quiet mail-thread-action-loading button-loading-dot is-loading'
+          : 'mail-thread-action-quiet',
       title:
         key === 'mail.thread.action.followUp' || key === 'mail.thread.action.resend'
           ? t(key)
+          : key === 'mail.thread.action.task'
+            ? message.llm_blocked === true
+              ? llmBlockedTitle(message)
+              : t('mail.thread.taskCreateTitle')
           : t('common.notImplemented'),
       onClick: () => {
         if (key === 'mail.thread.action.followUp') {
@@ -1645,6 +1800,10 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
         }
         if (key === 'mail.thread.action.resend') {
           navigateTo(resendHrefFor(message))
+          return
+        }
+        if (key === 'mail.thread.action.task') {
+          handleTaskAction(message)
         }
       },
     }))
@@ -2098,6 +2257,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                     </div>
                     <span>{formatDateTime(message.received_at)}</span>
                     <h2>{message.subject ?? t('mail.noSubject')}</h2>
+                    {renderTaskCasePicker(message)}
                   </div>
                   {!isSent && (
                     <div className="mail-thread-importance">

@@ -19,6 +19,7 @@ from caseclosed.db.models import Case
 from caseclosed.db.models import MailAutoState
 from caseclosed.db.models import StorageDirectory
 from caseclosed.db.models import StorageLocation
+from caseclosed.db.models import Task
 from caseclosed.settings import get_database_url
 from caseclosed.settings import get_storage_root
 
@@ -72,6 +73,7 @@ def bootstrap_database() -> None:
         seed_settings(session)
         seed_system_cases(session)
         ensure_case_storage_directories(session)
+        ensure_task_storage_directories(session)
         seed_storage_locations(session)
         normalize_llm_blocked_mail_importance(session)
         normalize_llm_skip_mail_importance(session)
@@ -88,6 +90,8 @@ def ensure_runtime_schema() -> None:
                 connection.execute(text("ALTER TABLE cases ADD COLUMN genre_id TEXT"))
             if "open_when_text" not in case_columns:
                 connection.execute(text("ALTER TABLE cases ADD COLUMN open_when_text TEXT"))
+            if "open_when_date" not in case_columns:
+                connection.execute(text("ALTER TABLE cases ADD COLUMN open_when_date TEXT"))
             if "closed_when_text" not in case_columns:
                 connection.execute(text("ALTER TABLE cases ADD COLUMN closed_when_text TEXT"))
             if "tags_json" not in case_columns:
@@ -189,6 +193,164 @@ def ensure_runtime_schema() -> None:
                     """
                 )
             )
+    if "tasks" not in table_names and "cases" in table_names:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE tasks (
+                        id TEXT PRIMARY KEY,
+                        case_id TEXT NOT NULL REFERENCES cases(id),
+                        storage_directory_id TEXT REFERENCES storage_directories(id),
+                        parent_task_id TEXT REFERENCES tasks(id),
+                        title TEXT NOT NULL,
+                        description TEXT,
+                        done_when_text TEXT,
+                        progress_memo TEXT,
+                        status TEXT NOT NULL DEFAULT 'not_started',
+                        priority TEXT NOT NULL DEFAULT 'middle',
+                        start_at TEXT,
+                        due_at TEXT,
+                        estimate_minutes INTEGER,
+                        scheduled_minutes INTEGER NOT NULL DEFAULT 0,
+                        worked_minutes INTEGER NOT NULL DEFAULT 0,
+                        source_type TEXT,
+                        source_id TEXT,
+                        completed_at TEXT,
+                        canceled_at TEXT,
+                        canceled_reason TEXT,
+                        deleted_at TEXT,
+                        deleted_reason TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+            )
+    elif "storage_directory_id" not in {
+        column["name"] for column in inspect(engine).get_columns("tasks")
+    }:
+        with engine.begin() as connection:
+            connection.execute(
+                text("ALTER TABLE tasks ADD COLUMN storage_directory_id TEXT")
+            )
+    if "tasks" in table_names and "done_when_text" not in {
+        column["name"] for column in inspect(engine).get_columns("tasks")
+    }:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE tasks ADD COLUMN done_when_text TEXT"))
+    if "tasks" in table_names and "priority" not in {
+        column["name"] for column in inspect(engine).get_columns("tasks")
+    }:
+        with engine.begin() as connection:
+            connection.execute(
+                text("ALTER TABLE tasks ADD COLUMN priority TEXT NOT NULL DEFAULT 'middle'")
+            )
+    if "tasks" in inspect(engine).get_table_names() and "progress_memo" not in {
+        column["name"] for column in inspect(engine).get_columns("tasks")
+    }:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE tasks ADD COLUMN progress_memo TEXT"))
+    if "tasks" in inspect(engine).get_table_names() and "start_at" not in {
+        column["name"] for column in inspect(engine).get_columns("tasks")
+    }:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE tasks ADD COLUMN start_at TEXT"))
+    if "tasks" in inspect(engine).get_table_names():
+        task_columns = {column["name"] for column in inspect(engine).get_columns("tasks")}
+        recurrence_columns = {
+            "recurrence_rule_type": "TEXT",
+            "recurrence_month_day": "INTEGER",
+            "recurrence_year_month": "INTEGER",
+            "recurrence_month_week": "INTEGER",
+            "recurrence_month_weekday": "INTEGER",
+            "recurrence_weekdays_json": "TEXT",
+            "recurrence_start_offset_days": "INTEGER",
+            "recurrence_series_id": "TEXT",
+            "recurrence_sequence": "INTEGER NOT NULL DEFAULT 0",
+        }
+        with engine.begin() as connection:
+            for column_name, column_type in recurrence_columns.items():
+                if column_name not in task_columns:
+                    connection.execute(
+                        text(f"ALTER TABLE tasks ADD COLUMN {column_name} {column_type}")
+                    )
+    if "task_links" not in table_names and "tasks" in inspect(engine).get_table_names():
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE task_links (
+                        id TEXT PRIMARY KEY,
+                        task_id TEXT NOT NULL REFERENCES tasks(id),
+                        linked_type TEXT NOT NULL,
+                        linked_id TEXT,
+                        url TEXT,
+                        label TEXT,
+                        created_at TEXT NOT NULL
+                    )
+                    """
+                )
+            )
+    if "task_suggestions" not in table_names and "cases" in table_names:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE task_suggestions (
+                        id TEXT PRIMARY KEY,
+                        case_id TEXT REFERENCES cases(id),
+                        source_type TEXT NOT NULL,
+                        source_id TEXT NOT NULL,
+                        suggested_title TEXT NOT NULL,
+                        suggested_detail TEXT,
+                        suggested_due_at TEXT,
+                        suggested_estimate_minutes INTEGER,
+                        suggested_priority_hint TEXT,
+                        suggestion_kind TEXT NOT NULL DEFAULT 'task',
+                        parent_task_id TEXT REFERENCES tasks(id),
+                        llm_run_id TEXT REFERENCES llm_runs(id),
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        accepted_task_id TEXT REFERENCES tasks(id),
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+            )
+    if "task_work_blocks" not in table_names and "tasks" in inspect(engine).get_table_names():
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE task_work_blocks (
+                        id TEXT PRIMARY KEY,
+                        task_id TEXT NOT NULL REFERENCES tasks(id),
+                        calendar_event_link_id TEXT,
+                        planned_minutes INTEGER NOT NULL,
+                        actual_minutes INTEGER,
+                        started_at TEXT,
+                        ended_at TEXT,
+                        created_at TEXT NOT NULL
+                    )
+                    """
+                )
+            )
+    if "task_progress_entries" not in inspect(engine).get_table_names() and "tasks" in inspect(engine).get_table_names():
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE task_progress_entries (
+                        id TEXT PRIMARY KEY,
+                        task_id TEXT NOT NULL REFERENCES tasks(id),
+                        body TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    )
+                    """
+                )
+            )
     if "file_icon_settings" not in table_names:
         with engine.begin() as connection:
             connection.execute(
@@ -217,6 +379,25 @@ def ensure_runtime_schema() -> None:
                 connection.execute(
                     text("ALTER TABLE file_icon_settings ADD COLUMN storage_object_id TEXT")
                 )
+    if "case_tool_icon_settings" not in table_names:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE case_tool_icon_settings (
+                        id TEXT PRIMARY KEY,
+                        storage_object_id TEXT,
+                        icon_filename TEXT,
+                        icon_content_type TEXT NOT NULL,
+                        icon_data_url TEXT,
+                        match_url TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+            )
     if "contacts" not in table_names:
         return
 
@@ -709,6 +890,133 @@ def ensure_case_storage_directories(session: Session) -> None:
     now = jst_iso()
     for case in cases:
         ensure_case_storage_directory(session, case, now=now)
+
+
+def task_storage_directory_id(task_id: str) -> str:
+    return f"storage_directory_task_{task_id}"
+
+
+def completed_tasks_storage_directory_id(case_id: str) -> str:
+    return f"storage_directory_case_{case_id}_completed_tasks"
+
+
+def ensure_completed_tasks_storage_directory(
+    session: Session,
+    case: Case,
+    *,
+    now: str | None = None,
+) -> StorageDirectory:
+    timestamp = now or jst_iso()
+    case_directory = ensure_case_storage_directory(session, case, now=timestamp)
+    directory = session.get(StorageDirectory, completed_tasks_storage_directory_id(case.id))
+    if directory is None:
+        directory = StorageDirectory(
+            id=completed_tasks_storage_directory_id(case.id),
+            parent_id=case_directory.id,
+            directory_kind="normal",
+            case_id=case.id,
+            name="Completed Tasks",
+            status="active",
+            created_at=timestamp,
+            updated_at=timestamp,
+            version=1,
+        )
+        session.add(directory)
+        return directory
+
+    changed = False
+    if directory.parent_id != case_directory.id:
+        directory.parent_id = case_directory.id
+        changed = True
+    if directory.directory_kind != "normal":
+        directory.directory_kind = "normal"
+        changed = True
+    if directory.case_id != case.id:
+        directory.case_id = case.id
+        changed = True
+    if directory.name != "Completed Tasks":
+        directory.name = "Completed Tasks"
+        changed = True
+    if directory.status != "active":
+        directory.status = "active"
+        changed = True
+    if changed:
+        directory.updated_at = timestamp
+        directory.version += 1
+    return directory
+
+
+def ensure_task_storage_directory(
+    session: Session,
+    task: Task,
+    *,
+    now: str | None = None,
+) -> StorageDirectory | None:
+    case = session.get(Case, task.case_id)
+    if case is None:
+        return None
+
+    timestamp = now or jst_iso()
+    case_directory = ensure_case_storage_directory(session, case, now=timestamp)
+    parent_directory = (
+        ensure_completed_tasks_storage_directory(session, case, now=timestamp)
+        if task.status == "completed"
+        else case_directory
+    )
+    directory = (
+        session.get(StorageDirectory, task.storage_directory_id)
+        if task.storage_directory_id is not None
+        else None
+    )
+    if directory is None:
+        directory = session.get(StorageDirectory, task_storage_directory_id(task.id))
+
+    if directory is None:
+        directory = StorageDirectory(
+            id=task_storage_directory_id(task.id),
+            parent_id=parent_directory.id,
+            directory_kind="task",
+            case_id=case.id,
+            name=task.title,
+            status="active",
+            created_at=timestamp,
+            updated_at=timestamp,
+            version=1,
+        )
+        session.add(directory)
+        task.storage_directory_id = directory.id
+        return directory
+
+    changed = False
+    if directory.parent_id != parent_directory.id:
+        directory.parent_id = parent_directory.id
+        changed = True
+    if directory.directory_kind != "task":
+        directory.directory_kind = "task"
+        changed = True
+    if directory.case_id != case.id:
+        directory.case_id = case.id
+        changed = True
+    if directory.name != task.title:
+        directory.name = task.title
+        changed = True
+    if directory.status != "active":
+        directory.status = "active"
+        changed = True
+    if task.storage_directory_id != directory.id:
+        task.storage_directory_id = directory.id
+        changed = True
+    if changed:
+        directory.updated_at = timestamp
+        directory.version += 1
+    return directory
+
+
+def ensure_task_storage_directories(session: Session) -> None:
+    tasks = session.scalars(select(Task).where(Task.deleted_at.is_(None))).all()
+    now = jst_iso()
+    for task in tasks:
+        ensure_task_storage_directory(session, task, now=now)
 
 
 def seed_system_cases(session: Session) -> None:

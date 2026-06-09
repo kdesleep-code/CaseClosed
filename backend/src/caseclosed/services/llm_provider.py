@@ -306,14 +306,52 @@ def build_mail_draft_generation_provider(function_type: str) -> LlmProvider:
     )
 
 
+def build_task_prefill_provider() -> LlmProvider:
+    profile = load_llm_model_profile(FUNCTION_TYPE_TASK_PREFILL_GENERATION)
+    if profile is None or profile.provider == "mock":
+        return MockTaskPrefillProvider()
+
+    if profile.provider != "openai":
+        raise OpenAIProviderError(
+            f"Unsupported provider for {FUNCTION_TYPE_TASK_PREFILL_GENERATION}: "
+            f"{profile.provider}"
+        )
+
+    return OpenAITaskPrefillProvider(
+        api_key_env=profile.api_key_env,
+        model_name=profile.model,
+        timeout_seconds=profile.timeout_seconds,
+    )
+
+
+def build_case_prefill_provider() -> LlmProvider:
+    profile = load_llm_model_profile(FUNCTION_TYPE_CASE_PREFILL_GENERATION)
+    if profile is None or profile.provider == "mock":
+        return MockCasePrefillProvider()
+
+    if profile.provider != "openai":
+        raise OpenAIProviderError(
+            f"Unsupported provider for {FUNCTION_TYPE_CASE_PREFILL_GENERATION}: "
+            f"{profile.provider}"
+        )
+
+    return OpenAICasePrefillProvider(
+        api_key_env=profile.api_key_env,
+        model_name=profile.model,
+        timeout_seconds=profile.timeout_seconds,
+    )
+
+
 FUNCTION_TYPE_MAIL_IMPORTANCE = "mail_importance_classification"
 FUNCTION_TYPE_MAIL_SUMMARY = "mail_summary"
 FUNCTION_TYPE_MAIL_THREAD_SUMMARY = "mail_thread_summary"
 FUNCTION_TYPE_FILE_SUMMARY = "file_summary"
 FUNCTION_TYPE_CASE_CURRENT_SITUATION_SUMMARY = "case_current_situation_summary"
+FUNCTION_TYPE_CASE_PREFILL_GENERATION = "case_prefill_generation"
 FUNCTION_TYPE_CONTACT_AI_MEMO_UPDATE = "contact_ai_memo_update"
 FUNCTION_TYPE_REPLY_DRAFT_GENERATION = "reply_draft_generation"
 FUNCTION_TYPE_NEW_MAIL_DRAFT_GENERATION = "new_mail_draft_generation"
+FUNCTION_TYPE_TASK_PREFILL_GENERATION = "mail_task_suggestion"
 
 
 def load_llm_model_profile(function_type: str) -> LlmModelProfile | None:
@@ -445,6 +483,7 @@ LLM_FUNCTION_TYPES = [
     "mail_thread_summary",
     "file_summary",
     "case_current_situation_summary",
+    "case_prefill_generation",
     "mail_case_selection",
     "reply_draft_generation",
     "new_mail_draft_generation",
@@ -937,6 +976,82 @@ class MockCaseCurrentSituationProvider:
         )
 
 
+class MockTaskPrefillProvider:
+    provider_name = "mock"
+    model_name = "deterministic-task-prefill-v1"
+
+    def complete_json(
+        self,
+        *,
+        function_type: str,
+        input_payload: dict[str, object],
+    ) -> LlmProviderResponse:
+        if function_type != FUNCTION_TYPE_TASK_PREFILL_GENERATION:
+            raise ValueError(f"Unsupported mock function type: {function_type}")
+
+        prompt = compact_text(str(input_payload.get("prompt") or ""), 140)
+        case_payload = input_payload.get("case")
+        case_data = case_payload if isinstance(case_payload, dict) else {}
+        case_name = compact_text(str(case_data.get("name") or "Case"), 80)
+        title = prompt or f"{case_name} task"
+        output = {
+            "schema_version": "1.0",
+            "summary": f"Task prefill for {title}",
+            "title": title[:120],
+            "description": prompt or f"Task generated for {case_name}.",
+            "done_when_text": "The requested work is completed and confirmed.",
+            "priority": "middle",
+            "due_at": None,
+            "estimate_minutes": None,
+            "reasoning_summary": "Mock task prefill generated from prompt and Case context.",
+            "warnings": [],
+        }
+        return LlmProviderResponse(
+            output=output,
+            output_preview=str(output["summary"]),
+            prompt_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+            estimated_cost=0.0,
+        )
+
+
+class MockCasePrefillProvider:
+    provider_name = "mock"
+    model_name = "deterministic-case-prefill-v1"
+
+    def complete_json(
+        self,
+        *,
+        function_type: str,
+        input_payload: dict[str, object],
+    ) -> LlmProviderResponse:
+        if function_type != FUNCTION_TYPE_CASE_PREFILL_GENERATION:
+            raise ValueError(f"Unsupported mock function type: {function_type}")
+
+        prompt = compact_text(str(input_payload.get("prompt") or ""), 180)
+        title = prompt or "New Case"
+        output = {
+            "schema_version": "1.0",
+            "summary": f"Case prefill for {title}",
+            "name": title[:120],
+            "description": prompt or "Case generated from the user prompt.",
+            "open_when_date": None,
+            "closed_when_text": "This Case can be closed when the intended outcome is complete and confirmed.",
+            "tags": [],
+            "reasoning_summary": "Mock case prefill generated from prompt.",
+            "warnings": [],
+        }
+        return LlmProviderResponse(
+            output=output,
+            output_preview=str(output["summary"]),
+            prompt_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+            estimated_cost=0.0,
+        )
+
+
 class MockContactAiMemoUpdateProvider:
     provider_name = "mock"
     model_name = "deterministic-contact-ai-memo-update-v1"
@@ -1205,6 +1320,86 @@ class OpenAICaseCurrentSituationProvider:
         )
 
 
+class OpenAITaskPrefillProvider:
+    provider_name = "openai"
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        api_key_env: str | None = None,
+        model_name: str,
+        timeout_seconds: float,
+    ) -> None:
+        self.api_key = api_key or read_api_key(api_key_env)
+        if self.api_key is None or self.api_key.strip() == "":
+            raise OpenAIProviderError("OpenAI API key is not configured.")
+        self.model_name = model_name
+        self.timeout_seconds = timeout_seconds
+
+    def complete_json(
+        self,
+        *,
+        function_type: str,
+        input_payload: dict[str, object],
+    ) -> LlmProviderResponse:
+        if function_type != FUNCTION_TYPE_TASK_PREFILL_GENERATION:
+            raise ValueError(f"Unsupported OpenAI function type: {function_type}")
+
+        payload = {
+            "model": self.model_name,
+            "instructions": task_prefill_instructions(),
+            "input": task_prefill_input_text(input_payload),
+            "max_output_tokens": 900,
+            "text": {"format": task_prefill_response_format()},
+        }
+        return openai_structured_response(
+            payload,
+            api_key=self.api_key,
+            timeout_seconds=self.timeout_seconds,
+        )
+
+
+class OpenAICasePrefillProvider:
+    provider_name = "openai"
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        api_key_env: str | None = None,
+        model_name: str,
+        timeout_seconds: float,
+    ) -> None:
+        self.api_key = api_key or read_api_key(api_key_env)
+        if self.api_key is None or self.api_key.strip() == "":
+            raise OpenAIProviderError("OpenAI API key is not configured.")
+        self.model_name = model_name
+        self.timeout_seconds = timeout_seconds
+
+    def complete_json(
+        self,
+        *,
+        function_type: str,
+        input_payload: dict[str, object],
+    ) -> LlmProviderResponse:
+        if function_type != FUNCTION_TYPE_CASE_PREFILL_GENERATION:
+            raise ValueError(f"Unsupported OpenAI function type: {function_type}")
+
+        payload = {
+            "model": self.model_name,
+            "instructions": case_prefill_instructions(),
+            "input": case_prefill_input_text(input_payload),
+            "max_output_tokens": 900,
+            "text": {"format": case_prefill_response_format()},
+        }
+        return openai_structured_response(
+            payload,
+            api_key=self.api_key,
+            timeout_seconds=self.timeout_seconds,
+        )
+
+
 class OpenAIMailDraftGenerationProvider:
     provider_name = "openai"
 
@@ -1406,6 +1601,76 @@ def case_current_situation_response_format() -> dict[str, object]:
                 "key_points",
                 "risks",
                 "next_focus",
+                "reasoning_summary",
+                "warnings",
+            ],
+        },
+    }
+
+
+def task_prefill_response_format() -> dict[str, object]:
+    return {
+        "type": "json_schema",
+        "name": "task_prefill_generation",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "schema_version": {"type": "string"},
+                "summary": {"type": "string"},
+                "title": {"type": "string"},
+                "description": {"type": "string"},
+                "done_when_text": {"type": "string"},
+                "priority": {"type": "string", "enum": ["high", "middle", "low"]},
+                "due_at": {"type": ["string", "null"]},
+                "estimate_minutes": {"type": ["integer", "null"]},
+                "reasoning_summary": {"type": "string"},
+                "warnings": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": [
+                "schema_version",
+                "summary",
+                "title",
+                "description",
+                "done_when_text",
+                "priority",
+                "due_at",
+                "estimate_minutes",
+                "reasoning_summary",
+                "warnings",
+            ],
+        },
+    }
+
+
+def case_prefill_response_format() -> dict[str, object]:
+    return {
+        "type": "json_schema",
+        "name": "case_prefill_generation",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "schema_version": {"type": "string"},
+                "summary": {"type": "string"},
+                "name": {"type": "string"},
+                "description": {"type": "string"},
+                "open_when_date": {"type": ["string", "null"]},
+                "closed_when_text": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "reasoning_summary": {"type": "string"},
+                "warnings": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": [
+                "schema_version",
+                "summary",
+                "name",
+                "description",
+                "open_when_date",
+                "closed_when_text",
+                "tags",
                 "reasoning_summary",
                 "warnings",
             ],
@@ -1683,6 +1948,32 @@ def case_current_situation_instructions() -> str:
     )
 
 
+def task_prefill_instructions() -> str:
+    return (
+        "You help a university faculty user draft a task record in a work-support app. "
+        "Use the user's prompt and Case context to propose concise, directly editable "
+        "Task fields. Do not invent external facts. Keep title short. Description should "
+        "state what the task is about. Done when should describe the completion condition. "
+        "Use priority high/middle/low. due_at must be YYYY-MM-DD when a clear due date is "
+        "present; otherwise null. estimate_minutes must be a practical integer or null. "
+        "Return only JSON matching the schema."
+    )
+
+
+def case_prefill_instructions() -> str:
+    return (
+        "You help a university faculty user draft a Case record in a work-support app. "
+        "A Case is a work container that can later collect mails, tasks, calendar events, "
+        "files, stakeholders, and external tools. Use the user's prompt and already typed "
+        "fields to propose concise, directly editable Case fields. Do not invent external "
+        "facts. Keep the name short. Description should explain the Case's purpose. "
+        "Closed when should describe the condition for permanently closing the Case. "
+        "open_when_date must be YYYY-MM-DD only when the user clearly gives a start date; "
+        "otherwise null. Tags should be short lower-case labels when useful. Return only "
+        "JSON matching the schema."
+    )
+
+
 def file_summary_instructions() -> str:
     return (
         "You prepare an LLM input digest for one stored file in a Japanese "
@@ -1842,6 +2133,44 @@ def contact_ai_memo_update_input_text(input_payload: dict[str, object]) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def task_prefill_input_text(input_payload: dict[str, object]) -> str:
+    case_payload = input_payload.get("case")
+    case_data = case_payload if isinstance(case_payload, dict) else {}
+    current_payload = input_payload.get("current_fields")
+    current_fields = current_payload if isinstance(current_payload, dict) else {}
+    return "\n".join(
+        [
+            f"User prompt: {input_payload.get('prompt') or ''}",
+            "",
+            "Case context:",
+            f"- Name: {case_data.get('name') or ''}",
+            f"- Overview: {case_data.get('description') or ''}",
+            f"- Open when: {case_data.get('open_when_date') or ''}",
+            f"- Closed when: {case_data.get('closed_when_text') or ''}",
+            "",
+            "Current Task fields already typed by user:",
+            json.dumps(current_fields, ensure_ascii=False, indent=2),
+            "",
+            "Fill sensible Task fields. The app will only apply fields that are blank in the UI.",
+        ]
+    )
+
+
+def case_prefill_input_text(input_payload: dict[str, object]) -> str:
+    current_payload = input_payload.get("current_fields")
+    current_fields = current_payload if isinstance(current_payload, dict) else {}
+    return "\n".join(
+        [
+            f"User prompt: {input_payload.get('prompt') or ''}",
+            "",
+            "Current Case fields already typed by user:",
+            json.dumps(current_fields, ensure_ascii=False, indent=2),
+            "",
+            "Fill sensible Case fields. The app will only apply fields that are blank in the UI.",
+        ]
+    )
 
 
 def mail_summary_input_text(input_payload: dict[str, object]) -> str:

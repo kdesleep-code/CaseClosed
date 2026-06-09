@@ -575,6 +575,24 @@ def test_cases_can_be_filtered_by_work_state(client, database_path) -> None:
                 ),
             ],
         )
+        connection.execute(
+            """
+            INSERT INTO tasks (
+              id, case_id, storage_directory_id, parent_task_id, title, description,
+              done_when_text, status, priority, due_at, estimate_minutes,
+              scheduled_minutes, worked_minutes, source_type, source_id,
+              completed_at, canceled_at, canceled_reason, deleted_at, deleted_reason,
+              created_at, updated_at, version
+            )
+            VALUES (
+              'task_user_ball', 'case_user_ball', NULL, NULL, 'Open task', NULL,
+              NULL, 'not_started', 'middle', NULL, NULL,
+              0, 0, 'manual', NULL,
+              NULL, NULL, NULL, NULL, NULL,
+              '2026-05-30T09:00:00+09:00', '2026-05-30T09:00:00+09:00', 1
+            )
+            """
+        )
 
     user_ball_items = client.get("/api/v1/cases?status=user_ball").json()["data"][
         "items"
@@ -588,6 +606,81 @@ def test_cases_can_be_filtered_by_work_state(client, database_path) -> None:
     assert "case_waiting" in {item["id"] for item in waiting_items}
     assert "case_system_inbox" in {item["id"] for item in waiting_items}
     assert {item["id"] for item in completed_items} == {"case_completed"}
+
+
+def test_future_start_task_does_not_put_case_in_user_ball(client, database_path) -> None:
+    with sqlite3.connect(database_path) as connection:
+        connection.executemany(
+            """
+            INSERT INTO cases (
+              id, name, progress_status, ball_status, closed_at, archived_at,
+              is_system_case, system_case_key, created_at, updated_at, version
+            )
+            VALUES (?, ?, 'not_started', 'none', NULL, NULL, 0, NULL, ?, ?, 1)
+            """,
+            [
+                (
+                    "case_future_task",
+                    "Future Task Case",
+                    "2026-05-30T09:00:00+09:00",
+                    "2026-05-30T09:00:00+09:00",
+                ),
+                (
+                    "case_actionable_task",
+                    "Actionable Task Case",
+                    "2026-05-30T09:00:00+09:00",
+                    "2026-05-30T09:00:00+09:00",
+                ),
+            ],
+        )
+        connection.executemany(
+            """
+            INSERT INTO tasks (
+              id, case_id, storage_directory_id, parent_task_id, title, description,
+              done_when_text, status, priority, start_at, due_at, estimate_minutes,
+              scheduled_minutes, worked_minutes, source_type, source_id,
+              completed_at, canceled_at, canceled_reason, deleted_at, deleted_reason,
+              created_at, updated_at, version
+            )
+            VALUES (?, ?, NULL, NULL, ?, NULL,
+              NULL, 'not_started', 'middle', ?, NULL, NULL,
+              0, 0, 'manual', NULL,
+              NULL, NULL, NULL, NULL, NULL,
+              '2026-05-30T09:00:00+09:00', '2026-05-30T09:00:00+09:00', 1
+            )
+            """,
+            [
+                (
+                    "task_future_start",
+                    "case_future_task",
+                    "Future start task",
+                    "2099-01-01",
+                ),
+                (
+                    "task_actionable_start",
+                    "case_actionable_task",
+                    "Actionable task",
+                    "2000-01-01",
+                ),
+            ],
+        )
+
+    user_ball_ids = {
+        item["id"]
+        for item in client.get("/api/v1/cases?status=user_ball").json()["data"][
+            "items"
+        ]
+    }
+    waiting_ids = {
+        item["id"]
+        for item in client.get("/api/v1/cases?status=waiting").json()["data"][
+            "items"
+        ]
+    }
+
+    assert "case_future_task" not in user_ball_ids
+    assert "case_future_task" in waiting_ids
+    assert "case_actionable_task" in user_ball_ids
 
 
 def test_case_can_be_completed_reopened_and_archived(client) -> None:
@@ -625,7 +718,7 @@ def test_case_can_be_completed_reopened_and_archived(client) -> None:
     assert reopened_case["closed_at"] is None
     assert reopened_case["archived_at"] is None
     assert reopened_case["progress_status"] == "waiting"
-    assert reopened_case["ball_status"] == "other"
+    assert reopened_case["ball_status"] == "none"
     assert case_id in {
         item["id"] for item in client.get("/api/v1/cases?status=waiting").json()["data"]["items"]
     }
@@ -650,7 +743,7 @@ def test_case_can_be_completed_reopened_and_archived(client) -> None:
     closed_event = detail_response.json()["data"]["recent_events"][2]
     assert closed_event["metadata"] == {
         "previous_progress_status": "waiting",
-        "previous_ball_status": "other",
+        "previous_ball_status": "none",
     }
 
 
@@ -725,8 +818,11 @@ def test_case_can_be_created_with_case_storage_directory(client, app, database_p
         json={
             "name": "Phase 7 Base Case",
             "description": "First user case.",
+            "open_when_date": "2026-05-30",
+            "closed_when_text": "Close when all linked tasks are done.",
             "progress_status": "in_progress",
             "ball_status": "user",
+            "tags": ["Research", "Annual", "research"],
         },
     )
 
@@ -735,6 +831,10 @@ def test_case_can_be_created_with_case_storage_directory(client, app, database_p
     assert created_case["name"] == "Phase 7 Base Case"
     assert created_case["is_system_case"] is False
     assert created_case["progress_status"] == "in_progress"
+    assert created_case["open_when_date"] == "2026-05-30"
+    assert created_case["open_when_text"] is None
+    assert created_case["closed_when_text"] == "Close when all linked tasks are done."
+    assert created_case["tags"] == ["Research", "Annual"]
 
     detail_response = client.get(f"/api/v1/cases/{created_case['id']}")
     assert detail_response.status_code == 200
@@ -776,7 +876,7 @@ def test_case_overview_can_be_updated(client) -> None:
         f"/api/v1/cases/{case_id}",
         json={
             "description": "This case tracks the overview text.",
-            "open_when_text": "Open this case every April.",
+            "open_when_date": "2026-04-01",
             "closed_when_text": "Close after the report is submitted.",
             "tags": ["Research", "Annual", "research"],
         },
@@ -785,7 +885,8 @@ def test_case_overview_can_be_updated(client) -> None:
     assert update_response.status_code == 200
     updated_case = update_response.json()["data"]["case"]
     assert updated_case["description"] == "This case tracks the overview text."
-    assert updated_case["open_when_text"] == "Open this case every April."
+    assert updated_case["open_when_date"] == "2026-04-01"
+    assert updated_case["open_when_text"] is None
     assert updated_case["closed_when_text"] == "Close after the report is submitted."
     assert updated_case["tags"] == ["Research", "Annual"]
     assert updated_case["version"] == 2
@@ -794,7 +895,8 @@ def test_case_overview_can_be_updated(client) -> None:
         f"/api/v1/cases/{case_id}",
         json={
             "description": "   ",
-            "open_when_text": " ",
+            "open_when_date": None,
+            "open_when_text": None,
             "closed_when_text": "",
             "tags": [],
         },
@@ -802,6 +904,7 @@ def test_case_overview_can_be_updated(client) -> None:
     assert clear_response.status_code == 200
     cleared_case = clear_response.json()["data"]["case"]
     assert cleared_case["description"] is None
+    assert cleared_case["open_when_date"] is None
     assert cleared_case["open_when_text"] is None
     assert cleared_case["closed_when_text"] is None
     assert cleared_case["tags"] == []
@@ -1035,3 +1138,121 @@ def test_case_tool_links_can_be_managed(client) -> None:
     assert delete_response.status_code == 200
     list_response = client.get(f"/api/v1/cases/{case_id}/tool-links")
     assert [item["id"] for item in list_response.json()["data"]["items"]] == [first["id"]]
+
+
+def test_case_tool_icon_settings_match_tool_links_by_longest_url(
+    client,
+    database_path,
+) -> None:
+    svg_base64 = (
+        "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz4="
+    )
+    broad_response = client.post(
+        "/api/v1/cases/tool-icons",
+        json={
+            "icon_filename": "github.svg",
+            "icon_content_type": "image/svg+xml",
+            "icon_data_base64": svg_base64,
+            "match_url": "github.com",
+        },
+    )
+    assert broad_response.status_code == 200
+    broad = broad_response.json()["data"]["tool_icon"]
+
+    narrow_response = client.post(
+        "/api/v1/cases/tool-icons",
+        json={
+            "icon_filename": "repo.svg",
+            "icon_content_type": "image/svg+xml",
+            "icon_data_base64": svg_base64,
+            "match_url": "github.com/example/repo",
+        },
+    )
+    assert narrow_response.status_code == 200
+    narrow = narrow_response.json()["data"]["tool_icon"]
+
+    with sqlite3.connect(database_path) as connection:
+        icon_row = connection.execute(
+            "SELECT scope, storage_path FROM storage_objects WHERE id = ?",
+            (narrow["storage_object_id"],),
+        ).fetchone()
+    assert icon_row == (
+        "case-tool-icons",
+        f"case-tool-icons/{narrow['storage_object_id'][15:17]}/{narrow['storage_object_id']}.svg",
+    )
+
+    case_response = client.post(
+        "/api/v1/cases",
+        json={
+            "name": "Tool Icon Case",
+            "progress_status": "in_progress",
+            "ball_status": "user",
+        },
+    )
+    case_id = case_response.json()["data"]["case"]["id"]
+    link_response = client.post(
+        f"/api/v1/cases/{case_id}/tool-links",
+        json={"url": "https://github.com/example/repo/issues"},
+    )
+    assert link_response.status_code == 200
+    tool_link = link_response.json()["data"]["tool_link"]
+    assert tool_link["icon_setting_id"] == narrow["id"]
+    assert tool_link["icon_url"] == narrow["icon_url"]
+
+    listed_response = client.get(f"/api/v1/cases/{case_id}/tool-links")
+    assert listed_response.status_code == 200
+    assert listed_response.json()["data"]["items"][0]["icon_setting_id"] == narrow["id"]
+
+    update_response = client.patch(
+        f"/api/v1/cases/tool-icons/{narrow['id']}",
+        json={"match_url": "github.com/example/repo/issues"},
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["data"]["tool_icon"]["match_url"] == (
+        "github.com/example/repo/issues"
+    )
+
+    delete_response = client.delete(f"/api/v1/cases/tool-icons/{narrow['id']}")
+    assert delete_response.status_code == 200
+    assert client.get(narrow["icon_url"]).status_code == 404
+
+    fallback_link = client.get(f"/api/v1/cases/{case_id}/tool-links").json()["data"]["items"][0]
+    assert fallback_link["icon_setting_id"] == broad["id"]
+    assert fallback_link["icon_url"] == broad["icon_url"]
+
+
+def test_deleting_case_deletes_related_tasks(client, database_path) -> None:
+    case_response = client.post(
+        "/api/v1/cases",
+        json={
+            "name": "Task Delete Case",
+            "progress_status": "in_progress",
+            "ball_status": "user",
+        },
+    )
+    assert case_response.status_code == 200
+    case_id = case_response.json()["data"]["case"]["id"]
+
+    task_response = client.post(
+        "/api/v1/tasks",
+        json={"case_id": case_id, "title": "Task tied to deleted Case"},
+    )
+    assert task_response.status_code == 200
+    task = task_response.json()["data"]["task"]
+
+    delete_response = client.delete(f"/api/v1/cases/{case_id}")
+    assert delete_response.status_code == 200
+
+    assert client.get(f"/api/v1/tasks/{task['id']}").status_code == 404
+    deleted_task_response = client.get(f"/api/v1/tasks/{task['id']}?include_deleted=1")
+    assert deleted_task_response.status_code == 200
+    deleted_task = deleted_task_response.json()["data"]["task"]
+    assert deleted_task["deleted_at"] is not None
+    assert deleted_task["deleted_reason"] == "case_deleted"
+
+    with sqlite3.connect(database_path) as connection:
+        directory_status = connection.execute(
+            "SELECT status FROM storage_directories WHERE id = ?",
+            (task["storage_directory_id"],),
+        ).fetchone()[0]
+    assert directory_status == "deleted"

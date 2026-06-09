@@ -29,6 +29,7 @@ from caseclosed.services.gmail_auto_import import GmailAutoImportSupervisor
 from caseclosed.settings import is_background_worker_enabled
 from caseclosed.storage import router as storage_router
 from caseclosed.storage import storage_root
+from caseclosed.tasks import router as tasks_router
 
 FRONTEND_DIST = Path(__file__).resolve().parents[3] / "frontend" / "dist"
 
@@ -65,6 +66,7 @@ app.include_router(mail_drafts_router)
 app.include_router(mails_router)
 app.include_router(profile_router)
 app.include_router(storage_router)
+app.include_router(tasks_router)
 
 if (FRONTEND_DIST / "assets").exists():
     app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")

@@ -47,7 +47,7 @@ import type { StorageObjectVersion } from './phase3Api'
 import type { StorageSourceMail } from './phase3Api'
 import type { FileSummary, FileVersionDiff } from './phase3Api'
 import type { StorageObjectLinkedCase } from './phase3Api'
-import { listCases } from './phase7Api'
+import { isCaseOpenForSuggestion, listCases } from './phase7Api'
 import type { CaseItem } from './phase7Api'
 
 type StoragePreviewFile = {
@@ -458,12 +458,15 @@ export function StorageDirectoryCard({
   onContextMenu: (event: MouseEvent<HTMLButtonElement>, directory: StorageDirectory) => void
   onOpen: (directory: StorageDirectory) => void
 }) {
-  const isCaseDirectory = directory.directory_kind === 'case' || directory.case_id !== null
+  const isTaskDirectory = directory.directory_kind === 'task'
+  const isCaseDirectory =
+    directory.directory_kind === 'case' || (directory.case_id !== null && !isTaskDirectory)
   return (
     <button
       aria-label={t('storage.openDirectory', { name: directory.name })}
       className={`storage-object-card storage-directory-card${
         isCaseDirectory ? ' storage-case-directory-card' : ''
+      }${isTaskDirectory ? ' storage-task-directory-card' : ''
       }`}
       onClick={() => onOpen(directory)}
       onContextMenu={(event) => onContextMenu(event, directory)}
@@ -687,7 +690,7 @@ function StorageObjectDetailView({ storageObjectId }: { storageObjectId: string 
     let isMounted = true
     listCases('all')
       .then((items) => {
-        if (isMounted) setCaseSuggestions(items)
+        if (isMounted) setCaseSuggestions(items.filter((item) => isCaseOpenForSuggestion(item)))
       })
       .catch(() => {
         if (isMounted) setCaseSuggestions([])

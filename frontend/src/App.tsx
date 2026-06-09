@@ -15,6 +15,9 @@ import MaintenanceView from './MaintenanceView'
 import type { MaintenanceInitialData } from './MaintenanceView'
 import ProfileView from './ProfileView'
 import StorageView from './StorageView'
+import TaskDetailView from './TaskDetailView'
+import TaskNewView from './TaskNewView'
+import TaskView from './TaskView'
 import { t } from './i18n'
 import type { MessageKey } from './i18n'
 import { AppLink } from './navigation'
@@ -33,6 +36,13 @@ import {
   updateFileIconSetting,
 } from './phase3Api'
 import type { FileIconSetting } from './phase3Api'
+import {
+  createCaseToolIconSetting,
+  deleteCaseToolIconSetting,
+  listCaseToolIconSettings,
+  updateCaseToolIconSetting,
+} from './phase7Api'
+import type { CaseToolIconSetting } from './phase7Api'
 import { listMailDates, listMailPage } from './phase4Api'
 import {
   pendingContactRedirectEventName,
@@ -509,6 +519,111 @@ function TopView({
 }
 
 function CaseToolIconsView() {
+  const [items, setItems] = useState<CaseToolIconSetting[]>([])
+  const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [matchUrl, setMatchUrl] = useState('')
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editingMatchUrl, setEditingMatchUrl] = useState('')
+  const [editingFile, setEditingFile] = useState<File | null>(null)
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const [isSubmitting, setIsSubmitting] = useState(false)
+
+  useEffect(() => {
+    let isMounted = true
+    listCaseToolIconSettings()
+      .then((nextItems) => {
+        if (isMounted) setItems(nextItems)
+      })
+      .catch((requestError) => {
+        if (isMounted) {
+          setError(requestError instanceof Error ? requestError.message : t('app.requestFailed'))
+        }
+      })
+      .finally(() => {
+        if (isMounted) setIsLoading(false)
+      })
+    return () => {
+      isMounted = false
+    }
+  }, [])
+
+  function startEdit(item: CaseToolIconSetting) {
+    setEditingId(item.id)
+    setEditingMatchUrl(item.match_url)
+    setEditingFile(null)
+    setError(null)
+    setNotice(null)
+  }
+
+  async function handleCreate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (selectedFile === null || matchUrl.trim() === '') return
+    setIsSubmitting(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const created = await createCaseToolIconSetting({
+        icon_filename: selectedFile.name,
+        icon_content_type: selectedFile.type || 'image/png',
+        icon_data_base64: await fileToBase64(selectedFile),
+        match_url: matchUrl,
+      })
+      setItems((current) => [...current, created])
+      setSelectedFile(null)
+      setMatchUrl('')
+      setNotice(t('cases.toolIcons.created'))
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : t('app.requestFailed'))
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  async function handleUpdate(item: CaseToolIconSetting) {
+    setBusyId(item.id)
+    setError(null)
+    setNotice(null)
+    try {
+      const payload: Parameters<typeof updateCaseToolIconSetting>[1] = {
+        match_url: editingMatchUrl,
+      }
+      if (editingFile !== null) {
+        payload.icon_filename = editingFile.name
+        payload.icon_content_type = editingFile.type || item.icon_content_type
+        payload.icon_data_base64 = await fileToBase64(editingFile)
+      }
+      const updated = await updateCaseToolIconSetting(item.id, payload)
+      setItems((current) => current.map((candidate) => (
+        candidate.id === updated.id ? updated : candidate
+      )))
+      setEditingId(null)
+      setEditingFile(null)
+      setNotice(t('cases.toolIcons.updated'))
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : t('app.requestFailed'))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function handleDelete(item: CaseToolIconSetting) {
+    setBusyId(item.id)
+    setError(null)
+    setNotice(null)
+    try {
+      await deleteCaseToolIconSetting(item.id)
+      setItems((current) => current.filter((candidate) => candidate.id !== item.id))
+      setNotice(t('cases.toolIcons.deleted'))
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : t('app.requestFailed'))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
   return (
     <main className="app-shell">
       <div className="case-shell">
@@ -522,8 +637,105 @@ function CaseToolIconsView() {
             <AppLink href="/">{t('top.heading')}</AppLink>
           </nav>
         </header>
-        <section className="case-tool-icons-empty">
-          <p>{t('cases.toolIcons.body')}</p>
+        <section className="file-icons-panel">
+          {error !== null && <p className="contact-error" role="alert">{error}</p>}
+          {notice !== null && <p className="contact-notice">{notice}</p>}
+          <div className="file-icons-table">
+            <div className="file-icons-header" role="row">
+              <span>{t('cases.toolIcons.icon')}</span>
+              <span>{t('cases.toolIcons.matchUrl')}</span>
+              <span>{t('cases.toolIcons.actions')}</span>
+            </div>
+            {isLoading ? (
+              <p className="mail-empty">{t('session.checking.label')}</p>
+            ) : items.length === 0 ? (
+              <p className="mail-empty">{t('cases.toolIcons.empty')}</p>
+            ) : (
+              items.map((item) => (
+                <div className="file-icons-row" key={item.id} role="row">
+                  <div className="file-icon-preview-cell">
+                    {item.icon_url != null && item.icon_url !== '' && (
+                      <img alt="" aria-hidden="true" src={item.icon_url} />
+                    )}
+                    {editingId === item.id && (
+                      <input
+                        accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+                        onChange={(event) => setEditingFile(event.target.files?.[0] ?? null)}
+                        type="file"
+                      />
+                    )}
+                  </div>
+                  <div>
+                    {editingId === item.id ? (
+                      <input
+                        onChange={(event) => setEditingMatchUrl(event.target.value)}
+                        value={editingMatchUrl}
+                      />
+                    ) : (
+                      <span>{item.match_url}</span>
+                    )}
+                  </div>
+                  <div className="file-icons-actions">
+                    {editingId === item.id ? (
+                      <>
+                        <button
+                          disabled={busyId === item.id}
+                          onClick={() => void handleUpdate(item)}
+                          type="button"
+                        >
+                          {t('common.save')}
+                        </button>
+                        <button
+                          disabled={busyId === item.id}
+                          onClick={() => setEditingId(null)}
+                          type="button"
+                        >
+                          {t('common.cancel')}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button onClick={() => startEdit(item)} type="button">
+                          {t('cases.toolIcons.edit')}
+                        </button>
+                        <button
+                          disabled={busyId === item.id}
+                          onClick={() => void handleDelete(item)}
+                          type="button"
+                        >
+                          {t('cases.toolIcons.delete')}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              ))
+            )}
+            <form className="file-icons-row file-icons-create-row" onSubmit={handleCreate}>
+              <div>
+                <input
+                  accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+                  onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
+                  type="file"
+                />
+              </div>
+              <div>
+                <input
+                  onChange={(event) => setMatchUrl(event.target.value)}
+                  placeholder="github.com/example"
+                  value={matchUrl}
+                />
+              </div>
+              <div className="file-icons-actions">
+                <button
+                  disabled={selectedFile === null || matchUrl.trim() === '' || isSubmitting}
+                  type="submit"
+                >
+                  {t('cases.toolIcons.register')}
+                </button>
+              </div>
+            </form>
+          </div>
         </section>
       </div>
     </main>
@@ -1040,6 +1252,33 @@ function App() {
           {pendingContactNoticeElement}
           {navigationError !== null && <p className="route-error">{navigationError}</p>}
           <CaseView />
+        </>
+      )
+    }
+    if (path === '/tasks') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <TaskView />
+        </>
+      )
+    }
+    if (path === '/tasks/new') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <TaskNewView />
+        </>
+      )
+    }
+    if (path.startsWith('/tasks/')) {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <TaskDetailView taskId={decodeURIComponent(path.slice('/tasks/'.length))} />
         </>
       )
     }

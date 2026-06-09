@@ -5,6 +5,7 @@ export type CaseItem = {
   genre_id: string | null
   name: string
   description: string | null
+  open_when_date: string | null
   open_when_text: string | null
   closed_when_text: string | null
   progress_status: string
@@ -19,10 +20,7 @@ export type CaseItem = {
   overdue_task_count: number
   file_count: number
   storage_directory_id: string
-  next_task: {
-    title: string
-    due_at: string | null
-  } | null
+  next_task: CaseTaskSummary | null
   next_calendar_event: {
     title: string
     starts_at: string | null
@@ -30,6 +28,25 @@ export type CaseItem = {
   created_at: string
   updated_at: string
   version: number
+}
+
+export type CaseTaskSummary = {
+  id: string
+  case_id: string
+  title: string
+  description: string | null
+  done_when_text: string | null
+  status: string
+  priority: string
+  due_at: string | null
+  estimate_minutes: number | null
+  created_at: string
+  updated_at: string
+}
+
+export type CaseCalendarSummary = {
+    title: string
+  starts_at: string | null
 }
 
 export type CaseGenre = {
@@ -60,6 +77,7 @@ export type CaseStakeholder = {
   contact_id: string
   contact_display_name: string
   contact_avatar_url: string | null
+  contact_primary_email: string | null
   role: 'owner' | 'collaborator' | 'reviewer' | 'stakeholder' | string
   sort_order: number
   created_at: string
@@ -72,7 +90,22 @@ export type CaseToolLink = {
   case_id: string
   url: string
   icon_label: string
+  icon_setting_id: string | null
+  icon_url: string | null
   sort_order: number
+  created_at: string
+  updated_at: string
+  version: number
+}
+
+export type CaseToolIconSetting = {
+  id: string
+  storage_object_id: string | null
+  icon_filename: string | null
+  icon_content_type: string
+  icon_url: string | null
+  icon_data_url: string | null
+  match_url: string
   created_at: string
   updated_at: string
   version: number
@@ -121,10 +154,20 @@ export type CaseCurrentSituation = {
   created_by: string
 }
 
+export type CasePrefill = {
+  name: string | null
+  description: string | null
+  open_when_date: string | null
+  closed_when_text: string | null
+  tags: string[]
+  reasoning_summary: string | null
+  warnings: string[]
+}
+
 export type CaseDetail = {
   case: CaseItem
   related_mails: CaseMailLink[]
-  tasks: unknown[]
+  tasks: CaseTaskSummary[]
   calendar_events: unknown[]
   contacts: unknown[]
   files: unknown[]
@@ -134,7 +177,16 @@ export type CaseDetail = {
   recent_events: CaseEventItem[]
 }
 
-export type CaseListStatus = 'user_ball' | 'waiting' | 'completed'
+export type CaseListStatus = 'user_ball' | 'waiting' | 'not_started' | 'completed' | 'archived'
+
+export function isCaseOpenForSuggestion(item: CaseItem, today = new Date()): boolean {
+  if (item.archived_at !== null || item.closed_at !== null) return false
+  if (item.open_when_date === null || item.open_when_date.trim() === '') return true
+  const localToday = new Date(today.getTime() - today.getTimezoneOffset() * 60000)
+    .toISOString()
+    .slice(0, 10)
+  return item.open_when_date <= localToday
+}
 
 type ListResponse<T> = {
   items: T[]
@@ -214,6 +266,17 @@ export async function listCases(status: CaseListStatus | 'all' = 'user_ball'): P
 export async function listCaseGenres(): Promise<CaseGenre[]> {
   const data = await request<ListResponse<CaseGenre>>('/api/v1/cases/genres')
   return data.items
+}
+
+export function prefillCase(payload: {
+  prompt: string
+  current_fields?: Record<string, unknown>
+}): Promise<{ prefill: CasePrefill; llm_run_id: string }> {
+  return request<{ prefill: CasePrefill; llm_run_id: string }>('/api/v1/cases/prefill', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
 }
 
 export async function createCaseGenre(payload: {
@@ -347,6 +410,7 @@ export async function updateCase(
   caseId: string,
   payload: {
     description: string | null
+    open_when_date: string | null
     open_when_text: string | null
     closed_when_text: string | null
     tags?: string[]
@@ -366,9 +430,13 @@ export async function updateCase(
 export async function createCase(payload: {
   name: string
   description: string | null
+  open_when_date?: string | null
+  open_when_text?: string | null
+  closed_when_text?: string | null
   progress_status: string
-  ball_status: string
+  ball_status?: string | null
   genre_id?: string | null
+  tags?: string[]
 }): Promise<CaseItem> {
   const data = await request<{ case: CaseItem }>('/api/v1/cases', {
     method: 'POST',
@@ -481,6 +549,52 @@ export async function listCaseToolLinks(caseId: string): Promise<CaseToolLink[]>
     `/api/v1/cases/${encodeURIComponent(caseId)}/tool-links`,
   )
   return data.items
+}
+
+export async function listCaseToolIconSettings(): Promise<CaseToolIconSetting[]> {
+  const data = await request<ListResponse<CaseToolIconSetting>>('/api/v1/cases/tool-icons')
+  return data.items
+}
+
+export async function createCaseToolIconSetting(payload: {
+  icon_filename: string | null
+  icon_content_type: string
+  icon_data_base64: string
+  match_url: string
+}): Promise<CaseToolIconSetting> {
+  const data = await request<{ tool_icon: CaseToolIconSetting }>('/api/v1/cases/tool-icons', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  return data.tool_icon
+}
+
+export async function updateCaseToolIconSetting(
+  toolIconId: string,
+  payload: {
+    icon_filename?: string | null
+    icon_content_type?: string
+    icon_data_base64?: string
+    match_url?: string
+  },
+): Promise<CaseToolIconSetting> {
+  const data = await request<{ tool_icon: CaseToolIconSetting }>(
+    `/api/v1/cases/tool-icons/${encodeURIComponent(toolIconId)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  )
+  return data.tool_icon
+}
+
+export function deleteCaseToolIconSetting(toolIconId: string): Promise<{ deleted: boolean }> {
+  return request<{ deleted: boolean }>(
+    `/api/v1/cases/tool-icons/${encodeURIComponent(toolIconId)}`,
+    { method: 'DELETE' },
+  )
 }
 
 export async function createCaseToolLink(

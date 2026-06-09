@@ -770,7 +770,7 @@ LLM:
 - 各Caseが専用Storage Directoryを持ち、Caseが存在する限り削除できない
 - Case詳細が「案件の基地」として機能し、Overview / 状況説明 / Mail入口 / Task入口 / Files / Calendar / Toolsが見える
 - Case Toolsは「アイコン + URL」の単純な外部リンクとして扱い、Caseごとに並べ替え・追加・削除できる
-- Current Situationは、ユーザーがRefreshした時だけ、Overview / 関連メールThread要約 / Task接続点 / Calendar接続点 / File Digestから生成される
+- Current Situationは、ユーザーがRefreshした時だけ、Overview / 関連メールThread要約 / Task情報 / Calendar接続点 / File Digestから生成される
 
 ### レビュー観点
 
@@ -785,20 +785,21 @@ LLM:
 
 - 自動Case判定 / 候補提示
 - case_candidate_rules
-- Task実データ接続
 - Calendar実データ接続
 
 ---
 
 ## Phase 8: Case / Task中核
 
-Status: Next priority
+Status: Fix
 
 ### 目的
 
 Taskを実データとして扱い、Case詳細を実際の作業管理に接続する。
 
-Phase 7でCaseの基地UIとMail/File連携は概ね固まったため、Phase 8ではTaskを最優先で実装する。Case Series / Create next Caseは重要だが、Taskの作成・完了・論理削除・Case Closed条件より後に扱ってよい。
+Phase 7でCaseの基地UIとMail/File連携は概ね固まったため、Phase 8ではTaskを最優先で実装した。TaskはCase / Mail / Storageと接続され、日常運用上の作業単位として扱える状態まで到達した。
+
+Case Series / Create next Caseは、初期運用では独立機能として急がず、Recurring Taskや手動Case作成で代替する。祝日・例外日・作業ブロックなどCalendar依存の高度なTask調整はPhase 9以降で扱う。
 
 ### 実装対象
 
@@ -807,49 +808,38 @@ DB:
 - tasks
 - task_links
 - task_suggestions
-- case_tags
 - task_work_blocks（Calendar作業ブロック接続時に拡張）
-- case_series
-- cases.series_id
-- cases.series_label
-- cases.previous_case_id
-- cases.next_case_id
-- cases.recurrence_kind
-- cases.done_criteria
+- task_progress_entries
+- Task Storage Directory
 
 API:
 
-- `GET /cases`
-- `POST /cases`
-- `PATCH /cases/{id}`
-- `POST /cases/{id}/close`
-- `POST /cases/{id}/archive`
-- `POST /cases/{id}/create-next`
-- `GET /case-series`
-- `POST /case-series`
-- `PATCH /case-series/{id}`
 - `GET /tasks`
 - `POST /tasks`
 - `PATCH /tasks/{id}`
 - `POST /tasks/{id}/complete`
 - `POST /tasks/{id}/cancel`
 - `DELETE /tasks/{id}`
+- `POST /tasks/{id}/progress-entries`
+- `PATCH /tasks/{id}/progress-entries/{entry_id}`
+- `DELETE /tasks/{id}/progress-entries/{entry_id}`
 - `POST /mails/{id}/create-task`
 - `POST /mails/{id}/suggest-tasks`
 
 画面:
 
-- Case一覧
-- Case詳細
-- Case Series表示 / 次回Case作成導線
 - Task一覧
 - Task詳細
-- メールからTask作成画面/モーダル
+- Task新規作成
+- メール詳細からTask作成パネル
+- Case詳細へのNext Task / New Task導線
+- Task Files表示
 
 LLM:
 
 - mail_task_suggestion
-- subtask_suggestionは後続でも可
+- task_prefill_generation
+- subtask_suggestionは保留
 
 初期実装順:
 
@@ -858,38 +848,51 @@ LLM:
 3. Case Closed時の未完了Task制約
 4. メールからTask作成
 5. mail_task_suggestion
-6. Case Series / Create next Case
+6. Progress Memo時系列
+7. Recurring Task
+8. Task Files
 
 ### 完了条件
 
-- Caseを作成・編集できる
-- Case削除APIがない
-- Case Closedできる
-- 未完了TaskがあるCaseはClosed不可
-- Caseを単発案件 / 系列案件として扱える
-- 系列案件では、前年・前回Caseをテンプレートとして次回Caseを作成できる
-- 前回Caseと次回Caseが相互に辿れる
-- 年1などの繰り返し案件は「同一Caseにタスクを自動追加」ではなく、「次回Caseを作成して前回CaseをClosedする」運用を基本とする
 - Task作成・完了・キャンセル・論理削除できる
 - Task削除はdeleted_at
-- メールからTask化したら原則processedになる
-- Case詳細に関連メール・Task・Fileが集約表示される
+- Task一覧でInbox / Done / Not Started / Archivedを切り替えられる
+- Start Date到達でIn Progressへ移る
+- Doneから2週間経過したTaskはArchived相当として扱える
+- Case詳細にNext TaskとNew Task導線が表示される
+- Task作成時にCaseをSuggest入力できる
+- メールからLLMでTaskを作成できる
+- メールからTask化する時、割り当てCaseがBucket以外なら元メールThreadをCaseに紐づける
+- Task詳細にSummary / Done When / Progress Memo / Source Mail / Case / Calendar接続点 / Task Filesが表示される
+- Progress Memoは日付ごとの時系列メモとして保存・編集・削除できる
+- Completed TaskのFilesは、そのCaseのCompleted Tasksディレクトリへ移動する
+- Recurring Taskは毎週 / 2週に1度 / 毎月 / 毎年に対応する
+- 毎月はN日、月末、月末前日、第N曜日、最終曜日を指定できる
+- Repeat設定がありStart / Due Dateが空の場合、Repeat設定から初回Start / Due Dateを自動補完する
 
 ### レビュー観点
 
 - Case一覧で「今止まっているもの」が分かるか
-- 単発案件 / 系列案件の違いがUIで自然に理解できるか
-- `Create next Case`が、年次案件の締め作業として自然か
-- 次回Case作成時に、Overview / Done when / Tools / 初期Task案など、何をコピーするかが怖くないか
 - Task化の手数が少ないか
 - Task削除が実削除になっていないか
 - ClosedとArchiveの違いがUIで分かるか
+- Recurring Taskの自動生成が意図通りか
+- Task FilesがCase Storageと整合しているか
+
+### Phase 8で明示的に保留するもの
+
+- Calendar実データ連携
+- Task work blockとGoogle Calendarの接続
+- 祝日 / 例外日を考慮したRecurring Task調整
+- Subtaskの再導入
+- Case Series / Create next Case
+- 特定メール到着によるTask自動作成ルール
 
 ---
 
 ## Phase 9: Calendar連携
 
-Status: Next after Task foundation
+Status: Next priority
 
 ### 目的
 
@@ -1111,7 +1114,7 @@ API:
 
 - Google Tasksエクスポート
 - Case Series高度化（次回Case作成提案、系列テンプレート管理、周期リマインド）
-- Recurring Task（原則はCase Seriesで扱い、単独Taskの周期化が必要になった場合のみ追加）
+- Recurring Task高度化（祝日・例外日・Calendar連携後の営業日調整）
 - ポモドーロタイマー
 - 高度な日程調整
 - ファイル全文検索
@@ -1386,17 +1389,19 @@ Gmail本文をDB保存できる
 Pending中はLLM自動処理が止まる
 ```
 
-現状はPhase 4を越えて、Phase 5のMail Intelligence、Phase 6のStorage基盤、Phase 7のCase連携基盤、Phase 10のGmail送信機能の一部まで先行実装済みである。
+現状はPhase 4を越えて、Phase 5のMail Intelligence、Phase 6のStorage基盤、Phase 7のCase連携基盤、Phase 8のTask中核、Phase 10のGmail送信機能の一部まで先行実装済みである。
 
 Phase 6のStorage基盤は、手元ファイル・メール添付・Contact画像・Storage一覧/詳細/検索/ディレクトリ・添付元メール参照・LLM input許可切替・物理削除・Storage操作履歴・ファイル更新バージョン管理・LLM Digest・Version Differenceまで実装済みである。
 
 Phase 7のCase連携基盤はFix扱いとする。Case一覧/詳細、Case Genre、Case専用Storage Directory、file_linksによる同一Storage objectの複数Case参照、Overview / Open When / Closed When / tags、Stakeholders、Current Situation手動生成、Mail Thread手動Assign / Remove、Case詳細Assigned Mail検索、Stored Files Window、右ガジェットCalendar枠、Case Toolsアイコンランチャーまで実装済みである。Case Toolsは「アイコン + URL」の単純なリンク集合として扱い、通常表示はアイコンのみ、設定時に追加・削除・ドラッグ並べ替えを行う方針とする。
 
-Current Situationは自動生成せず、ユーザーが「今どうなっていたか」を確認したい時にRefreshを押して生成する。入力にはCase概要、関連メールThread要約、Task接続点、Calendar接続点、Case Storage内File Digestを含める。Task / Calendarは現時点では接続点のみであり、実データ接続はPhase 8 / 9で行う。
+Current Situationは自動生成せず、ユーザーが「今どうなっていたか」を確認したい時にRefreshを押して生成する。入力にはCase概要、関連メールThread要約、Task情報、Calendar接続点、Case Storage内File Digestを含める。Calendarは現時点では接続点のみであり、実データ接続はPhase 9で行う。
 
 LLM自動Case判定はPhase 7では実装しない。まず手動Assignと明示Auto Assign Rule運用を優先し、実運用で手間が大きい場合に、候補提示またはLLM自動判定として後続追加する。
 
-Caseの繰り返し案件は、同一Caseへ毎年Taskを自動追加する方式ではなく、`case_series` に属する「同系列の別Case」として扱う。前年・前回Caseをテンプレートに次回Caseを作成し、元Caseは次回Case作成後にClosedへ進める運用を基本とする。
+Caseの繰り返し案件は、初期運用では独立したCase Series機能を急がず、手動Case作成とRecurring Taskで扱う。前年・前回Caseをテンプレートに次回Caseを作成する機能は、運用上の必要度を見て後続追加する。
+
+Phase 8のTask中核はFix扱いとする。Task DB/API、Task一覧/詳細/新規作成/編集/削除/Done、Not Started / Inbox / Done / Archived、Start DateによるIn Progress化、Case詳細のNext Task / New Task導線、メールからLLM Task生成、Task Files、Progress Memo時系列、Completed Task FilesのCompleted Tasksディレクトリ移動、Recurring Task（毎週 / 2週に1度 / 毎月 / 毎年、月末・月末前日・第N曜日・最終曜日、Repeat設定から初回Start / Due Date自動補完）まで実装済みである。
 
 Phase 6で未実装として残すもの:
 
@@ -1408,7 +1413,7 @@ Phase 6で未実装として残すもの:
 ■ file_linksによる明示的な多対多File参照
 ```
 
-次の主目標はPhase 8のTask中核実装である。Taskテーブル/API/画面、Case詳細へのTask接続、Case Closed条件、メールからTask作成を優先する。Task基盤が入ったら、Phase 9のCalendar実データ接続へ早めに進む。Case Series / Create next Case、自動Case判定は実用上の必要度を見ながら後続で扱う。`file_security_meta_classification` は引き続き保留し、Storage設定UI・Maintenance表示強化はPhase 9以降で扱う。
+次の主目標はPhase 9のCalendar連携である。Task基盤が入ったため、Calendar実データ接続、Task作業ブロック、祝日・例外日を考慮したRecurring Task調整を優先する。Case Series / Create next Case、自動Case判定、特定メール到着によるTask自動作成ルールは実用上の必要度を見ながら後続で扱う。`file_security_meta_classification` は引き続き保留し、Storage設定UI・Maintenance表示強化はPhase 9以降で扱う。
 
 Phase 6開始時に特に確認する:
 

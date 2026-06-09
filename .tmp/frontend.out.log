@@ -1,0 +1,175 @@
+
+> frontend@0.0.0 dev
+> vite --host 127.0.0.1 --port 5173
+
+
+  [32m[1mVITE[22m v8.0.14[39m  [2mready in [0m[1m219[22m[2m[0m ms[22m
+
+  [32m➜[39m  [1mLocal[22m:   [36mhttp://127.0.0.1:[1m5173[22m/[39m
+[2m19:22:02[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m19:23:52[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m19:26:36[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m20:59:12[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m21:02:40[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m21:06:15[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m21:06:32[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m21:06:45[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m21:15:56[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m21:16:25[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m21:18:13[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m21:18:30[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m21:21:08[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m21:21:19[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/ComposeMailView.tsx, /src/CaseView.tsx, /src/ProfileView.tsx, /src/MaintenanceView.tsx, /src/MailView.tsx, /src/TaskNewView.tsx, /src/MailThreadView.tsx, /src/StorageView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx, /src/ContactsView.tsx[22m
+[2m21:21:19[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/StorageView.tsx[22m Could not Fast Refresh ("downloadStorageObject" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m21:21:19[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/CaseView.tsx[22m
+[2m21:21:36[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m21:24:38[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m21:24:57[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/ComposeMailView.tsx, /src/CaseView.tsx, /src/ProfileView.tsx, /src/MaintenanceView.tsx, /src/MailView.tsx, /src/TaskNewView.tsx, /src/MailThreadView.tsx, /src/StorageView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx, /src/ContactsView.tsx[22m
+[2m21:24:57[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/StorageView.tsx[22m Could not Fast Refresh ("downloadStorageObject" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m21:24:57[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/CaseView.tsx[22m
+[2m21:25:11[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m22:34:52[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m22:37:13[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m22:37:26[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m22:38:55[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m22:48:02[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m22:48:16[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m22:49:06[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m22:55:59[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m22:56:56[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m23:01:18[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskNewView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx[22m
+[2m23:02:07[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m23:02:19[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m23:02:29[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/ComposeMailView.tsx, /src/CaseView.tsx, /src/ProfileView.tsx, /src/MaintenanceView.tsx, /src/MailView.tsx, /src/TaskNewView.tsx, /src/MailThreadView.tsx, /src/StorageView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx, /src/ContactsView.tsx[22m
+[2m23:02:29[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/StorageView.tsx[22m Could not Fast Refresh ("downloadStorageObject" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m23:02:29[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/CaseView.tsx[22m
+[2m23:08:43[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskNewView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx[22m
+[2m23:09:01[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m23:09:13[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m23:09:26[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m23:09:36[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/ComposeMailView.tsx, /src/CaseView.tsx, /src/ProfileView.tsx, /src/MaintenanceView.tsx, /src/MailView.tsx, /src/TaskNewView.tsx, /src/MailThreadView.tsx, /src/StorageView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx, /src/ContactsView.tsx[22m
+[2m23:09:36[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/StorageView.tsx[22m Could not Fast Refresh ("downloadStorageObject" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m23:09:36[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/CaseView.tsx[22m
+[2m23:09:50[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m23:20:55[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m23:21:10[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m23:21:19[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/ComposeMailView.tsx, /src/CaseView.tsx, /src/ProfileView.tsx, /src/MaintenanceView.tsx, /src/MailView.tsx, /src/TaskNewView.tsx, /src/MailThreadView.tsx, /src/StorageView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx, /src/ContactsView.tsx[22m
+[2m23:21:19[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/StorageView.tsx[22m Could not Fast Refresh ("downloadStorageObject" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m23:21:19[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/CaseView.tsx[22m
+[2m23:21:34[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m23:26:46[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskNewView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx[22m
+[2m23:27:07[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m23:27:24[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m23:27:43[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/ComposeMailView.tsx, /src/CaseView.tsx, /src/ProfileView.tsx, /src/MaintenanceView.tsx, /src/MailView.tsx, /src/TaskNewView.tsx, /src/MailThreadView.tsx, /src/StorageView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx, /src/ContactsView.tsx[22m
+[2m23:27:43[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/StorageView.tsx[22m Could not Fast Refresh ("downloadStorageObject" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m23:27:43[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/CaseView.tsx[22m
+[2m23:27:54[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m23:28:06[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/ComposeMailView.tsx, /src/CaseView.tsx, /src/ProfileView.tsx, /src/MaintenanceView.tsx, /src/MailView.tsx, /src/TaskNewView.tsx, /src/MailThreadView.tsx, /src/StorageView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx, /src/ContactsView.tsx[22m
+[2m23:28:06[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/StorageView.tsx[22m Could not Fast Refresh ("downloadStorageObject" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m23:28:06[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/CaseView.tsx[22m
+[2m23:28:26[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m23:31:25[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskNewView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx[22m
+[2m23:31:38[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskNewView.tsx[22m
+[2m23:31:51[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m23:32:17[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskView.tsx[22m
+[2m23:32:27[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/ComposeMailView.tsx, /src/CaseView.tsx, /src/ProfileView.tsx, /src/MaintenanceView.tsx, /src/MailView.tsx, /src/TaskNewView.tsx, /src/MailThreadView.tsx, /src/StorageView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx, /src/ContactsView.tsx[22m
+[2m23:32:27[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/StorageView.tsx[22m Could not Fast Refresh ("downloadStorageObject" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m23:32:27[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/CaseView.tsx[22m
+[2m23:53:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m23:54:01[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m23:55:04[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m23:55:14[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m23:55:27[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m23:55:45[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m0:10:46[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskNewView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx[22m
+[2m0:11:05[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m0:11:27[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m0:11:38[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/ComposeMailView.tsx, /src/CaseView.tsx, /src/ProfileView.tsx, /src/MaintenanceView.tsx, /src/MailView.tsx, /src/TaskNewView.tsx, /src/MailThreadView.tsx, /src/StorageView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx, /src/ContactsView.tsx[22m
+[2m0:11:38[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/StorageView.tsx[22m Could not Fast Refresh ("downloadStorageObject" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m0:11:38[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/CaseView.tsx[22m
+[2m0:11:58[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m0:15:59[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m0:16:19[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m0:16:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m0:27:04[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskNewView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx[22m
+[2m0:27:34[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/MailThreadView.tsx[22m
+[2m0:27:54[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/ComposeMailView.tsx, /src/CaseView.tsx, /src/ProfileView.tsx, /src/MaintenanceView.tsx, /src/MailView.tsx, /src/TaskNewView.tsx, /src/MailThreadView.tsx, /src/StorageView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx, /src/ContactsView.tsx[22m
+[2m0:27:54[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/StorageView.tsx[22m Could not Fast Refresh ("downloadStorageObject" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m0:27:54[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/CaseView.tsx[22m
+[2m0:29:33[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/MailThreadView.tsx[22m
+[2m0:31:14[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m1:15:50[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/MailThreadView.tsx[22m
+[2m1:16:29[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/MailThreadView.tsx[22m
+[2m1:16:42[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/ComposeMailView.tsx, /src/CaseView.tsx, /src/ProfileView.tsx, /src/MaintenanceView.tsx, /src/MailView.tsx, /src/TaskNewView.tsx, /src/MailThreadView.tsx, /src/StorageView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx, /src/ContactsView.tsx[22m
+[2m1:16:42[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/StorageView.tsx[22m Could not Fast Refresh ("downloadStorageObject" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m1:16:42[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/CaseView.tsx[22m
+[2m1:17:07[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m1:20:36[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/MailThreadView.tsx[22m
+[2m1:20:55[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/MailThreadView.tsx[22m
+[2m1:21:06[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/MailThreadView.tsx[22m
+[2m1:21:31[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m9:08:59[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m9:09:12[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/ComposeMailView.tsx, /src/CaseView.tsx, /src/ProfileView.tsx, /src/MaintenanceView.tsx, /src/MailView.tsx, /src/TaskNewView.tsx, /src/MailThreadView.tsx, /src/StorageView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx, /src/ContactsView.tsx[22m
+[2m9:09:12[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/StorageView.tsx[22m Could not Fast Refresh ("downloadStorageObject" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m9:09:12[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/CaseView.tsx[22m
+[2m9:13:46[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m9:14:03[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/ComposeMailView.tsx, /src/CaseView.tsx, /src/ProfileView.tsx, /src/MaintenanceView.tsx, /src/MailView.tsx, /src/TaskNewView.tsx, /src/MailThreadView.tsx, /src/StorageView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx, /src/ContactsView.tsx[22m
+[2m9:14:03[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/StorageView.tsx[22m Could not Fast Refresh ("downloadStorageObject" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m9:14:03[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/CaseView.tsx[22m
+[2m9:14:20[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskView.tsx[22m
+[2m9:14:30[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m9:23:23[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskNewView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx, /src/MailThreadView.tsx[22m
+[2m9:23:32[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskView.tsx[22m
+[2m9:24:13[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m9:31:12[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskView.tsx[22m
+[2m9:43:03[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/ComposeMailView.tsx, /src/CaseView.tsx, /src/TaskNewView.tsx, /src/MailThreadView.tsx, /src/StorageView.tsx, /src/TaskView.tsx[22m
+[2m9:43:03[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/StorageView.tsx[22m Could not Fast Refresh ("downloadStorageObject" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m9:43:03[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/CaseView.tsx[22m
+[2m9:43:18[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m9:44:00[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m9:44:09[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/CaseView.tsx[22m
+[2m9:44:20[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m9:44:37[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/ComposeMailView.tsx, /src/CaseView.tsx, /src/ProfileView.tsx, /src/MaintenanceView.tsx, /src/MailView.tsx, /src/TaskNewView.tsx, /src/MailThreadView.tsx, /src/StorageView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx, /src/ContactsView.tsx[22m
+[2m9:44:37[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/StorageView.tsx[22m Could not Fast Refresh ("downloadStorageObject" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m9:44:37[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/CaseView.tsx[22m
+[2m11:38:10[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m12:06:33[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskNewView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx, /src/MailThreadView.tsx[22m
+[2m12:07:09[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskNewView.tsx[22m
+[2m12:07:35[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m12:08:10[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m12:08:32[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m12:08:48[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m12:09:05[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/ComposeMailView.tsx, /src/CaseView.tsx, /src/ProfileView.tsx, /src/MaintenanceView.tsx, /src/MailView.tsx, /src/TaskNewView.tsx, /src/MailThreadView.tsx, /src/StorageView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx, /src/ContactsView.tsx[22m
+[2m12:09:05[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/StorageView.tsx[22m Could not Fast Refresh ("downloadStorageObject" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m12:09:05[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/CaseView.tsx[22m
+[2m12:30:25[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/CaseView.tsx[22m
+[2m12:30:36[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/ComposeMailView.tsx, /src/CaseView.tsx, /src/ProfileView.tsx, /src/MaintenanceView.tsx, /src/MailView.tsx, /src/TaskNewView.tsx, /src/MailThreadView.tsx, /src/StorageView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx, /src/ContactsView.tsx[22m
+[2m12:30:36[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/StorageView.tsx[22m Could not Fast Refresh ("downloadStorageObject" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m12:30:36[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/CaseView.tsx[22m
+[2m12:30:53[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m12:33:10[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m12:42:28[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/ComposeMailView.tsx, /src/CaseView.tsx, /src/TaskNewView.tsx, /src/MailThreadView.tsx, /src/StorageView.tsx, /src/TaskView.tsx, /src/App.tsx[22m
+[2m12:42:28[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/StorageView.tsx[22m Could not Fast Refresh ("downloadStorageObject" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m12:42:28[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/CaseView.tsx[22m
+[2m12:43:10[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/CaseView.tsx[22m
+[2m12:43:28[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/CaseView.tsx[22m
+[2m12:43:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/CaseView.tsx[22m
+[2m12:43:48[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/ComposeMailView.tsx, /src/CaseView.tsx, /src/ProfileView.tsx, /src/MaintenanceView.tsx, /src/MailView.tsx, /src/TaskNewView.tsx, /src/MailThreadView.tsx, /src/StorageView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx, /src/ContactsView.tsx[22m
+[2m12:43:49[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/StorageView.tsx[22m Could not Fast Refresh ("downloadStorageObject" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m12:43:49[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/CaseView.tsx[22m
+[2m13:40:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/CaseView.tsx[22m
+[2m13:41:04[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/ComposeMailView.tsx, /src/CaseView.tsx, /src/ProfileView.tsx, /src/MaintenanceView.tsx, /src/MailView.tsx, /src/TaskNewView.tsx, /src/MailThreadView.tsx, /src/StorageView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx, /src/ContactsView.tsx[22m
+[2m13:41:04[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/StorageView.tsx[22m Could not Fast Refresh ("downloadStorageObject" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m13:41:04[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/CaseView.tsx[22m
+[2m13:41:15[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.css[22m
+[2m14:03:19[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskNewView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx, /src/MailThreadView.tsx[22m
+[2m14:03:36[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/ComposeMailView.tsx, /src/CaseView.tsx, /src/ProfileView.tsx, /src/MaintenanceView.tsx, /src/MailView.tsx, /src/TaskNewView.tsx, /src/MailThreadView.tsx, /src/StorageView.tsx, /src/TaskDetailView.tsx, /src/TaskView.tsx, /src/ContactsView.tsx[22m
+[2m14:03:36[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/StorageView.tsx[22m Could not Fast Refresh ("downloadStorageObject" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m14:03:36[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/CaseView.tsx[22m
+[2m14:04:01[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskNewView.tsx[22m
+[2m14:04:24[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskNewView.tsx[22m
+[2m14:04:34[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m14:04:55[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m14:05:10[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m14:05:30[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m
+[2m14:05:59[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/TaskDetailView.tsx[22m

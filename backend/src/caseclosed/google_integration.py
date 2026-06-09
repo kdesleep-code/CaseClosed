@@ -919,7 +919,9 @@ def latest_gmail_auto_import_plan_until_loaded(
     page_token = None
     checked = 0
     max_checked = GMAIL_AUTO_IMPORT_SCAN_MAX_MESSAGES
-    oldest_import_at = auto_import_oldest_allowed_at(run_at or jst_now())
+    effective_run_at = run_at or jst_now()
+    oldest_import_at = auto_import_oldest_allowed_at(effective_run_at)
+    loaded_stop_at = auto_import_loaded_stop_at(effective_run_at)
     import_message_ids: list[str] = []
     unloaded_dates: set[str] = set()
     reached_loaded_message = False
@@ -982,15 +984,28 @@ def latest_gmail_auto_import_plan_until_loaded(
                 )
             )
             if exists is not None:
-                return GmailAutoImportPlan(
-                    import_message_ids=import_message_ids,
-                    unloaded_dates=sorted(unloaded_dates, reverse=True),
-                    reached_loaded_message=True,
-                    checked_count=checked,
-                    stop_reason="loaded_message",
-                    stopped_gmail_message_id=gmail_message_id,
-                    stopped_received_at=gmail_received_at(gmail_metadata),
-                )
+                reached_loaded_message = True
+                if received_at is None or received_at <= loaded_stop_at:
+                    return GmailAutoImportPlan(
+                        import_message_ids=import_message_ids,
+                        unloaded_dates=sorted(unloaded_dates, reverse=True),
+                        reached_loaded_message=True,
+                        checked_count=checked,
+                        stop_reason="loaded_message",
+                        stopped_gmail_message_id=gmail_message_id,
+                        stopped_received_at=gmail_received_at(gmail_metadata),
+                    )
+                if checked >= max_checked:
+                    return GmailAutoImportPlan(
+                        import_message_ids=import_message_ids,
+                        unloaded_dates=sorted(unloaded_dates, reverse=True),
+                        reached_loaded_message=True,
+                        checked_count=checked,
+                        stop_reason="scan_limit",
+                        stopped_gmail_message_id=gmail_message_id,
+                        stopped_received_at=gmail_received_at(gmail_metadata),
+                    )
+                continue
             if gmail_message_is_draft(gmail_metadata):
                 continue
             if len(import_message_ids) < max_messages:
@@ -1023,6 +1038,16 @@ def auto_import_oldest_allowed_at(run_at: datetime) -> datetime:
     jst_run_at = run_at.astimezone(JST)
     return (jst_run_at - timedelta(days=GMAIL_AUTO_IMPORT_LOOKBACK_DAYS)).replace(
         hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+
+
+def auto_import_loaded_stop_at(run_at: datetime) -> datetime:
+    jst_run_at = run_at.astimezone(JST)
+    return (jst_run_at - timedelta(days=1)).replace(
+        hour=23,
         minute=0,
         second=0,
         microsecond=0,
