@@ -11,12 +11,15 @@ import gmailIconUrl from './assets/gmail-icon-2020.svg'
 import paperclipDiagonalUrl from './assets/paperclip-diagonal.svg'
 import unknownContactAvatarUrl from './assets/default-unknown-contact-avatar.svg'
 import {
+  allowMailLlm,
   cancelMailSendRequest,
   assignMailThreadToCase,
+  createGoogleCalendarEvent,
   enqueueMailAttachmentFetchJob,
   getMailDetail,
   markMailRead,
   moveMailAttachmentToStorage,
+  prefillCalendarEventFromMail,
   processMail,
   requestMailSummary,
   rescheduleMailRequest,
@@ -26,14 +29,30 @@ import {
   updateMailImportance,
 } from './phase4Api'
 import type { MailAttachment, MailDetail, MailSendRequest, MailThreadMessage } from './phase4Api'
+import type { CalendarEventFromMailPrefill } from './phase4Api'
 import type { MailRecipient } from './phase4Api'
 import { isCaseOpenForSuggestion, listCases } from './phase7Api'
 import type { CaseItem } from './phase7Api'
 import { createTaskFromMail } from './phase8Api'
 import { getProfile } from './profileApi'
+import SuggestInput from './SuggestInput'
 
 type MailThreadViewProps = {
   messageId: string
+}
+
+type CalendarDraftState = {
+  message: MailThreadMessage
+  prefill: CalendarEventFromMailPrefill
+  caseInput: string
+  caseId: string | null
+  caseName: string | null
+  summary: string
+  date: string
+  startTime: string
+  endTime: string
+  location: string
+  description: string
 }
 
 function describeError(error: unknown) {
@@ -52,6 +71,37 @@ function formatDateLabel(value: string) {
 
 function receivedDate(value: string) {
   return value.slice(0, 10)
+}
+
+function normalizedCalendarDate(value: string) {
+  const match = value.match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})/)
+  if (match === null) {
+    return value.slice(0, 10)
+  }
+  const [, year, month, day] = match
+  return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`
+}
+
+function datePart(value: string) {
+  return normalizedCalendarDate(value)
+}
+
+function timePart(value: string) {
+  const match = value.match(/[T ](\d{1,2}):(\d{2})/)
+  if (match === null) {
+    return '10:00'
+  }
+  const [, hour, minute] = match
+  return `${hour.padStart(2, '0')}:${minute}`
+}
+
+function normalizedCalendarTime(value: string) {
+  const match = value.trim().match(/^(\d{1,2}):(\d{2})/)
+  if (match === null) {
+    return ''
+  }
+  const [, hour, minute] = match
+  return `${hour.padStart(2, '0')}:${minute}`
 }
 
 function recipientsFor(addresses: string[], recipients?: MailRecipient[]) {
@@ -260,7 +310,7 @@ function AttachmentBadges({
 }: {
   attachments: MailAttachment[]
   movingAttachmentId: string | null
-  onContextMenu: (event: MouseEvent<HTMLAnchorElement>, attachment: MailAttachment) => void
+  onContextMenu?: (event: MouseEvent<HTMLAnchorElement>, attachment: MailAttachment) => void
 }) {
   if (attachments.length === 0) {
     return null
@@ -275,7 +325,11 @@ function AttachmentBadges({
           className="mail-attachment-badge"
           href={attachment.download_url}
           key={attachment.id}
-          onContextMenu={(event) => onContextMenu(event, attachment)}
+          onContextMenu={
+            onContextMenu === undefined || attachment.source_type === 'sent_attachment'
+              ? undefined
+              : (event) => onContextMenu(event, attachment)
+          }
           title={`${attachment.filename} (${formatFileSize(attachment.byte_size)})`}
         >
           <img alt="" src={paperclipDiagonalUrl} />
@@ -1197,8 +1251,6 @@ function focusMessageIdFromLocation() {
 }
 
 function MailThreadView({ messageId }: MailThreadViewProps) {
-  const caseAssignDatalistId = useId()
-  const taskCaseDatalistId = useId()
   const [detail, setDetail] = useState<MailDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -1214,8 +1266,15 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
     message: MailThreadMessage
   } | null>(null)
   const [taskCaseInput, setTaskCaseInput] = useState('')
+  const [calendarDraft, setCalendarDraft] = useState<CalendarDraftState | null>(null)
+  const [calendarDraftError, setCalendarDraftError] = useState<string | null>(null)
   const [attachmentMenu, setAttachmentMenu] = useState<{
     attachment: MailAttachment
+    x: number
+    y: number
+  } | null>(null)
+  const [llmBlockedMenu, setLlmBlockedMenu] = useState<{
+    message: MailThreadMessage
     x: number
     y: number
   } | null>(null)
@@ -1281,7 +1340,10 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
   }, [messageId])
 
   useEffect(() => {
-    if ((!caseAssignEditing && taskCasePrompt === null) || caseCandidates.length > 0) {
+    if (
+      (!caseAssignEditing && taskCasePrompt === null && calendarDraft === null) ||
+      caseCandidates.length > 0
+    ) {
       return
     }
     let isMounted = true
@@ -1299,7 +1361,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
     return () => {
       isMounted = false
     }
-  }, [caseAssignEditing, caseCandidates.length, taskCasePrompt])
+  }, [calendarDraft, caseAssignEditing, caseCandidates.length, taskCasePrompt])
 
   useEffect(() => {
     if (
@@ -1344,9 +1406,12 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
   }, [])
 
   useEffect(() => {
-    if (attachmentMenu === null) return undefined
+    if (attachmentMenu === null && llmBlockedMenu === null) return undefined
 
-    const closeMenu = () => setAttachmentMenu(null)
+    const closeMenu = () => {
+      setAttachmentMenu(null)
+      setLlmBlockedMenu(null)
+    }
     const closeMenuOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') closeMenu()
     }
@@ -1358,7 +1423,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
       window.removeEventListener('scroll', closeMenu, true)
       window.removeEventListener('keydown', closeMenuOnEscape)
     }
-  }, [attachmentMenu])
+  }, [attachmentMenu, llmBlockedMenu])
 
   function cancelPendingInboxNavigation() {
     const pendingNavigation = pendingInboxNavigationRef.current
@@ -1468,6 +1533,34 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
     }
   }
 
+  function handleLlmBlockedContextMenu(
+    event: MouseEvent<HTMLSpanElement>,
+    message: MailThreadMessage,
+  ) {
+    event.preventDefault()
+    setLlmBlockedMenu({
+      message,
+      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 240)),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 64)),
+    })
+  }
+
+  function handleAllowLlmFromMenu() {
+    if (llmBlockedMenu === null || busyAction !== null) {
+      return
+    }
+    const message = llmBlockedMenu.message
+    setLlmBlockedMenu(null)
+    if (!window.confirm(t('mail.thread.allowLlmConfirm'))) {
+      return
+    }
+    void runAction(
+      `${message.id}-allow-llm`,
+      () => allowMailLlm(message.id),
+      t('mail.thread.llmAllowed'),
+    )
+  }
+
   async function refreshUntilMailSummary(messageIdToSummarize: string) {
     for (let attempt = 0; attempt < 30; attempt += 1) {
       const nextDetail = await getMailDetail(messageId)
@@ -1494,10 +1587,29 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
     if (exactMatches.length === 1) {
       return exactMatches[0]
     }
+    const assignedMatch = (detail?.case_links ?? []).find(
+      (item) => item.case_id === query || item.title.toLowerCase() === normalizedQuery,
+    )
+    if (assignedMatch !== undefined) {
+      return {
+        id: assignedMatch.case_id,
+        name: assignedMatch.title,
+      } as CaseItem
+    }
     const prefixMatches = caseCandidates.filter((item) =>
       item.name.toLowerCase().startsWith(normalizedQuery),
     )
     return prefixMatches.length === 1 ? prefixMatches[0] : null
+  }
+
+  function calendarCaseOptions() {
+    const options = [...caseCandidates]
+    for (const link of detail?.case_links ?? []) {
+      if (!options.some((item) => item.id === link.case_id)) {
+        options.push({ id: link.case_id, name: link.title } as CaseItem)
+      }
+    }
+    return options
   }
 
   function selectedCaseCandidate() {
@@ -1616,24 +1728,22 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
           </div>
         )}
         <div className="mail-thread-case-editor-input">
-          <label htmlFor={`mail-thread-task-case-input-${message.id}`}>
-            {t('mail.thread.taskCaseInput')}
-          </label>
-          <input
+          <label>{t('mail.thread.taskCaseInput')}</label>
+          <SuggestInput
+            ariaLabel={t('mail.thread.taskCaseInput')}
             autoComplete="off"
             disabled={busyAction !== null}
-            id={`mail-thread-task-case-input-${message.id}`}
-            list={taskCaseDatalistId}
-            onChange={(event) => setTaskCaseInput(event.currentTarget.value)}
+            maxItems={1}
+            onChange={setTaskCaseInput}
+            options={caseCandidates.map((item) => ({
+              key: item.id,
+              value: item.name,
+              label: item.name,
+              badgeLabel: item.name,
+            }))}
             placeholder={t('mail.thread.taskCasePlaceholder')}
-            type="text"
             value={taskCaseInput}
           />
-          <datalist id={taskCaseDatalistId}>
-            {caseCandidates.map((item) => (
-              <option key={item.id} value={item.name} />
-            ))}
-          </datalist>
           <button
             className={`button-loading-dot${
               busyAction === `${message.id}-task` ? ' is-loading' : ''
@@ -1649,6 +1759,237 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
             onClick={() => {
               setTaskCasePrompt(null)
               setTaskCaseInput('')
+            }}
+            type="button"
+          >
+            {t('common.cancel')}
+          </button>
+        </div>
+      </section>
+    )
+  }
+
+  async function generateCalendarDraftFromMail(
+    message: MailThreadMessage,
+    caseId?: string | null,
+  ) {
+    setBusyAction(`${message.id}-calendar`)
+    setError(null)
+    setNotice(null)
+    try {
+      const result = await prefillCalendarEventFromMail({
+        message_id: message.id,
+        case_id: caseId ?? null,
+      })
+      setTaskCasePrompt(null)
+      setTaskCaseInput('')
+      setCalendarDraftError(null)
+      setCalendarDraft({
+        message,
+        prefill: result.prefill,
+        caseInput: result.linked_case_name ?? '',
+        caseId: result.linked_case_id,
+        caseName: result.linked_case_name,
+        summary: result.prefill.summary,
+        date: datePart(result.prefill.start_at),
+        startTime: timePart(result.prefill.start_at),
+        endTime: timePart(result.prefill.end_at),
+        location: result.prefill.location ?? '',
+        description: result.prefill.description ?? '',
+      })
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
+  function handleCalendarAction(message: MailThreadMessage) {
+    const assignedCaseLinks = detail?.case_links ?? []
+    if (assignedCaseLinks.length === 1) {
+      void generateCalendarDraftFromMail(message, assignedCaseLinks[0].case_id)
+      return
+    }
+    void generateCalendarDraftFromMail(message, null)
+  }
+
+  function updateCalendarDraft(patch: Partial<CalendarDraftState>) {
+    setCalendarDraft((current) => (current === null ? current : { ...current, ...patch }))
+  }
+
+  async function createCalendarEventFromDraft() {
+    if (calendarDraft === null) return
+    const summary = calendarDraft.summary.trim()
+    const date = normalizedCalendarDate(calendarDraft.date.trim())
+    const startTime = normalizedCalendarTime(calendarDraft.startTime)
+    const endTime = normalizedCalendarTime(calendarDraft.endTime)
+    if (summary === '' || date === '' || startTime === '' || endTime === '') {
+      setCalendarDraftError(t('mail.thread.calendarRequired'))
+      setError(t('mail.thread.calendarRequired'))
+      return
+    }
+    const caseInput = calendarDraft.caseInput.trim()
+    let linkedCaseId = calendarDraft.caseId
+    if (caseInput === '') {
+      linkedCaseId = null
+    } else if (
+      calendarDraft.caseId !== null &&
+      calendarDraft.caseName !== null &&
+      caseInput === calendarDraft.caseName
+    ) {
+      linkedCaseId = calendarDraft.caseId
+    } else {
+      const selectedCase = selectedCaseCandidateFor(caseInput)
+      if (selectedCase !== null) {
+        linkedCaseId = selectedCase.id
+      } else {
+        linkedCaseId = null
+      }
+    }
+    setBusyAction(`${calendarDraft.message.id}-calendar-create`)
+    setCalendarDraftError(null)
+    setError(null)
+    setNotice(null)
+    try {
+      const result = await createGoogleCalendarEvent({
+        summary,
+        start: `${date}T${startTime}`,
+        end: `${date}T${endTime}`,
+        description: calendarDraft.description,
+        location: calendarDraft.location,
+        time_zone: calendarDraft.prefill.time_zone || 'Asia/Tokyo',
+        linked_mail_message_id: calendarDraft.message.id,
+        linked_case_id: linkedCaseId,
+      })
+      setNotice(t('mail.thread.calendarCreated'))
+      setCalendarDraft(null)
+      const dbEventId = result.db_event?.id ?? null
+      if (dbEventId !== null) {
+        navigateTo(`/calendar/events/${encodeURIComponent(dbEventId)}`)
+      }
+    } catch (requestError) {
+      const message = describeError(requestError)
+      setCalendarDraftError(message)
+      setError(message)
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
+  function renderCalendarDraftForm(message: MailThreadMessage) {
+    if (calendarDraft?.message.id !== message.id) {
+      return null
+    }
+    const busy = busyAction === `${message.id}-calendar-create`
+    return (
+      <section className="mail-thread-calendar-event-form">
+        <div>
+          <h3>{t('mail.thread.calendarHeading')}</h3>
+          <p>{t('mail.thread.calendarBody')}</p>
+        </div>
+        <div className="mail-thread-calendar-grid">
+          <label>
+            {t('mail.thread.calendarSummary')}
+            <input
+              disabled={busy}
+              onChange={(event) => updateCalendarDraft({ summary: event.target.value })}
+              value={calendarDraft.summary}
+            />
+          </label>
+          <label>
+            {t('mail.thread.calendarDate')}
+            <input
+              disabled={busy}
+              onChange={(event) => updateCalendarDraft({ date: event.target.value })}
+              type="date"
+              value={calendarDraft.date}
+            />
+          </label>
+          <label>
+            {t('mail.thread.calendarStart')}
+            <input
+              disabled={busy}
+              onChange={(event) => updateCalendarDraft({ startTime: event.target.value })}
+              type="time"
+              value={calendarDraft.startTime}
+            />
+          </label>
+          <label>
+            {t('mail.thread.calendarEnd')}
+            <input
+              disabled={busy}
+              onChange={(event) => updateCalendarDraft({ endTime: event.target.value })}
+              type="time"
+              value={calendarDraft.endTime}
+            />
+          </label>
+          <label>
+            {t('mail.thread.calendarLocation')}
+            <input
+              disabled={busy}
+              onChange={(event) => updateCalendarDraft({ location: event.target.value })}
+              value={calendarDraft.location}
+            />
+          </label>
+          <label>
+            {t('mail.thread.calendarCase')}
+            <SuggestInput
+              ariaLabel={t('mail.thread.calendarCase')}
+              autoComplete="off"
+              disabled={busy}
+              maxItems={1}
+              onChange={(value) => updateCalendarDraft({ caseInput: value })}
+              options={calendarCaseOptions().map((item) => ({
+                key: item.id,
+                value: item.name,
+                label: item.name,
+                badgeLabel: item.name,
+              }))}
+              placeholder={t('mail.thread.calendarCasePlaceholder')}
+              value={calendarDraft.caseInput}
+            />
+          </label>
+        </div>
+        <label className="mail-thread-calendar-description">
+          {t('mail.thread.calendarDescription')}
+          <textarea
+            disabled={busy}
+            onChange={(event) => updateCalendarDraft({ description: event.target.value })}
+            value={calendarDraft.description}
+          />
+        </label>
+        <div className="mail-thread-calendar-linked-mail">
+          <span>{t('mail.thread.calendarRelatedMail')}</span>
+          <strong>{message.subject || '(no subject)'}</strong>
+        </div>
+        {calendarDraft.prefill.warnings.length > 0 && (
+          <ul className="mail-thread-calendar-warnings">
+            {calendarDraft.prefill.warnings.map((warning) => (
+              <li key={warning}>{warning}</li>
+            ))}
+          </ul>
+        )}
+        {calendarDraftError !== null && (
+          <p className="mail-thread-calendar-error" role="alert">
+            {calendarDraftError}
+          </p>
+        )}
+        <div className="mail-thread-calendar-actions">
+          <button
+            className={`button-loading-dot${
+              busyAction === `${message.id}-calendar-create` ? ' is-loading' : ''
+            }`}
+            disabled={busy}
+            onClick={createCalendarEventFromDraft}
+            type="button"
+          >
+            {t('mail.thread.calendarCreate')}
+          </button>
+          <button
+            disabled={busy}
+            onClick={() => {
+              setCalendarDraft(null)
+              setCalendarDraftError(null)
             }}
             type="button"
           >
@@ -1680,6 +2021,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
     const hasActiveSummaryJob =
       detail?.summary_jobs?.[message.id] !== undefined
     const taskGenerationBusy = busyAction === `${message.id}-task`
+    const calendarGenerationBusy = busyAction === `${message.id}-calendar`
     return [
       {
         id: 'done',
@@ -1716,10 +2058,12 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
         disabled:
           ![
             'mail.thread.action.reply',
+            'mail.thread.action.calendar',
             'mail.thread.action.task',
             'mail.thread.action.summary',
           ].includes(key) ||
           busyAction !== null ||
+          (key === 'mail.thread.action.calendar' && message.llm_blocked === true) ||
           (key === 'mail.thread.action.task' && message.llm_blocked === true) ||
           (key === 'mail.thread.action.summary' && isPinned) ||
           (key === 'mail.thread.action.summary' && hasSummary) ||
@@ -1727,6 +2071,8 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
         className:
           key === 'mail.thread.action.summary' && hasActiveSummaryJob
             ? 'mail-thread-action-quiet mail-thread-action-loading button-loading-dot is-loading'
+            : key === 'mail.thread.action.calendar' && calendarGenerationBusy
+              ? 'mail-thread-action-quiet mail-thread-action-loading button-loading-dot is-loading'
             : key === 'mail.thread.action.task' && taskGenerationBusy
               ? 'mail-thread-action-quiet mail-thread-action-loading button-loading-dot is-loading'
             : 'mail-thread-action-quiet',
@@ -1743,6 +2089,10 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
               ? message.llm_blocked === true
                 ? llmBlockedTitle(message)
                 : t('mail.thread.taskCreateTitle')
+            : key === 'mail.thread.action.calendar'
+              ? message.llm_blocked === true
+                ? llmBlockedTitle(message)
+                : t('mail.thread.calendarCreateTitle')
             : key === 'mail.thread.action.reply'
               ? t('mail.thread.action.reply')
               : t('common.notImplemented'),
@@ -1753,6 +2103,10 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
           }
           if (key === 'mail.thread.action.task') {
             handleTaskAction(message)
+            return
+          }
+          if (key === 'mail.thread.action.calendar') {
+            handleCalendarAction(message)
             return
           }
           if (key !== 'mail.thread.action.summary') {
@@ -1770,6 +2124,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
 
   function outgoingActionsFor(message: MailThreadMessage): IncomingAction[] {
     const taskGenerationBusy = busyAction === `${message.id}-task`
+    const calendarGenerationBusy = busyAction === `${message.id}-calendar`
     return outgoingActionKeys.map((key) => ({
       id: key,
       label: t(key),
@@ -1777,17 +2132,25 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
         ![
           'mail.thread.action.followUp',
           'mail.thread.action.resend',
+          'mail.thread.action.calendar',
           'mail.thread.action.task',
         ].includes(key) ||
         busyAction !== null ||
+        (key === 'mail.thread.action.calendar' && message.llm_blocked === true) ||
         (key === 'mail.thread.action.task' && message.llm_blocked === true),
       className:
-        key === 'mail.thread.action.task' && taskGenerationBusy
+        key === 'mail.thread.action.calendar' && calendarGenerationBusy
+          ? 'mail-thread-action-quiet mail-thread-action-loading button-loading-dot is-loading'
+        : key === 'mail.thread.action.task' && taskGenerationBusy
           ? 'mail-thread-action-quiet mail-thread-action-loading button-loading-dot is-loading'
           : 'mail-thread-action-quiet',
       title:
         key === 'mail.thread.action.followUp' || key === 'mail.thread.action.resend'
           ? t(key)
+          : key === 'mail.thread.action.calendar'
+            ? message.llm_blocked === true
+              ? llmBlockedTitle(message)
+              : t('mail.thread.calendarCreateTitle')
           : key === 'mail.thread.action.task'
             ? message.llm_blocked === true
               ? llmBlockedTitle(message)
@@ -1800,6 +2163,10 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
         }
         if (key === 'mail.thread.action.resend') {
           navigateTo(resendHrefFor(message))
+          return
+        }
+        if (key === 'mail.thread.action.calendar') {
+          handleCalendarAction(message)
           return
         }
         if (key === 'mail.thread.action.task') {
@@ -2002,24 +2369,22 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
             {caseAssignEditing && (
               <div className="mail-thread-case-editor">
                 <div className="mail-thread-case-editor-input">
-                  <label htmlFor="mail-thread-case-input">
-                    {t('mail.thread.caseAssignInput')}
-                  </label>
-                  <input
+                  <label>{t('mail.thread.caseAssignInput')}</label>
+                  <SuggestInput
+                    ariaLabel={t('mail.thread.caseAssignInput')}
                     autoComplete="off"
                     disabled={caseAssignBusy}
-                    id="mail-thread-case-input"
-                    list={caseAssignDatalistId}
-                    onChange={(event) => setCaseAssignInput(event.currentTarget.value)}
+                    maxItems={1}
+                    onChange={setCaseAssignInput}
+                    options={caseCandidates.map((item) => ({
+                      key: item.id,
+                      value: item.name,
+                      label: item.name,
+                      badgeLabel: item.name,
+                    }))}
                     placeholder={t('mail.thread.caseAssignPlaceholder')}
-                    type="text"
                     value={caseAssignInput}
                   />
-                  <datalist id={caseAssignDatalistId}>
-                    {caseCandidates.map((item) => (
-                      <option key={item.id} value={item.name} />
-                    ))}
-                  </datalist>
                   <button
                     className={`button-loading-dot${caseAssignBusy ? ' is-loading' : ''}`}
                     disabled={caseAssignBusy || caseAssignInput.trim() === ''}
@@ -2074,6 +2439,30 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
               type="button"
             >
               {t('mail.thread.fetchAttachmentInBackground')}
+            </button>
+          </div>
+        )}
+
+        {llmBlockedMenu !== null && (
+          <div
+            aria-label={t('mail.thread.llmBlockedMenu')}
+            className="mail-attachment-context-menu"
+            onClick={(event) => event.stopPropagation()}
+            role="menu"
+            style={{ left: llmBlockedMenu.x, top: llmBlockedMenu.y }}
+          >
+            <button
+              className={`button-loading-dot${
+                busyAction === `${llmBlockedMenu.message.id}-allow-llm`
+                  ? ' is-loading'
+                  : ''
+              }`}
+              disabled={busyAction !== null}
+              onClick={() => handleAllowLlmFromMenu()}
+              role="menuitem"
+              type="button"
+            >
+              {t('mail.thread.allowLlmBlocked')}
             </button>
           </div>
         )}
@@ -2178,6 +2567,15 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                         <h3>{t('mail.thread.body')}</h3>
                         <MailBodyContent text={sendRequest.body_text} />
                       </section>
+                      {(sendRequest.attachments ?? []).length > 0 && (
+                        <section className="mail-thread-section">
+                          <h3>{t('mail.thread.attachments')}</h3>
+                          <AttachmentBadges
+                            attachments={sendRequest.attachments ?? []}
+                            movingAttachmentId={movingAttachmentId}
+                          />
+                        </section>
+                      )}
                     </article>
                   </div>
                 </Fragment>
@@ -2263,7 +2661,14 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                     <div className="mail-thread-importance">
                       {message.llm_blocked === true && (
                         <span
-                          className="mail-llm-blocked-badge"
+                          className={`mail-llm-blocked-badge ${
+                            busyAction === `${message.id}-allow-llm`
+                              ? 'button-loading-dot is-loading'
+                              : ''
+                          }`.trim()}
+                          onContextMenu={(event) =>
+                            handleLlmBlockedContextMenu(event, message)
+                          }
                           title={llmBlockedTitle(message)}
                         >
                           {t('mail.llmBlocked')}
@@ -2404,6 +2809,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                       <MailBodyContent html={message.body_html} text={mailBody(message)} />
                     </details>
                   )}
+                  {renderCalendarDraftForm(message)}
                 </article>
                 </div>
               </Fragment>

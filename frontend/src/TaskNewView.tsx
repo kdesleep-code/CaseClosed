@@ -5,6 +5,7 @@ import { t } from './i18n'
 import { isCaseOpenForSuggestion, listCases } from './phase7Api'
 import type { CaseItem } from './phase7Api'
 import { createTask, prefillTask } from './phase8Api'
+import SuggestInput from './SuggestInput'
 
 const recurrenceWeekdays = [
   { value: 0, labelKey: 'tasks.recurrence.weekday.sun' },
@@ -80,7 +81,7 @@ export default function TaskNewView() {
         const selectableCases = Array.from(caseMap.values())
         setCases(selectableCases)
         setCaseText((currentCaseText) =>
-          currentCaseText || initialCase?.name || selectableCases[0]?.name || '',
+          currentCaseText || initialCase?.name || '',
         )
         setError(null)
       })
@@ -97,6 +98,9 @@ export default function TaskNewView() {
 
   function selectedCase() {
     const trimmedCaseText = caseText.trim()
+    if (trimmedCaseText === '') {
+      return cases.find((item) => item.name.toLocaleLowerCase() === 'bucket')
+    }
     return cases.find(
       (item) =>
         item.name.toLocaleLowerCase() === trimmedCaseText.toLocaleLowerCase() ||
@@ -335,20 +339,21 @@ export default function TaskNewView() {
               <h2>{t('tasks.detail.meta')}</h2>
               <label className="task-create-gadget-field">
                 <span>{t('tasks.create.case')}</span>
-                <input
+                <SuggestInput
+                  ariaLabel={t('tasks.create.case')}
                   autoComplete="off"
                   disabled={isLoading || cases.length === 0}
-                  list="task-case-suggestions"
-                  onChange={(event) => setCaseText(event.target.value)}
+                  maxItems={1}
+                  onChange={setCaseText}
+                  options={cases.map((item) => ({
+                    key: item.id,
+                    value: item.name,
+                    label: item.name,
+                    badgeLabel: item.name,
+                  }))}
                   placeholder={t('tasks.create.casePlaceholder')}
-                  type="text"
                   value={caseText}
                 />
-                <datalist id="task-case-suggestions">
-                  {cases.map((item) => (
-                    <option key={item.id} value={item.name} />
-                  ))}
-                </datalist>
               </label>
               {cases.length === 0 && (
                 <p className="task-gadget-empty">{t('tasks.create.noCase')}</p>

@@ -50,7 +50,9 @@ def test_google_gmail_connect_url_stores_state_without_loading_mail(
     assert params["access_type"] == ["offline"]
     assert params["scope"] == [
         "https://www.googleapis.com/auth/gmail.readonly "
-        "https://www.googleapis.com/auth/gmail.send"
+        "https://www.googleapis.com/auth/gmail.send "
+        "https://www.googleapis.com/auth/calendar.readonly "
+        "https://www.googleapis.com/auth/calendar.events"
     ]
 
     with sqlite3.connect(database_path) as connection:
@@ -63,6 +65,182 @@ def test_google_gmail_connect_url_stores_state_without_loading_mail(
     assert state_row is not None
     assert json.loads(state_row[0])["state"] == params["state"][0]
     assert mail_count == 0
+
+
+def test_google_calendar_status_reports_granted_scopes(client, database_path) -> None:
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings (id, key, value_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "setting_google_gmail_oauth_connection",
+                "google_gmail_oauth_connection",
+                json.dumps(
+                    {
+                        "access_token": "test-access-token",
+                        "token_expires_at": "2099-05-26T23:00:00+09:00",
+                        "connected_at": "2026-05-26T08:00:00+09:00",
+                        "scopes": [
+                            "https://www.googleapis.com/auth/gmail.readonly",
+                            "https://www.googleapis.com/auth/calendar.events",
+                        ],
+                    }
+                ),
+                "2026-05-26T08:00:00+09:00",
+            ),
+        )
+        connection.commit()
+
+    response = client.get("/api/v1/google/gmail/calendar/status")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["connected"] is True
+    assert data["calendar_read_enabled"] is True
+    assert data["calendar_write_enabled"] is True
+
+
+def test_google_calendar_events_lists_primary_events(
+    client,
+    database_path,
+    monkeypatch,
+) -> None:
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings (id, key, value_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "setting_google_gmail_oauth_connection",
+                "google_gmail_oauth_connection",
+                json.dumps(
+                    {
+                        "access_token": "test-access-token",
+                        "token_expires_at": "2099-05-26T23:00:00+09:00",
+                        "connected_at": "2026-05-26T08:00:00+09:00",
+                        "scopes": [
+                            "https://www.googleapis.com/auth/calendar.readonly",
+                        ],
+                    }
+                ),
+                "2026-05-26T08:00:00+09:00",
+            ),
+        )
+        connection.commit()
+
+    from caseclosed import google_integration
+
+    def fake_calendar_api_get_json(path, access_token, params=None):
+        assert path == "/calendars/primary/events"
+        assert access_token == "test-access-token"
+        assert params["timeMin"] == "2026-06-10T00:00:00+09:00"
+        return {
+            "items": [
+                {
+                    "id": "event_1",
+                    "summary": "Calendar check",
+                    "htmlLink": "https://calendar.google.com/event?eid=event_1",
+                    "start": {"dateTime": "2026-06-10T10:00:00+09:00"},
+                    "end": {"dateTime": "2026-06-10T11:00:00+09:00"},
+                }
+            ]
+        }
+
+    monkeypatch.setattr(
+        google_integration,
+        "calendar_api_get_json",
+        fake_calendar_api_get_json,
+    )
+
+    response = client.get(
+        "/api/v1/google/gmail/calendar/events"
+        "?time_min=2026-06-10T00:00:00%2B09:00"
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["items"][0]["id"] == "event_1"
+    assert data["items"][0]["summary"] == "Calendar check"
+
+
+def test_google_calendar_create_event_posts_to_calendar(
+    client,
+    database_path,
+    monkeypatch,
+) -> None:
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings (id, key, value_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "setting_google_gmail_oauth_connection",
+                "google_gmail_oauth_connection",
+                json.dumps(
+                    {
+                        "access_token": "test-access-token",
+                        "token_expires_at": "2099-05-26T23:00:00+09:00",
+                        "connected_at": "2026-05-26T08:00:00+09:00",
+                        "scopes": [
+                            "https://www.googleapis.com/auth/calendar.events",
+                        ],
+                    }
+                ),
+                "2026-05-26T08:00:00+09:00",
+            ),
+        )
+        connection.commit()
+
+    from caseclosed import google_integration
+
+    posted_payloads = []
+
+    def fake_calendar_api_post_json(path, access_token, payload):
+        assert path == "/calendars/primary/events"
+        assert access_token == "test-access-token"
+        posted_payloads.append(payload)
+        return {
+            "id": "created_event",
+            "summary": payload["summary"],
+            "htmlLink": "https://calendar.google.com/event?eid=created_event",
+            "start": payload["start"],
+            "end": payload["end"],
+        }
+
+    monkeypatch.setattr(
+        google_integration,
+        "calendar_api_post_json",
+        fake_calendar_api_post_json,
+    )
+
+    response = client.post(
+        "/api/v1/google/gmail/calendar/events",
+        json={
+            "summary": "Created from CaseClosed",
+            "start": "2026-06-10T10:00:00+09:00",
+            "end": "2026-06-10T11:00:00+09:00",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["event"]["id"] == "created_event"
+    assert posted_payloads == [
+        {
+            "summary": "Created from CaseClosed",
+            "start": {
+                "dateTime": "2026-06-10T10:00:00+09:00",
+                "timeZone": "Asia/Tokyo",
+            },
+            "end": {
+                "dateTime": "2026-06-10T11:00:00+09:00",
+                "timeZone": "Asia/Tokyo",
+            },
+        }
+    ]
 
 
 def test_google_gmail_import_latest_unloaded_uses_existing_ingestion_flow(

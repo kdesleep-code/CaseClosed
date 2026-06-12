@@ -96,6 +96,13 @@ def ensure_runtime_schema() -> None:
                 connection.execute(text("ALTER TABLE cases ADD COLUMN closed_when_text TEXT"))
             if "tags_json" not in case_columns:
                 connection.execute(text("ALTER TABLE cases ADD COLUMN tags_json TEXT"))
+    if "case_genres" in table_names:
+        genre_columns = {column["name"] for column in inspector.get_columns("case_genres")}
+        with engine.begin() as connection:
+            if "sort_order" not in genre_columns:
+                connection.execute(
+                    text("ALTER TABLE case_genres ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
+                )
     if "case_stakeholders" not in table_names and "cases" in table_names and "contacts" in table_names:
         with engine.begin() as connection:
             connection.execute(
@@ -395,6 +402,93 @@ def ensure_runtime_schema() -> None:
                         updated_at TEXT NOT NULL,
                         version INTEGER NOT NULL DEFAULT 1
                     )
+                    """
+                )
+            )
+    if "calendar_events" not in inspect(engine).get_table_names():
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE calendar_events (
+                        id TEXT PRIMARY KEY,
+                        source TEXT NOT NULL DEFAULT 'google',
+                        external_calendar_id TEXT,
+                        external_event_id TEXT,
+                        external_etag TEXT,
+                        external_ical_uid TEXT,
+                        external_html_link TEXT,
+                        external_updated_at TEXT,
+                        google_status TEXT,
+                        summary TEXT NOT NULL DEFAULT '',
+                        description TEXT,
+                        location TEXT,
+                        start_at TEXT NOT NULL,
+                        end_at TEXT NOT NULL,
+                        all_day INTEGER NOT NULL DEFAULT 0,
+                        time_zone TEXT,
+                        recurring_event_id TEXT,
+                        attendance_requirement TEXT NOT NULL DEFAULT 'unknown',
+                        tags_json TEXT,
+                        metadata_json TEXT,
+                        sync_status TEXT NOT NULL DEFAULT 'synced',
+                        last_synced_at TEXT,
+                        local_note TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        UNIQUE(source, external_calendar_id, external_event_id)
+                    )
+                    """
+                )
+            )
+    if "calendar_events" in inspect(engine).get_table_names():
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_calendar_events_range
+                    ON calendar_events (start_at, end_at)
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_calendar_events_sync_status
+                    ON calendar_events (sync_status)
+                    """
+                )
+            )
+    if (
+        "calendar_event_links" not in inspect(engine).get_table_names()
+        and "calendar_events" in inspect(engine).get_table_names()
+    ):
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE calendar_event_links (
+                        id TEXT PRIMARY KEY,
+                        calendar_event_id TEXT NOT NULL REFERENCES calendar_events(id),
+                        linked_type TEXT NOT NULL,
+                        linked_id TEXT NOT NULL,
+                        role TEXT NOT NULL DEFAULT 'related',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        UNIQUE(calendar_event_id, linked_type, linked_id, role)
+                    )
+                    """
+                )
+            )
+    if "calendar_event_links" in inspect(engine).get_table_names():
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_calendar_event_links_target
+                    ON calendar_event_links (linked_type, linked_id)
                     """
                 )
             )

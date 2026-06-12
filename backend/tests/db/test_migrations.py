@@ -5,6 +5,7 @@ from conftest import PHASE_2_TABLES
 from conftest import PHASE_3_TABLES
 from conftest import PHASE_4_TABLES
 from conftest import PHASE_6_TABLES
+from conftest import PHASE_9_TABLES
 from conftest import sqlite_table_names
 import sqlite3
 
@@ -240,3 +241,64 @@ def test_phase_6_migrations_add_storage_tables(
         "./data/storage",
         "active",
     )
+
+
+def test_phase_9_migrations_add_calendar_event_tables(
+    migrated_database,
+) -> None:
+    table_names = sqlite_table_names(migrated_database)
+
+    assert PHASE_9_TABLES <= table_names
+
+    with sqlite3.connect(migrated_database) as connection:
+        event_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(calendar_events)"
+            ).fetchall()
+        }
+        link_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(calendar_event_links)"
+            ).fetchall()
+        }
+
+    assert {
+        "id",
+        "source",
+        "external_calendar_id",
+        "external_event_id",
+        "external_etag",
+        "external_ical_uid",
+        "external_html_link",
+        "external_updated_at",
+        "google_status",
+        "summary",
+        "description",
+        "location",
+        "start_at",
+        "end_at",
+        "all_day",
+        "time_zone",
+        "recurring_event_id",
+        "attendance_requirement",
+        "tags_json",
+        "metadata_json",
+        "sync_status",
+        "last_synced_at",
+        "local_note",
+        "created_at",
+        "updated_at",
+        "version",
+    } <= event_columns
+    assert {
+        "id",
+        "calendar_event_id",
+        "linked_type",
+        "linked_id",
+        "role",
+        "created_at",
+        "updated_at",
+        "version",
+    } <= link_columns

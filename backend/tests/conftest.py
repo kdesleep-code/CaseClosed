@@ -67,6 +67,11 @@ PHASE_6_TABLES = {
     "storage_objects",
 }
 
+PHASE_9_TABLES = {
+    "calendar_event_links",
+    "calendar_events",
+}
+
 
 @pytest.fixture
 def database_path(tmp_path: Path) -> Path:

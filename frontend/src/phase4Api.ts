@@ -80,6 +80,7 @@ export type MailAttachment = {
   download_url: string
   cached: boolean
   storage_object_id: string | null
+  source_type?: string | null
 }
 
 export type MailAttachmentStorageMoveResult = {
@@ -214,6 +215,7 @@ export type MailSendRequest = {
   subject: string | null
   body_text: string
   attachment_names: string[]
+  attachments?: MailAttachment[]
   reply_to_message_id: string | null
   sent_message_id: string | null
   scheduled_at: string | null
@@ -352,6 +354,8 @@ export type GoogleGmailStatus = {
   last_error: string | null
   scopes: string[]
   send_enabled?: boolean
+  calendar_read_enabled?: boolean
+  calendar_write_enabled?: boolean
   redirect_uri: string
   has_refresh_token: boolean
   token_expires_at: string | null
@@ -404,6 +408,94 @@ export type GoogleGmailImportByDateResult = {
     received_at: string
     mail: NonNullable<GoogleGmailImportResult['mail']>
   }>
+}
+
+export type GoogleCalendarEvent = {
+  id: string | null
+  google_event_id?: string | null
+  calendar_source_id?: string | null
+  summary: string
+  description: string | null
+  location: string | null
+  html_link: string | null
+  start: Record<string, unknown>
+  end: Record<string, unknown>
+  status: string | null
+  created: string | null
+  updated: string | null
+  sync_status?: string | null
+  attendance_requirement?: string | null
+  tags_json?: string | null
+  metadata_json?: string | null
+  local_note?: string | null
+}
+
+export type CalendarEventLink = {
+  id: string
+  calendar_event_id: string
+  linked_type: string
+  linked_id: string
+  role: string
+  title: string | null
+  href: string | null
+  metadata: Record<string, unknown>
+  created_at: string
+  updated_at: string
+  version: number
+}
+
+export type CalendarEventDetail = {
+  event: GoogleCalendarEvent
+  links: CalendarEventLink[]
+  mail_summaries?: CalendarEventMailSummary[]
+}
+
+export type CalendarEventMailSummary = {
+  message_id: string
+  thread_id: string
+  subject: string | null
+  from: string
+  received_at: string
+  summary: string
+  next_action: string | null
+  source: string
+  href: string
+}
+
+export type GoogleCalendarListItem = {
+  id: string
+  summary: string
+  description: string | null
+  primary: boolean
+  access_role: string
+  background_color: string | null
+  foreground_color: string | null
+  time_zone: string | null
+  can_write: boolean
+}
+
+export type GoogleCalendarEventCreatePayload = {
+  summary: string
+  start: string
+  end: string
+  calendar_id?: string
+  description?: string | null
+  location?: string | null
+  recurrence_rule?: string | null
+  time_zone?: string
+  linked_mail_message_id?: string | null
+  linked_case_id?: string | null
+}
+
+export type CalendarEventFromMailPrefill = {
+  summary: string
+  description: string | null
+  location: string | null
+  start_at: string
+  end_at: string
+  time_zone: string
+  reasoning_summary: string | null
+  warnings: string[]
 }
 
 export type MailListFilters = {
@@ -779,6 +871,140 @@ export function updateGoogleGmailAutoImportSettings(payload: {
   })
 }
 
+export function listGoogleCalendarEvents(params: {
+  calendar_id?: string
+  time_min?: string
+  time_max?: string
+  max_results?: number
+} = {}): Promise<{ items: GoogleCalendarEvent[]; calendar_id: string }> {
+  const query = new URLSearchParams()
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && String(value).trim() !== '') {
+      query.set(key, String(value))
+    }
+  })
+  return request(
+    `/api/v1/google/gmail/calendar/events${query.size === 0 ? '' : `?${query}`}`,
+  )
+}
+
+export function listCalendarDbEvents(params: {
+  calendar_id?: string[]
+  time_min?: string
+  time_max?: string
+} = {}): Promise<{ items: GoogleCalendarEvent[]; calendar_ids: string[] }> {
+  const query = new URLSearchParams()
+  params.calendar_id?.forEach((calendarId) => {
+    if (calendarId.trim() !== '') {
+      query.append('calendar_id', calendarId)
+    }
+  })
+  if (params.time_min !== undefined && params.time_min.trim() !== '') {
+    query.set('time_min', params.time_min)
+  }
+  if (params.time_max !== undefined && params.time_max.trim() !== '') {
+    query.set('time_max', params.time_max)
+  }
+  return request(
+    `/api/v1/google/gmail/calendar/db-events${query.size === 0 ? '' : `?${query}`}`,
+  )
+}
+
+export function getCalendarDbEvent(eventId: string): Promise<CalendarEventDetail> {
+  return request(`/api/v1/google/gmail/calendar/db-events/${encodeURIComponent(eventId)}`)
+}
+
+export function createCalendarDbEventLink(
+  eventId: string,
+  payload: { linked_type: string; linked_id: string; role?: string },
+): Promise<{ link: CalendarEventLink }> {
+  return request(`/api/v1/google/gmail/calendar/db-events/${encodeURIComponent(eventId)}/links`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export function moveCalendarDbEvent(
+  eventId: string,
+  payload: { start: string; end: string; time_zone?: string },
+): Promise<{ event: GoogleCalendarEvent; google_event: GoogleCalendarEvent | null }> {
+  return request(`/api/v1/google/gmail/calendar/db-events/${encodeURIComponent(eventId)}/move`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export function deleteCalendarDbEventLink(
+  eventId: string,
+  linkId: string,
+): Promise<{ deleted: boolean }> {
+  return request(
+    `/api/v1/google/gmail/calendar/db-events/${encodeURIComponent(eventId)}/links/${encodeURIComponent(linkId)}`,
+    { method: 'DELETE' },
+  )
+}
+
+export function syncGoogleCalendarEvents(payload: {
+  calendar_ids: string[]
+  base_date?: string | null
+  month_count?: number
+}): Promise<{
+  calendar_ids: string[]
+  time_min: string
+  time_max: string
+  imported_count: number
+  updated_count: number
+  cancelled_count: number
+  missing_count: number
+}> {
+  return request('/api/v1/google/gmail/calendar/sync', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function listGoogleCalendars(): Promise<GoogleCalendarListItem[]> {
+  const data = await request<ItemsResponse<GoogleCalendarListItem>>(
+    '/api/v1/google/gmail/calendar/calendars',
+  )
+  return data.items
+}
+
+export function createGoogleCalendarEvent(
+  payload: GoogleCalendarEventCreatePayload,
+): Promise<{
+  event: GoogleCalendarEvent
+  db_event?: GoogleCalendarEvent
+  links?: CalendarEventLink[]
+}> {
+  return request('/api/v1/google/gmail/calendar/events', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export function prefillCalendarEventFromMail(payload: {
+  message_id: string
+  case_id?: string | null
+  prompt?: string | null
+}): Promise<{
+  prefill: CalendarEventFromMailPrefill
+  llm_run_id: string
+  linked_mail_message_id: string
+  linked_case_id: string | null
+  linked_case_name: string | null
+}> {
+  return request('/api/v1/google/gmail/calendar/events/prefill-from-mail', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
 export function updateMailImportance(
   messageId: string,
   importance: string,
@@ -787,6 +1013,12 @@ export function updateMailImportance(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ importance }),
+  })
+}
+
+export function allowMailLlm(messageId: string): Promise<MailDetail> {
+  return request(`/api/v1/mails/${encodeURIComponent(messageId)}/allow-llm`, {
+    method: 'POST',
   })
 }
 

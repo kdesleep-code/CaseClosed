@@ -29,6 +29,44 @@ def test_cases_can_be_listed_and_read(client) -> None:
     assert detail["files"] == []
 
 
+def test_case_name_update_renames_case_storage_directory(client, database_path) -> None:
+    create_response = client.post(
+        "/api/v1/cases",
+        json={
+            "name": "Original Case Name",
+            "description": "Original description.",
+            "progress_status": "in_progress",
+            "ball_status": "user",
+        },
+    )
+    assert create_response.status_code == 200
+    case = create_response.json()["data"]["case"]
+
+    update_response = client.patch(
+        f"/api/v1/cases/{case['id']}",
+        json={
+            "name": "Renamed Case",
+            "description": "Updated description.",
+            "open_when_date": None,
+            "open_when_text": None,
+            "closed_when_text": None,
+        },
+    )
+
+    assert update_response.status_code == 200
+    updated_case = update_response.json()["data"]["case"]
+    assert updated_case["name"] == "Renamed Case"
+    assert updated_case["storage_directory_id"] == case["storage_directory_id"]
+
+    with sqlite3.connect(database_path) as connection:
+        directory_name = connection.execute(
+            "SELECT name FROM storage_directories WHERE id = ?",
+            (case["storage_directory_id"],),
+        ).fetchone()[0]
+
+    assert directory_name == "Renamed Case"
+
+
 def test_case_current_situation_can_be_generated(client, database_path) -> None:
     case_response = client.post(
         "/api/v1/cases",
@@ -774,6 +812,7 @@ def test_case_genres_can_be_managed(client, database_path) -> None:
     genre = create_response.json()["data"]["genre"]
     assert genre["title"] == "Research"
     assert genre["color_hex"] == "#33aaff"
+    assert genre["sort_order"] == 0
 
     update_response = client.patch(
         f"/api/v1/cases/genres/{genre['id']}",
@@ -800,6 +839,22 @@ def test_case_genres_can_be_managed(client, database_path) -> None:
     assert "Committee" in [
         item["title"] for item in list_response.json()["data"]["items"]
     ]
+
+    second_response = client.post(
+        "/api/v1/cases/genres",
+        json={"title": "Research", "color_hex": "#33aa66"},
+    )
+    assert second_response.status_code == 200
+    second_genre = second_response.json()["data"]["genre"]
+    reorder_response = client.patch(
+        "/api/v1/cases/genres/reorder",
+        json={"genre_ids": [second_genre["id"], genre["id"]]},
+    )
+    assert reorder_response.status_code == 200
+    reordered_titles = [
+        item["title"] for item in reorder_response.json()["data"]["items"]
+    ]
+    assert reordered_titles[:2] == ["Research", "Committee"]
 
     delete_response = client.delete(f"/api/v1/cases/genres/{genre['id']}")
     assert delete_response.status_code == 200
@@ -1004,15 +1059,15 @@ def test_case_stakeholders_can_be_managed(client) -> None:
     case_id = case_response.json()["data"]["case"]["id"]
 
     contacts = []
-    for display_name, email in [
-        ("Primary Collaborator", "primary@example.com"),
-        ("Second Reviewer", "second@example.com"),
+    for display_name, email, avatar_url in [
+        ("Primary Collaborator", "primary@example.com", "/storage/contact-images/primary.webp"),
+        ("Second Reviewer", "second@example.com", None),
     ]:
         contact_response = client.post(
             "/api/v1/contacts",
             json={
                 "display_name": display_name,
-                "avatar_url": None,
+                "avatar_url": avatar_url,
                 "user_memo": "",
                 "ai_memo": None,
                 "status": "active",
@@ -1038,6 +1093,7 @@ def test_case_stakeholders_can_be_managed(client) -> None:
     assert first_response.status_code == 200
     first = first_response.json()["data"]["stakeholder"]
     assert first["contact_display_name"] == "Primary Collaborator"
+    assert first["contact_avatar_url"] == "/storage/contact-images/primary.webp"
     assert first["role"] == "owner"
 
     duplicate_response = client.post(
@@ -1059,6 +1115,13 @@ def test_case_stakeholders_can_be_managed(client) -> None:
     )
     assert update_response.status_code == 200
     assert update_response.json()["data"]["stakeholder"]["role"] == "external advisor"
+
+    clear_role_response = client.patch(
+        f"/api/v1/cases/{case_id}/stakeholders/{first['id']}",
+        json={"role": ""},
+    )
+    assert clear_role_response.status_code == 200
+    assert clear_role_response.json()["data"]["stakeholder"]["role"] == ""
 
     reorder_response = client.post(
         f"/api/v1/cases/{case_id}/stakeholders/reorder",

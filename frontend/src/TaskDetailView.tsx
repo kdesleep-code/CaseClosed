@@ -131,6 +131,19 @@ function recurrenceSummary(task: TaskItem) {
   )
 }
 
+function taskReturnToFallback(task: TaskItem) {
+  return `/tasks?case_id=${encodeURIComponent(task.case_id)}`
+}
+
+function taskReturnTo(task: TaskItem) {
+  const params = new URLSearchParams(window.location.search)
+  const returnTo = params.get('return_to')
+  if (returnTo !== null && (returnTo === '/tasks' || returnTo.startsWith('/tasks?'))) {
+    return returnTo
+  }
+  return taskReturnToFallback(task)
+}
+
 export default function TaskDetailView({ taskId }: { taskId: string }) {
   const [task, setTask] = useState<TaskItem | null>(null)
   const [isLoading, setIsLoading] = useState(true)
@@ -199,7 +212,7 @@ export default function TaskDetailView({ taskId }: { taskId: string }) {
         setTask(completedTask)
         setError(null)
         window.setTimeout(() => {
-          window.location.href = `/tasks?case_id=${encodeURIComponent(completedTask.case_id)}`
+          window.location.href = taskReturnTo(completedTask)
         }, 1000)
       })
       .catch((requestError) => {
@@ -988,14 +1001,16 @@ export default function TaskDetailView({ taskId }: { taskId: string }) {
               >
                 {isDeleting ? t('tasks.detail.deleting') : t('tasks.detail.delete')}
               </button>
-              <button
-                className="task-gadget-action"
-                disabled={task === null || isDone || isCompleting}
-                onClick={handleComplete}
-                type="button"
-              >
-                {isCompleting ? t('tasks.detail.completing') : t('tasks.detail.markDone')}
-              </button>
+              {!isEditing && (
+                <button
+                  className="task-gadget-action"
+                  disabled={task === null || isDone || isCompleting}
+                  onClick={handleComplete}
+                  type="button"
+                >
+                  {isCompleting ? t('tasks.detail.completing') : t('tasks.detail.markDone')}
+                </button>
+              )}
             </section>
           </aside>
         </div>

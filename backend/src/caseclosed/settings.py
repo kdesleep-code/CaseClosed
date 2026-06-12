@@ -160,5 +160,7 @@ def get_google_gmail_scopes() -> list[str]:
         return [
             "https://www.googleapis.com/auth/gmail.readonly",
             "https://www.googleapis.com/auth/gmail.send",
+            "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/calendar.events",
         ]
     return [scope for scope in value.split() if scope.strip() != ""]

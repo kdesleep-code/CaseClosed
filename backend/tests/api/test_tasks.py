@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import date
+from datetime import datetime
 from datetime import timedelta
+from datetime import timezone
 from pathlib import Path
 
 
@@ -13,6 +15,10 @@ def create_case(client, name: str = "Task Case") -> dict[str, object]:
     )
     assert response.status_code == 200
     return response.json()["data"]["case"]
+
+
+def jst_today() -> str:
+    return datetime.now(timezone(timedelta(hours=9))).date().isoformat()
 
 
 def ingest_task_source_mail(client, *, subject: str = "Task source mail") -> str:
@@ -608,7 +614,7 @@ def test_task_can_be_generated_from_assigned_mail(client, database_path: Path) -
     assert task["case_id"] == case["id"]
     assert task["source_type"] == "mail"
     assert task["source_id"] == message_id
-    assert task["start_at"] == "2026-06-09"
+    assert task["start_at"] == jst_today()
     assert task["title"] != ""
     assert data["prefill"]["priority"] == "middle"
     assert data["llm_run_id"].startswith("llm_run_")

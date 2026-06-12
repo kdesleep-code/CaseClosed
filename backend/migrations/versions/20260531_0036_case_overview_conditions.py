@@ -17,8 +17,12 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("cases", sa.Column("open_when_text", sa.Text(), nullable=True))
-    op.add_column("cases", sa.Column("closed_when_text", sa.Text(), nullable=True))
+    bind = op.get_bind()
+    columns = {column["name"] for column in sa.inspect(bind).get_columns("cases")}
+    if "open_when_text" not in columns:
+        op.add_column("cases", sa.Column("open_when_text", sa.Text(), nullable=True))
+    if "closed_when_text" not in columns:
+        op.add_column("cases", sa.Column("closed_when_text", sa.Text(), nullable=True))
 
 
 def downgrade() -> None:

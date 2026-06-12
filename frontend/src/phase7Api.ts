@@ -22,8 +22,12 @@ export type CaseItem = {
   storage_directory_id: string
   next_task: CaseTaskSummary | null
   next_calendar_event: {
+    id: string
     title: string
     starts_at: string | null
+    ends_at: string | null
+    all_day: boolean
+    location: string | null
   } | null
   created_at: string
   updated_at: string
@@ -45,14 +49,19 @@ export type CaseTaskSummary = {
 }
 
 export type CaseCalendarSummary = {
-    title: string
+  id: string
+  title: string
   starts_at: string | null
+  ends_at: string | null
+  all_day: boolean
+  location: string | null
 }
 
 export type CaseGenre = {
   id: string
   title: string
   color_hex: string
+  sort_order: number
   created_at: string
   updated_at: string
   version: number
@@ -312,6 +321,15 @@ export function deleteCaseGenre(genreId: string): Promise<{ deleted: boolean }> 
   })
 }
 
+export async function reorderCaseGenres(genreIds: string[]): Promise<CaseGenre[]> {
+  const data = await request<ListResponse<CaseGenre>>('/api/v1/cases/genres/reorder', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ genre_ids: genreIds }),
+  })
+  return data.items
+}
+
 export async function listCaseMailLinks(caseId: string): Promise<CaseMailLink[]> {
   const data = await request<ListResponse<CaseMailLink>>(
     `/api/v1/cases/${encodeURIComponent(caseId)}/mail-links`,
@@ -409,6 +427,7 @@ export async function regenerateCaseCurrentSituation(
 export async function updateCase(
   caseId: string,
   payload: {
+    name?: string
     description: string | null
     open_when_date: string | null
     open_when_text: string | null

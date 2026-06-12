@@ -5,11 +5,13 @@ import binascii
 import json
 import re
 from datetime import timedelta
+from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy import or_
@@ -45,6 +47,7 @@ from caseclosed.services.mail_ingestion import MockMailInput
 from caseclosed.services.mail_ingestion import apply_contact_mail_importance_rule
 from caseclosed.services.mail_ingestion import block_filter_tokens
 from caseclosed.services.mail_ingestion import ingest_mock_mail
+from caseclosed.services.mail_ingestion import enqueue_importance_job
 from caseclosed.services.mail_ingestion import message_is_sent
 from caseclosed.services.mail_ingestion import row_matches_llm_block_query
 from caseclosed.services.background_worker import kick_job_drain
@@ -297,6 +300,7 @@ def mail_send_request_data(send_request: MailSendRequest) -> dict[str, object]:
         "subject": send_request.subject,
         "body_text": send_request.body_text,
         "attachment_names": json_list(send_request.attachment_names_json),
+        "attachments": sent_attachment_items(send_request),
         "reply_to_message_id": send_request.reply_to_message_id,
         "sent_message_id": send_request.sent_message_id,
         "scheduled_at": send_request.scheduled_at,
@@ -344,6 +348,68 @@ def attachment_payloads_json(
     return json.dumps(values, ensure_ascii=True)
 
 
+def json_dict_list(value: str | None) -> list[dict[str, object]]:
+    if value is None:
+        return []
+    loaded = json.loads(value)
+    if not isinstance(loaded, list):
+        return []
+    return [item for item in loaded if isinstance(item, dict)]
+
+
+def sent_attachment_filename(attachment: dict[str, object], index: int) -> str:
+    filename = attachment.get("filename")
+    if isinstance(filename, str) and filename.strip() != "":
+        return filename.strip()
+    return f"attachment-{index + 1}"
+
+
+def sent_attachment_content_type(
+    attachment: dict[str, object],
+) -> str:
+    content_type = attachment.get("content_type")
+    if isinstance(content_type, str) and "/" in content_type:
+        return content_type.strip()
+    return "application/octet-stream"
+
+
+def sent_attachment_size(
+    attachment: dict[str, object],
+) -> int:
+    size = attachment.get("size")
+    if isinstance(size, int) and size >= 0:
+        return size
+    return 0
+
+
+def sent_attachment_download_url(send_request_id: str, index: int) -> str:
+    return (
+        f"/api/v1/mails/send-requests/{send_request_id}"
+        f"/attachments/{index}/download"
+    )
+
+
+def sent_attachment_items(send_request: MailSendRequest) -> list[dict[str, object]]:
+    return [
+        {
+            "id": f"{send_request.id}:{index}",
+            "message_id": send_request.sent_message_id or send_request.id,
+            "filename": sent_attachment_filename(attachment, index),
+            "mime_type": sent_attachment_content_type(attachment),
+            "byte_size": sent_attachment_size(attachment),
+            "download_url": sent_attachment_download_url(send_request.id, index),
+            "cached": True,
+            "storage_object_id": (
+                attachment.get("storage_object_id")
+                if isinstance(attachment.get("storage_object_id"), str)
+                else None
+            ),
+            "source_type": "sent_attachment",
+        }
+        for index, attachment in enumerate(json_dict_list(send_request.attachment_data_json))
+    ]
+
+
 def send_request_thread_id(send_request: MailSendRequest) -> str:
     return f"provisional_thread_{send_request.id}"
 
@@ -367,6 +433,7 @@ def send_request_matches_query(send_request: MailSendRequest, tokens: list[str])
 
 def send_request_list_item_data(send_request: MailSendRequest) -> dict[str, object]:
     visible_at = send_request_visible_at(send_request)
+    attachments = sent_attachment_items(send_request)
     return {
         "id": send_request.id,
         "gmail_message_id": f"provisional:{send_request.id}",
@@ -392,6 +459,8 @@ def send_request_list_item_data(send_request: MailSendRequest) -> dict[str, obje
         "sender_contact": None,
         "case_links": [],
         "summary": None,
+        "attachment_count": len(attachments),
+        "has_attachments": len(attachments) > 0,
     }
 
 
@@ -401,6 +470,7 @@ def send_request_message_data(send_request: MailSendRequest) -> dict[str, object
     to_addresses = json_list(send_request.to_addresses_json)
     cc_addresses = json_list(send_request.cc_addresses_json)
     bcc_addresses = json_list(send_request.bcc_addresses_json)
+    attachments = sent_attachment_items(send_request)
     return {
         "id": send_request.id,
         "gmail_message_id": f"provisional:{send_request.id}",
@@ -431,6 +501,9 @@ def send_request_message_data(send_request: MailSendRequest) -> dict[str, object
         "gmail_labels": ["SENT"],
         "body_text": send_request.body_text,
         "body_html": None,
+        "attachments": attachments,
+        "attachment_count": len(attachments),
+        "has_attachments": len(attachments) > 0,
         "processed_status": "processed",
         "read_status": "read",
         "read_at": send_request.created_at,
@@ -472,7 +545,7 @@ def send_request_detail_data(send_request: MailSendRequest) -> dict[str, object]
         "auto_state": auto_state,
         "summary": None,
         "case_links": [],
-        "attachments": [],
+        "attachments": message["attachments"],
         "drafts": [],
         "available_actions": [],
     }
@@ -815,6 +888,46 @@ def unique_thread_attachments(
     return items
 
 
+def sent_request_attachments_by_message_id(
+    session: DatabaseSession,
+    message_ids: list[str],
+) -> dict[str, list[dict[str, object]]]:
+    if not message_ids:
+        return {}
+    send_requests = session.scalars(
+        select(MailSendRequest)
+        .where(MailSendRequest.sent_message_id.in_(message_ids))
+        .order_by(MailSendRequest.created_at, MailSendRequest.id)
+    ).all()
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for send_request in send_requests:
+        if send_request.sent_message_id is None:
+            continue
+        attachments = sent_attachment_items(send_request)
+        if attachments:
+            grouped.setdefault(send_request.sent_message_id, []).extend(attachments)
+    return grouped
+
+
+def unique_attachment_items(
+    attachment_items: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    seen: set[tuple[str, int]] = set()
+    items: list[dict[str, object]] = []
+    for attachment in attachment_items:
+        filename = attachment.get("filename")
+        byte_size = attachment.get("byte_size")
+        key = (
+            filename if isinstance(filename, str) else "",
+            byte_size if isinstance(byte_size, int) else 0,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(attachment)
+    return items
+
+
 def message_data(
     message: GmailMessage,
     *,
@@ -907,11 +1020,16 @@ def message_data(
             message.id,
             [],
         )
-        data["attachments"] = [
+        sent_attachments = sent_request_attachments_by_message_id(
+            session,
+            [message.id],
+        ).get(message.id, [])
+        attachment_items = [
             mail_attachment_data(attachment) for attachment in attachments
-        ]
-        data["attachment_count"] = len(attachments)
-        data["has_attachments"] = len(attachments) > 0
+        ] + sent_attachments
+        data["attachments"] = unique_attachment_items(attachment_items)
+        data["attachment_count"] = len(data["attachments"])
+        data["has_attachments"] = len(data["attachments"]) > 0
     if include_body:
         data["body_text"] = message.body_text
         data["body_html"] = message.body_html
@@ -1473,6 +1591,10 @@ def detail_data(
         session,
         thread_message_ids,
     )
+    sent_attachments_by_message_id = sent_request_attachments_by_message_id(
+        session,
+        thread_message_ids,
+    )
     summaries = session.scalars(
         select(MailSummary)
         .where(
@@ -1530,7 +1652,14 @@ def detail_data(
             thread_message_ids,
         ),
         "case_links": mail_thread_case_link_items(session, message.thread_id),
-        "attachments": unique_thread_attachments(attachments_by_message_id),
+        "attachments": unique_attachment_items(
+            unique_thread_attachments(attachments_by_message_id)
+            + [
+                attachment
+                for attachments in sent_attachments_by_message_id.values()
+                for attachment in attachments
+            ]
+        ),
         "drafts": [],
         "available_actions": available_actions(user_state, auto_state),
     }
@@ -1556,7 +1685,9 @@ def list_item_data(
     is_sent = message_is_sent(message)
     summary = latest_thread_summary(session, message.thread_id)
     thread_summary = stored_thread_summary(session, message.thread_id)
-    attachment_count = attachment_count_for_message(session, message.id)
+    attachment_count = attachment_count_for_message(session, message.id) + len(
+        sent_request_attachments_by_message_id(session, [message.id]).get(message.id, [])
+    )
     return {
         "id": message.id,
         "gmail_message_id": message.gmail_message_id,
@@ -1840,6 +1971,60 @@ def storage_object_file_response(
         storage_object_absolute_path(storage_object, session),
         media_type=storage_object.content_type or "application/octet-stream",
         filename=storage_object.original_filename,
+    )
+
+
+def sent_attachment_content(
+    session: DatabaseSession,
+    attachment: dict[str, object],
+    filename: str,
+) -> bytes:
+    storage_object_id = attachment.get("storage_object_id")
+    if isinstance(storage_object_id, str) and storage_object_id.strip() != "":
+        storage_object = session.get(StorageObject, storage_object_id.strip())
+        if storage_object is None or storage_object.status != "active":
+            raise json_error(404, "NOT_FOUND", "Sent attachment file not found.")
+        object_path = storage_object_absolute_path(storage_object, session)
+        if not object_path.is_file():
+            raise json_error(404, "NOT_FOUND", "Sent attachment file not found.")
+        return object_path.read_bytes()
+
+    data_base64 = attachment.get("data_base64")
+    if not isinstance(data_base64, str) or data_base64.strip() == "":
+        raise json_error(404, "NOT_FOUND", "Sent attachment data not found.")
+    try:
+        return base64.b64decode(data_base64, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise json_error(500, "DATA_INTEGRITY_ERROR", "Sent attachment data is invalid.") from error
+
+
+@router.get("/send-requests/{send_request_id}/attachments/{attachment_index}/download")
+def download_sent_mail_attachment(
+    send_request_id: str,
+    attachment_index: int,
+    session: DatabaseSession = Depends(get_session),
+) -> Response:
+    send_request = session.get(MailSendRequest, send_request_id)
+    if send_request is None:
+        raise json_error(404, "NOT_FOUND", "Sent mail attachment not found.")
+
+    attachments = json_dict_list(send_request.attachment_data_json)
+    if attachment_index < 0 or attachment_index >= len(attachments):
+        raise json_error(404, "NOT_FOUND", "Sent mail attachment not found.")
+
+    attachment = attachments[attachment_index]
+    filename = sent_attachment_filename(attachment, attachment_index)
+    content = sent_attachment_content(session, attachment, filename)
+    content_type = sent_attachment_content_type(attachment)
+    return Response(
+        content,
+        media_type=content_type,
+        headers={
+            "Content-Disposition": (
+                "attachment; "
+                f"filename*=UTF-8''{quote(filename, safe='')}"
+            ),
+        },
     )
 
 
@@ -2888,6 +3073,47 @@ def update_mail_importance(
         enqueue_mail_summary_job(session, message, now)
     session.commit()
     kick_job_drain(reason="mail_importance_updated")
+    return {"ok": True, "data": detail_data(session, message, user_state, auto_state)}
+
+
+@router.post("/{message_id}/allow-llm")
+def allow_mail_llm(
+    message_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    message, user_state, auto_state = get_mail_bundle(session, message_id)
+    if message_is_sent(message):
+        raise json_error(409, "CONFLICT", "Sent mail does not need LLM allow.")
+    if auto_state.pending_reason is not None:
+        raise json_error(409, "CONFLICT", "Pending mail cannot be allowed for LLM yet.")
+
+    now = jst_iso()
+    auto_state.llm_blocked = 0
+    auto_state.llm_block_reason = None
+    auto_state.llm_blocked_at = None
+
+    contact = contact_for_address(session, message.from_address)
+    queued_job_id: str | None = None
+    if contact is not None:
+        result = apply_contact_mail_importance_rule(
+            session,
+            message=message,
+            auto_state=auto_state,
+            contact=contact,
+            now=now,
+        )
+        queued_job_id = result.queued_job_id
+    else:
+        auto_state.effective_importance = (
+            "high" if auto_state.external_importance == "high" else "unclassified"
+        )
+        queued_job_id = enqueue_importance_job(session, message, now)
+
+    auto_state.updated_at = now
+    auto_state.version += 1
+    session.commit()
+    if queued_job_id is not None:
+        kick_job_drain(reason="mail_llm_allowed")
     return {"ok": True, "data": detail_data(session, message, user_state, auto_state)}
 
 

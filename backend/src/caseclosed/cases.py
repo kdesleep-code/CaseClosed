@@ -22,6 +22,8 @@ from caseclosed.db.models import Case
 from caseclosed.db.models import CaseAutoAssignRule
 from caseclosed.db.models import CaseContextVersion
 from caseclosed.db.models import CaseEvent
+from caseclosed.db.models import CalendarEvent
+from caseclosed.db.models import CalendarEventLink
 from caseclosed.db.models import CaseGenre
 from caseclosed.db.models import CaseMailLink
 from caseclosed.db.models import CaseStakeholder
@@ -82,6 +84,7 @@ class CaseCreate(BaseModel):
 
 
 class CaseUpdate(BaseModel):
+    name: str | None = None
     description: str | None = None
     open_when_date: str | None = None
     open_when_text: str | None = None
@@ -99,9 +102,13 @@ class CaseGenreUpdate(BaseModel):
     color_hex: str | None = None
 
 
+class CaseGenreReorder(BaseModel):
+    genre_ids: list[str]
+
+
 class CaseStakeholderCreate(BaseModel):
     contact_id: str
-    role: str = "stakeholder"
+    role: str = ""
 
 
 class CaseAutoAssignRuleCreate(BaseModel):
@@ -155,7 +162,7 @@ def new_id(prefix: str) -> str:
 
 def normalize_stakeholder_role(role: str | None) -> str:
     normalized = (role or "").strip()
-    return normalized or "stakeholder"
+    return normalized
 
 
 def normalize_genre_color(value: str) -> str:
@@ -308,6 +315,7 @@ def genre_data(genre: CaseGenre) -> dict[str, object]:
         "id": genre.id,
         "title": genre.title,
         "color_hex": genre.color_hex,
+        "sort_order": genre.sort_order,
         "created_at": genre.created_at,
         "updated_at": genre.updated_at,
         "version": genre.version,
@@ -417,6 +425,7 @@ def case_data(case: Case, session: DatabaseSession | None = None) -> dict[str, o
     open_task_count = 0
     overdue_task_count = 0
     next_task: dict[str, object] | None = None
+    next_calendar_event: dict[str, object] | None = None
     if session is not None:
         mail_count = session.scalar(
             select(func.count(func.distinct(GmailMessage.thread_id)))
@@ -432,6 +441,7 @@ def case_data(case: Case, session: DatabaseSession | None = None) -> dict[str, o
         )
         if open_tasks:
             next_task = case_task_data(open_tasks[0])
+        next_calendar_event = case_next_calendar_event_data(session, case.id)
     return {
         "id": case.id,
         "genre_id": case.genre_id,
@@ -453,10 +463,42 @@ def case_data(case: Case, session: DatabaseSession | None = None) -> dict[str, o
         "file_count": 0,
         "storage_directory_id": case_storage_directory_id(case.id),
         "next_task": next_task,
-        "next_calendar_event": None,
+        "next_calendar_event": next_calendar_event,
         "created_at": case.created_at,
         "updated_at": case.updated_at,
         "version": case.version,
+    }
+
+
+def case_next_calendar_event_data(
+    session: DatabaseSession,
+    case_id: str,
+) -> dict[str, object] | None:
+    now = jst_iso()
+    event = session.scalar(
+        select(CalendarEvent)
+        .join(CalendarEventLink, CalendarEventLink.calendar_event_id == CalendarEvent.id)
+        .where(CalendarEventLink.linked_type == "case")
+        .where(CalendarEventLink.linked_id == case_id)
+        .where(CalendarEvent.sync_status != "missing_from_google")
+        .where(CalendarEvent.sync_status != "cancelled")
+        .where(
+            (CalendarEvent.google_status.is_(None))
+            | (CalendarEvent.google_status != "cancelled"),
+        )
+        .where(CalendarEvent.end_at > now)
+        .order_by(CalendarEvent.start_at.asc(), CalendarEvent.summary.asc())
+        .limit(1)
+    )
+    if event is None:
+        return None
+    return {
+        "id": event.id,
+        "title": event.summary,
+        "starts_at": event.start_at,
+        "ends_at": event.end_at,
+        "all_day": bool(event.all_day),
+        "location": event.location,
     }
 
 
@@ -1228,7 +1270,11 @@ def list_case_genres(
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
     genres = session.scalars(
-        select(CaseGenre).order_by(CaseGenre.title.asc(), CaseGenre.created_at.asc())
+        select(CaseGenre).order_by(
+            CaseGenre.sort_order.asc(),
+            CaseGenre.title.asc(),
+            CaseGenre.created_at.asc(),
+        )
     ).all()
     return {"ok": True, "data": {"items": [genre_data(genre) for genre in genres]}}
 
@@ -1246,10 +1292,14 @@ def create_case_genre(
         raise json_error(409, "CONFLICT", "Case genre already exists.")
 
     now = jst_iso()
+    max_sort_order = session.scalar(
+        select(CaseGenre.sort_order).order_by(CaseGenre.sort_order.desc())
+    )
     genre = CaseGenre(
         id=new_id("case_genre"),
         title=title,
         color_hex=normalize_genre_color(payload.color_hex),
+        sort_order=(max_sort_order if max_sort_order is not None else -1) + 1,
         created_at=now,
         updated_at=now,
         version=1,
@@ -1257,6 +1307,45 @@ def create_case_genre(
     session.add(genre)
     session.commit()
     return {"ok": True, "data": {"genre": genre_data(genre)}}
+
+
+@router.patch("/genres/reorder")
+def reorder_case_genres(
+    payload: CaseGenreReorder,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    genres = session.scalars(select(CaseGenre)).all()
+    genres_by_id = {genre.id: genre for genre in genres}
+    seen: set[str] = set()
+    ordered_ids: list[str] = []
+    for genre_id in payload.genre_ids:
+        if genre_id in seen:
+            continue
+        if genre_id not in genres_by_id:
+            raise json_error(404, "NOT_FOUND", "Case genre not found.")
+        seen.add(genre_id)
+        ordered_ids.append(genre_id)
+    ordered_ids.extend(
+        genre.id
+        for genre in sorted(
+            genres,
+            key=lambda item: (item.sort_order, item.title.casefold(), item.created_at),
+        )
+        if genre.id not in seen
+    )
+
+    now = jst_iso()
+    for index, genre_id in enumerate(ordered_ids):
+        genre = genres_by_id[genre_id]
+        genre.sort_order = index
+        genre.updated_at = now
+        genre.version += 1
+    session.commit()
+    ordered_genres = sorted(
+        genres,
+        key=lambda item: (item.sort_order, item.title.casefold(), item.created_at),
+    )
+    return {"ok": True, "data": {"items": [genre_data(genre) for genre in ordered_genres]}}
 
 
 @router.patch("/genres/{genre_id}")
@@ -2142,6 +2231,11 @@ def update_case(
     if case is None:
         raise json_error(404, "NOT_FOUND", "Case not found.")
 
+    if payload.name is not None:
+        name = payload.name.strip()
+        if name == "":
+            raise json_error(422, "VALIDATION_ERROR", "Case name is required.")
+        case.name = name
     case.description = normalized_optional_text(payload.description)
     case.open_when_date = normalized_optional_date(
         payload.open_when_date

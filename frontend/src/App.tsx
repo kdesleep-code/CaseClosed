@@ -3,6 +3,9 @@ import type { FormEvent } from 'react'
 import { AuthApiError, login, readSession } from './authApi'
 import type { SessionData } from './authApi'
 import loginDoorTanuki from './assets/login-door-tanuki.png'
+import CalendarView from './CalendarView'
+import CalendarEventDetailView from './CalendarEventDetailView'
+import CalendarNewEventView from './CalendarNewEventView'
 import CaseView from './CaseView'
 import ComposeMailView from './ComposeMailView'
 import ContactsView from './ContactsView'
@@ -1261,6 +1264,53 @@ function App() {
           {pendingContactNoticeElement}
           {navigationError !== null && <p className="route-error">{navigationError}</p>}
           <TaskView />
+        </>
+      )
+    }
+    if (path === '/calendar/new') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <CalendarNewEventView />
+        </>
+      )
+    }
+    if (path.startsWith('/calendar/events/') && path.endsWith('/edit')) {
+      const eventId = path.slice('/calendar/events/'.length, -'/edit'.length)
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <CalendarEventDetailView eventId={decodeURIComponent(eventId)} mode="edit" />
+        </>
+      )
+    }
+    if (path.startsWith('/calendar/events/') && path.endsWith('/attach-mail')) {
+      const eventId = path.slice('/calendar/events/'.length, -'/attach-mail'.length)
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <CalendarEventDetailView eventId={decodeURIComponent(eventId)} mode="attach-mail" />
+        </>
+      )
+    }
+    if (path.startsWith('/calendar/events/')) {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <CalendarEventDetailView eventId={decodeURIComponent(path.slice('/calendar/events/'.length))} />
+        </>
+      )
+    }
+    if (path === '/calendar') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <CalendarView />
         </>
       )
     }

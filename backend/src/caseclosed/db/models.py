@@ -52,6 +52,7 @@ class CaseGenre(Base):
     id: Mapped[str] = mapped_column(Text, primary_key=True)
     title: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     color_hex: Mapped[str] = mapped_column(Text, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
@@ -96,6 +97,74 @@ class CaseEvent(Base):
     occurred_at: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     metadata_json: Mapped[str | None] = mapped_column(Text)
+
+
+class CalendarEvent(Base):
+    __tablename__ = "calendar_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "source",
+            "external_calendar_id",
+            "external_event_id",
+            name="uq_calendar_events_external_event",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    source: Mapped[str] = mapped_column(Text, nullable=False, default="google")
+    external_calendar_id: Mapped[str | None] = mapped_column(Text)
+    external_event_id: Mapped[str | None] = mapped_column(Text)
+    external_etag: Mapped[str | None] = mapped_column(Text)
+    external_ical_uid: Mapped[str | None] = mapped_column(Text)
+    external_html_link: Mapped[str | None] = mapped_column(Text)
+    external_updated_at: Mapped[str | None] = mapped_column(Text)
+    google_status: Mapped[str | None] = mapped_column(Text)
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    description: Mapped[str | None] = mapped_column(Text)
+    location: Mapped[str | None] = mapped_column(Text)
+    start_at: Mapped[str] = mapped_column(Text, nullable=False)
+    end_at: Mapped[str] = mapped_column(Text, nullable=False)
+    all_day: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    time_zone: Mapped[str | None] = mapped_column(Text)
+    recurring_event_id: Mapped[str | None] = mapped_column(Text)
+    attendance_requirement: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="unknown",
+    )
+    tags_json: Mapped[str | None] = mapped_column(Text)
+    metadata_json: Mapped[str | None] = mapped_column(Text)
+    sync_status: Mapped[str] = mapped_column(Text, nullable=False, default="synced")
+    last_synced_at: Mapped[str | None] = mapped_column(Text)
+    local_note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class CalendarEventLink(Base):
+    __tablename__ = "calendar_event_links"
+    __table_args__ = (
+        UniqueConstraint(
+            "calendar_event_id",
+            "linked_type",
+            "linked_id",
+            "role",
+            name="uq_calendar_event_links_target",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    calendar_event_id: Mapped[str] = mapped_column(
+        ForeignKey("calendar_events.id"),
+        nullable=False,
+    )
+    linked_type: Mapped[str] = mapped_column(Text, nullable=False)
+    linked_id: Mapped[str] = mapped_column(Text, nullable=False)
+    role: Mapped[str] = mapped_column(Text, nullable=False, default="related")
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
 
 class CaseContextVersion(Base):

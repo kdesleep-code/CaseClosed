@@ -99,11 +99,11 @@ function sortTasks(tasks: TaskItem[], sortMode: TaskSortMode) {
   })
 }
 
-function TaskCard({ task }: { task: TaskItem }) {
+function TaskCard({ task, returnTo }: { task: TaskItem; returnTo: string }) {
   return (
     <AppLink
       className={`task-row task-row-${task.status}`}
-      href={`/tasks/${encodeURIComponent(task.id)}`}
+      href={`/tasks/${encodeURIComponent(task.id)}?return_to=${encodeURIComponent(returnTo)}`}
     >
       <div className="task-row-main">
         <div className="task-row-heading">
@@ -134,14 +134,29 @@ function TaskCard({ task }: { task: TaskItem }) {
 export default function TaskView() {
   const [tasks, setTasks] = useState<TaskItem[]>([])
   const [cases, setCases] = useState<CaseItem[]>([])
-  const [searchQuery, setSearchQuery] = useState('')
+  const [searchQuery, setSearchQuery] = useState(() => {
+    const params = new URLSearchParams(window.location.search)
+    return params.get('q') ?? ''
+  })
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(() => {
     const params = new URLSearchParams(window.location.search)
     const caseId = params.get('case_id')
     return caseId === null || caseId.trim() === '' ? null : caseId
   })
-  const [sortMode, setSortMode] = useState<TaskSortMode>('priority')
-  const [currentTab, setCurrentTab] = useState<TaskTab>('inbox')
+  const [sortMode, setSortMode] = useState<TaskSortMode>(() => {
+    const params = new URLSearchParams(window.location.search)
+    const value = params.get('sort')
+    return value === 'due_asc' || value === 'due_desc' || value === 'updated_desc'
+      ? value
+      : 'priority'
+  })
+  const [currentTab, setCurrentTab] = useState<TaskTab>(() => {
+    const params = new URLSearchParams(window.location.search)
+    const value = params.get('tab')
+    return value === 'done' || value === 'not_started' || value === 'archived'
+      ? value
+      : 'inbox'
+  })
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -219,6 +234,15 @@ export default function TaskView() {
       task.due_at !== null &&
       new Date(task.due_at).getTime() < Date.now(),
   ).length
+  const returnTo = useMemo(() => {
+    const params = new URLSearchParams()
+    if (currentTab !== 'inbox') params.set('tab', currentTab)
+    if (selectedCaseId !== null) params.set('case_id', selectedCaseId)
+    if (searchQuery.trim() !== '') params.set('q', searchQuery.trim())
+    if (sortMode !== 'priority') params.set('sort', sortMode)
+    const query = params.toString()
+    return query === '' ? '/tasks' : `/tasks?${query}`
+  }, [currentTab, searchQuery, selectedCaseId, sortMode])
 
   return (
     <main className="app-shell">
@@ -329,7 +353,7 @@ export default function TaskView() {
               ) : (
                 <div className="task-list">
                   {visibleTasks.map((task) => (
-                    <TaskCard key={task.id} task={task} />
+                    <TaskCard key={task.id} returnTo={returnTo} task={task} />
                   ))}
                 </div>
               )}

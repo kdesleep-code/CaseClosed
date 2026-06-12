@@ -12,7 +12,10 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("cases", sa.Column("tags_json", sa.Text(), nullable=True))
+    bind = op.get_bind()
+    columns = {column["name"] for column in sa.inspect(bind).get_columns("cases")}
+    if "tags_json" not in columns:
+        op.add_column("cases", sa.Column("tags_json", sa.Text(), nullable=True))
 
 
 def downgrade() -> None:

@@ -7,12 +7,12 @@ import type { Contact } from './phase3Api'
 import {
   caseRoleSelectorSuggestions,
   describeContactSelectorList,
-  replaceLastContactSelector,
-  resolvedRecipientAddressTextWithCases,
   resolveRecipientAddressList,
 } from './contactSelectors'
 import type { ContactSelectorCaseContext } from './contactSelectors'
 import { listCases, listCaseStakeholders } from './phase7Api'
+import SuggestInput from './SuggestInput'
+import type { SuggestInputOption } from './SuggestInput'
 import {
   deleteMailDraft,
   generateMailDraft,
@@ -393,17 +393,6 @@ export default function ComposeMailView() {
     setForm((current) => ({ ...current, [field]: value }))
   }
 
-  function resolveRecipientField(field: 'to' | 'cc' | 'bcc') {
-    setForm((current) => ({
-      ...current,
-      [field]: resolvedRecipientAddressTextWithCases(
-        current[field],
-        contacts,
-        caseContexts,
-      ),
-    }))
-  }
-
   function resolvedAddressLists() {
     return {
       to: resolveRecipientAddressList(form.to, contacts, caseContexts),
@@ -445,27 +434,24 @@ export default function ComposeMailView() {
 
   function caseRecipientSuggestions(field: 'to' | 'cc' | 'bcc') {
     const suggestions = caseRoleSelectorSuggestions(form[field], caseContexts)
-    if (suggestions.length === 0) {
-      return null
-    }
-    return (
-      <div className="compose-recipient-case-suggestions">
-        {suggestions.map((suggestion) => (
-          <button
-            key={suggestion.value}
-            onClick={() =>
-              setForm((current) => ({
-                ...current,
-                [field]: replaceLastContactSelector(current[field], suggestion.value),
-              }))
-            }
-            type="button"
-          >
-            {suggestion.label}
-          </button>
-        ))}
-      </div>
-    )
+    return suggestions.map<SuggestInputOption>((suggestion) => ({
+      key: suggestion.value,
+      value: suggestion.value,
+      label: suggestion.label,
+      badgeLabel: suggestion.label,
+    }))
+  }
+
+  function recipientSuggestOptions(field: 'to' | 'cc' | 'bcc'): SuggestInputOption[] {
+    return [
+      ...recipientSuggestions.map((suggestion) => ({
+        key: suggestion.key,
+        value: suggestion.value,
+        label: suggestion.label,
+        badgeLabel: suggestion.value,
+      })),
+      ...caseRecipientSuggestions(field),
+    ]
   }
 
   function composedBodyText() {
@@ -864,27 +850,16 @@ export default function ComposeMailView() {
         <div className="compose-layout">
           <section className="mail-panel compose-main-panel">
             <form className="compose-form" onSubmit={handleSubmit}>
-              <datalist id="compose-recipient-suggestions">
-                {recipientSuggestions.map((suggestion) => (
-                  <option
-                    key={suggestion.key}
-                    label={suggestion.label}
-                    value={suggestion.value}
-                  />
-                ))}
-              </datalist>
               <div className="compose-to-row">
                 <label className="compose-field compose-field-line">
                   <span>{t('mail.compose.to')}</span>
-                  <input
+                  <SuggestInput
+                    ariaLabel={t('mail.compose.to')}
                     autoComplete="email"
-                    list="compose-recipient-suggestions"
-                    onBlur={() => resolveRecipientField('to')}
-                    onChange={(event) => updateField('to', event.target.value)}
-                    type="text"
+                    onChange={(value) => updateField('to', value)}
+                    options={recipientSuggestOptions('to')}
                     value={form.to}
                   />
-                  {caseRecipientSuggestions('to')}
                   {recipientPreview(form.to)}
                 </label>
 
@@ -903,28 +878,24 @@ export default function ComposeMailView() {
                 <div className="compose-optional-recipients">
                   <label className="compose-field compose-field-line">
                     <span>{t('mail.compose.cc')}</span>
-                    <input
+                    <SuggestInput
+                      ariaLabel={t('mail.compose.cc')}
                       autoComplete="email"
-                      list="compose-recipient-suggestions"
-                      onBlur={() => resolveRecipientField('cc')}
-                      onChange={(event) => updateField('cc', event.target.value)}
-                      type="text"
+                      onChange={(value) => updateField('cc', value)}
+                      options={recipientSuggestOptions('cc')}
                       value={form.cc}
                     />
-                    {caseRecipientSuggestions('cc')}
                     {recipientPreview(form.cc)}
                   </label>
                   <label className="compose-field compose-field-line">
                     <span>{t('mail.compose.bcc')}</span>
-                    <input
+                    <SuggestInput
+                      ariaLabel={t('mail.compose.bcc')}
                       autoComplete="email"
-                      list="compose-recipient-suggestions"
-                      onBlur={() => resolveRecipientField('bcc')}
-                      onChange={(event) => updateField('bcc', event.target.value)}
-                      type="text"
+                      onChange={(value) => updateField('bcc', value)}
+                      options={recipientSuggestOptions('bcc')}
                       value={form.bcc}
                     />
-                    {caseRecipientSuggestions('bcc')}
                     {recipientPreview(form.bcc)}
                   </label>
                 </div>

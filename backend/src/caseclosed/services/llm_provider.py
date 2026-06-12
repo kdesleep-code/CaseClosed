@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 import json
 from pathlib import Path
 import re
@@ -324,6 +325,24 @@ def build_task_prefill_provider() -> LlmProvider:
     )
 
 
+def build_calendar_event_prefill_provider() -> LlmProvider:
+    profile = load_llm_model_profile(FUNCTION_TYPE_CALENDAR_EVENT_PREFILL_GENERATION)
+    if profile is None or profile.provider == "mock":
+        return MockCalendarEventPrefillProvider()
+
+    if profile.provider != "openai":
+        raise OpenAIProviderError(
+            f"Unsupported provider for {FUNCTION_TYPE_CALENDAR_EVENT_PREFILL_GENERATION}: "
+            f"{profile.provider}"
+        )
+
+    return OpenAICalendarEventPrefillProvider(
+        api_key_env=profile.api_key_env,
+        model_name=profile.model,
+        timeout_seconds=profile.timeout_seconds,
+    )
+
+
 def build_case_prefill_provider() -> LlmProvider:
     profile = load_llm_model_profile(FUNCTION_TYPE_CASE_PREFILL_GENERATION)
     if profile is None or profile.provider == "mock":
@@ -352,6 +371,7 @@ FUNCTION_TYPE_CONTACT_AI_MEMO_UPDATE = "contact_ai_memo_update"
 FUNCTION_TYPE_REPLY_DRAFT_GENERATION = "reply_draft_generation"
 FUNCTION_TYPE_NEW_MAIL_DRAFT_GENERATION = "new_mail_draft_generation"
 FUNCTION_TYPE_TASK_PREFILL_GENERATION = "mail_task_suggestion"
+FUNCTION_TYPE_CALENDAR_EVENT_PREFILL_GENERATION = "calendar_candidate_extraction"
 
 
 def load_llm_model_profile(function_type: str) -> LlmModelProfile | None:
@@ -488,7 +508,7 @@ LLM_FUNCTION_TYPES = [
     "reply_draft_generation",
     "new_mail_draft_generation",
     "mail_task_suggestion",
-    "calendar_candidate_extraction",
+    FUNCTION_TYPE_CALENDAR_EVENT_PREFILL_GENERATION,
     "preparation_task_suggestion",
 ]
 
@@ -1016,6 +1036,45 @@ class MockTaskPrefillProvider:
         )
 
 
+class MockCalendarEventPrefillProvider:
+    provider_name = "mock"
+    model_name = "deterministic-calendar-event-prefill-v1"
+
+    def complete_json(
+        self,
+        *,
+        function_type: str,
+        input_payload: dict[str, object],
+    ) -> LlmProviderResponse:
+        if function_type != FUNCTION_TYPE_CALENDAR_EVENT_PREFILL_GENERATION:
+            raise ValueError(f"Unsupported mock function type: {function_type}")
+
+        prompt = compact_text(str(input_payload.get("prompt") or ""), 120)
+        today = date.today()
+        start_at = f"{today.isoformat()}T10:00"
+        end_at = f"{today.isoformat()}T11:00"
+        title = prompt or "メール由来の予定"
+        output = {
+            "schema_version": "1.0",
+            "summary": title[:120],
+            "description": prompt or "メール本文をもとに作成した予定候補です。",
+            "location": None,
+            "start_at": start_at,
+            "end_at": end_at,
+            "time_zone": "Asia/Tokyo",
+            "reasoning_summary": "Mock calendar event prefill generated from mail context.",
+            "warnings": [],
+        }
+        return LlmProviderResponse(
+            output=output,
+            output_preview=str(output["summary"]),
+            prompt_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+            estimated_cost=0.0,
+        )
+
+
 class MockCasePrefillProvider:
     provider_name = "mock"
     model_name = "deterministic-case-prefill-v1"
@@ -1360,6 +1419,46 @@ class OpenAITaskPrefillProvider:
         )
 
 
+class OpenAICalendarEventPrefillProvider:
+    provider_name = "openai"
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        api_key_env: str | None = None,
+        model_name: str,
+        timeout_seconds: float,
+    ) -> None:
+        self.api_key = api_key or read_api_key(api_key_env)
+        if self.api_key is None or self.api_key.strip() == "":
+            raise OpenAIProviderError("OpenAI API key is not configured.")
+        self.model_name = model_name
+        self.timeout_seconds = timeout_seconds
+
+    def complete_json(
+        self,
+        *,
+        function_type: str,
+        input_payload: dict[str, object],
+    ) -> LlmProviderResponse:
+        if function_type != FUNCTION_TYPE_CALENDAR_EVENT_PREFILL_GENERATION:
+            raise ValueError(f"Unsupported OpenAI function type: {function_type}")
+
+        payload = {
+            "model": self.model_name,
+            "instructions": calendar_event_prefill_instructions(),
+            "input": calendar_event_prefill_input_text(input_payload),
+            "max_output_tokens": 800,
+            "text": {"format": calendar_event_prefill_response_format()},
+        }
+        return openai_structured_response(
+            payload,
+            api_key=self.api_key,
+            timeout_seconds=self.timeout_seconds,
+        )
+
+
 class OpenAICasePrefillProvider:
     provider_name = "openai"
 
@@ -1637,6 +1736,40 @@ def task_prefill_response_format() -> dict[str, object]:
                 "priority",
                 "due_at",
                 "estimate_minutes",
+                "reasoning_summary",
+                "warnings",
+            ],
+        },
+    }
+
+
+def calendar_event_prefill_response_format() -> dict[str, object]:
+    return {
+        "type": "json_schema",
+        "name": "calendar_event_prefill_generation",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "schema_version": {"type": "string"},
+                "summary": {"type": "string"},
+                "description": {"type": "string"},
+                "location": {"type": ["string", "null"]},
+                "start_at": {"type": ["string", "null"]},
+                "end_at": {"type": ["string", "null"]},
+                "time_zone": {"type": "string"},
+                "reasoning_summary": {"type": "string"},
+                "warnings": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": [
+                "schema_version",
+                "summary",
+                "description",
+                "location",
+                "start_at",
+                "end_at",
+                "time_zone",
                 "reasoning_summary",
                 "warnings",
             ],
@@ -1954,9 +2087,32 @@ def task_prefill_instructions() -> str:
         "Use the user's prompt and Case context to propose concise, directly editable "
         "Task fields. Do not invent external facts. Keep title short. Description should "
         "state what the task is about. Done when should describe the completion condition. "
+        "Always write all user-facing generated Task text in Japanese, regardless of "
+        "the language of the source mail, prompt, or Case context. This includes title, "
+        "description, done_when_text, summary, reasoning_summary, and warnings. "
+        "Keep JSON property names and enum values in the required schema language. "
         "Use priority high/middle/low. due_at must be YYYY-MM-DD when a clear due date is "
         "present; otherwise null. estimate_minutes must be a practical integer or null. "
         "Return only JSON matching the schema."
+    )
+
+
+def calendar_event_prefill_instructions() -> str:
+    return (
+        "You help a university faculty user draft a Google Calendar event from one "
+        "selected email in a work-support app. Return only JSON matching the schema. "
+        "Use the current/new message body as the primary source. Treat quoted reply "
+        "history only as context; do not create an event solely from quoted history. "
+        "Extract only a schedule that is clearly mentioned or strongly implied by the "
+        "selected mail. Do not invent participants, locations, URLs, or dates. "
+        "summary should be concise and useful on a weekly calendar. description should "
+        "summarize why this event exists and preserve relevant URLs or meeting details. "
+        "location should contain a room, venue, Zoom/Teams URL, or null. start_at and "
+        "end_at should be local ISO-like values such as YYYY-MM-DDTHH:MM when clear; "
+        "otherwise null. If only a start time is clear, choose a practical one-hour end "
+        "and add a warning. Use Asia/Tokyo unless the mail clearly specifies another "
+        "time zone. Write summary, description, reasoning_summary, and warnings in "
+        "Japanese while preserving proper nouns, URLs, titles, and identifiers."
     )
 
 
@@ -2154,6 +2310,29 @@ def task_prefill_input_text(input_payload: dict[str, object]) -> str:
             json.dumps(current_fields, ensure_ascii=False, indent=2),
             "",
             "Fill sensible Task fields. The app will only apply fields that are blank in the UI.",
+        ]
+    )
+
+
+def calendar_event_prefill_input_text(input_payload: dict[str, object]) -> str:
+    case_payload = input_payload.get("case")
+    case_data = case_payload if isinstance(case_payload, dict) else {}
+    return "\n".join(
+        [
+            f"User prompt: {input_payload.get('prompt') or ''}",
+            f"Current date: {input_payload.get('current_date') or ''}",
+            "",
+            "Related Case context:",
+            f"- Name: {case_data.get('name') or ''}",
+            f"- Overview: {case_data.get('description') or ''}",
+            f"- Open when: {case_data.get('open_when_date') or ''}",
+            f"- Closed when: {case_data.get('closed_when_text') or ''}",
+            "",
+            "Selected mail JSON:",
+            truncated_text(json_text(input_payload.get("mail") or {}), 30000),
+            "",
+            "Stored mail/thread summary JSON:",
+            truncated_text(json_text(input_payload.get("summaries") or {}), 10000),
         ]
     )
 

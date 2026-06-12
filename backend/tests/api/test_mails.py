@@ -506,6 +506,46 @@ def test_mail_attachment_download_caches_gmail_data(
     ]
 
 
+def test_scheduled_send_request_detail_reports_sent_attachments(client) -> None:
+    attachment_bytes = "送信添付".encode()
+    send_response = client.post(
+        f"{MAILS_URL}/send",
+        json={
+            "to_addresses": ["receiver@example.com"],
+            "subject": "Attachment scheduled mail",
+            "body_text": "Please see attached.",
+            "attachments": [
+                {
+                    "filename": "送信メモ.txt",
+                    "content_type": "text/plain",
+                    "data_base64": base64.b64encode(attachment_bytes).decode("ascii"),
+                    "size": len(attachment_bytes),
+                }
+            ],
+            "scheduled_at": "2099-05-25T09:00:00+09:00",
+        },
+    )
+    assert send_response.status_code == 200
+    send_request = send_response.json()["data"]
+    assert send_request["attachment_names"] == ["送信メモ.txt"]
+    assert send_request["attachments"][0]["filename"] == "送信メモ.txt"
+    assert send_request["attachments"][0]["source_type"] == "sent_attachment"
+
+    detail_response = client.get(f"{MAILS_URL}/{send_request['id']}")
+    assert detail_response.status_code == 200
+    detail = detail_response.json()["data"]
+    assert detail["message"]["has_attachments"] is True
+    assert detail["message"]["attachments"][0]["filename"] == "送信メモ.txt"
+    assert detail["attachments"] == detail["message"]["attachments"]
+
+    download_response = client.get(
+        f"{MAILS_URL}/send-requests/{send_request['id']}/attachments/0/download"
+    )
+    assert download_response.status_code == 200
+    assert download_response.content == attachment_bytes
+    assert "filename*=UTF-8''" in download_response.headers["content-disposition"]
+
+
 def test_move_cached_mail_attachment_to_storage_deletes_tmp_file(
     client,
     database_path,
@@ -734,6 +774,30 @@ def test_llm_block_filter_marks_matching_mail_and_worker_skips_llm(
     assert job_row[0] == "succeeded"
     assert json.loads(job_row[1])["reason"] == "llm_blocked"
     assert json.loads(job_row[1])["effective_importance"] == "pinned"
+
+
+def test_llm_blocked_mail_can_be_allowed_again(client) -> None:
+    message_id = create_known_sender_mail(
+        client,
+        subject="Temporary password note",
+        body_text="The temporary password was sent by mistake.",
+    )
+    block_response = client.post(
+        f"{MAILS_URL}/llm-block-filter",
+        json={"q": "temporary password", "reason": "May contain password."},
+    )
+    assert block_response.status_code == 200
+
+    allow_response = client.post(f"{MAILS_URL}/{message_id}/allow-llm")
+
+    assert allow_response.status_code == 200
+    detail = allow_response.json()["data"]
+    assert detail["auto_state"]["llm_blocked"] is False
+    assert detail["auto_state"]["llm_block_reason"] is None
+    assert detail["auto_state"]["llm_blocked_at"] is None
+    assert detail["auto_state"]["effective_importance"] == "unclassified"
+    assert detail["message"]["llm_blocked"] is False
+    assert detail["message"]["effective_importance"] == "unclassified"
 
 
 def test_llm_block_filter_applies_to_newly_ingested_mail_before_llm_job(
@@ -1429,7 +1493,20 @@ def test_gmail_send_job_builds_attachment_mime_part(
             "SELECT status FROM storage_objects WHERE id = ?",
             (draft_storage_object_id,),
         ).fetchone()
+        send_request_row = connection.execute(
+            "SELECT sent_message_id FROM mail_send_requests WHERE id = ?",
+            (send_request_id,),
+        ).fetchone()
     assert row == ("deleted",)
+    assert send_request_row[0] is not None
+
+    sent_detail_response = client.get(f"{MAILS_URL}/{send_request_row[0]}")
+    assert sent_detail_response.status_code == 200
+    sent_detail = sent_detail_response.json()["data"]
+    assert sent_detail["message"]["has_attachments"] is True
+    assert sent_detail["message"]["attachments"][0]["filename"] == "note.txt"
+    assert sent_detail["message"]["attachments"][0]["source_type"] == "sent_attachment"
+    assert sent_detail["attachments"] == sent_detail["message"]["attachments"]
 
 
 def test_scheduled_send_request_can_be_rescheduled_sent_now_and_canceled(

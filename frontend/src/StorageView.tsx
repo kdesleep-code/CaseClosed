@@ -49,6 +49,7 @@ import type { FileSummary, FileVersionDiff } from './phase3Api'
 import type { StorageObjectLinkedCase } from './phase3Api'
 import { isCaseOpenForSuggestion, listCases } from './phase7Api'
 import type { CaseItem } from './phase7Api'
+import SuggestInput from './SuggestInput'
 
 type StoragePreviewFile = {
   id: string
@@ -414,6 +415,7 @@ export function StorageObjectCard({
       onClick={() => onOpen(object)}
       onContextMenu={(event) => onContextMenu(event, object)}
       onDragStart={(event) => {
+        event.dataTransfer.clearData()
         event.dataTransfer.setData(storageObjectDragType, object.id)
         event.dataTransfer.setData('text/plain', object.id)
         event.dataTransfer.effectAllowed = 'copyMove'
@@ -430,7 +432,7 @@ export function StorageObjectCard({
         className={`storage-object-icon${hasCustomIcon ? ' storage-object-image-icon' : ''}`}
       >
         {hasCustomIcon ? (
-          <img alt="" src={customIconUrl} />
+          <img alt="" draggable={false} src={customIconUrl} />
         ) : (
           fileExtension(object.original_filename)
         )}
@@ -1107,19 +1109,20 @@ function StorageObjectDetailView({ storageObjectId }: { storageObjectId: string 
                   <div className="storage-linked-cases-editor">
                     <label>
                       <span>{t('storage.linkedCases.caseName')}</span>
-                      <input
-                        list={`linked-case-suggestions-${object.id}`}
-                        onChange={(event) => setLinkedCaseInput(event.target.value)}
+                      <SuggestInput
+                        ariaLabel={t('storage.linkedCases.caseName')}
+                        maxItems={1}
+                        onChange={setLinkedCaseInput}
+                        options={caseSuggestions.map((item) => ({
+                          key: item.id,
+                          value: item.name,
+                          label: item.name,
+                          badgeLabel: item.name,
+                        }))}
                         placeholder={t('storage.linkedCases.placeholder')}
-                        type="text"
                         value={linkedCaseInput}
                       />
                     </label>
-                    <datalist id={`linked-case-suggestions-${object.id}`}>
-                      {caseSuggestions.map((item) => (
-                        <option key={item.id} value={item.name} />
-                      ))}
-                    </datalist>
                     <button
                       className={`button-loading-dot${
                         linkedCasesBusy ? ' is-loading' : ''

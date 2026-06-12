@@ -800,6 +800,8 @@ def task_prompt_from_mail(
     return "\n".join(
         [
             "Create one practical Task from the selected source mail.",
+            "Write all generated Task fields in Japanese, even when the selected mail is written in English.",
+            "Use the source mail only as information; do not copy English wording into the Task unless it is a proper noun, title, identifier, URL, or quoted exact term.",
             "Use the current/new message body as the primary source.",
             "Treat quoted reply history only as context; do not create a task solely from quoted history.",
             "If the mail does not clearly request action, create a review/triage task instead of inventing a commitment.",

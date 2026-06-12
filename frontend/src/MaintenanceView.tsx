@@ -1503,6 +1503,22 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                             <dd>{t('maintenance.debug.googleGmailMailLoadOff')}</dd>
                           </div>
                           <div>
+                            <dt>{t('maintenance.debug.googleCalendarRead')}</dt>
+                            <dd>
+                              {googleGmailStatus.calendar_read_enabled
+                                ? t('common.enabled')
+                                : t('common.disabled')}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt>{t('maintenance.debug.googleCalendarWrite')}</dt>
+                            <dd>
+                              {googleGmailStatus.calendar_write_enabled
+                                ? t('common.enabled')
+                                : t('common.disabled')}
+                            </dd>
+                          </div>
+                          <div>
                             <dt>{t('maintenance.debug.googleGmailConnectedAt')}</dt>
                             <dd>{googleGmailStatus.connected_at ?? t('common.none')}</dd>
                           </div>

@@ -30,11 +30,11 @@ import {
 import type { MailListItem } from './phase4Api'
 import {
   caseRoleSelectorSuggestions,
-  describeContactSelectorList,
-  replaceLastContactSelector,
   resolveContactSelectorListWithCases,
 } from './contactSelectors'
 import type { ContactSelectorCaseContext } from './contactSelectors'
+import SuggestInput from './SuggestInput'
+import type { SuggestInputOption } from './SuggestInput'
 import {
   archiveCase,
   completeCase,
@@ -57,6 +57,7 @@ import {
   listCaseGenres,
   listCases,
   prefillCase,
+  reorderCaseGenres,
   regenerateCaseCurrentSituation,
   reorderCaseToolLinks,
   reorderCaseStakeholders,
@@ -251,11 +252,47 @@ function randomGenreColor() {
     .padStart(6, '0')}`
 }
 
+const CASE_TITLE_MAX_LENGTH = 42
+
 function genreColor(item: CaseItem, genres: CaseGenre[]) {
   return genres.find((genre) => genre.id === item.genre_id)?.color_hex ?? '#ffffff'
 }
 
-function CaseRow({ genres, item }: { genres: CaseGenre[]; item: CaseItem }) {
+function visibleCaseTags(
+  tags: string[],
+  tagFrequency: Map<string, number>,
+  selectedTag: string | null,
+) {
+  if (tags.length <= 3) return { visible: tags, hiddenCount: 0 }
+  const normalizedSelectedTag = selectedTag?.toLocaleLowerCase() ?? null
+  const indexedTags = tags.map((tag, index) => ({ tag, index, key: tag.toLocaleLowerCase() }))
+  const selected = normalizedSelectedTag === null
+    ? []
+    : indexedTags.filter((item) => item.key === normalizedSelectedTag)
+  const selectedKeys = new Set(selected.map((item) => item.key))
+  const others = indexedTags
+    .filter((item) => !selectedKeys.has(item.key))
+    .toSorted((first, second) => {
+      const frequency = (tagFrequency.get(second.key) ?? 0) - (tagFrequency.get(first.key) ?? 0)
+      if (frequency !== 0) return frequency
+      return first.index - second.index
+    })
+  const visible = [...selected, ...others].slice(0, 3).map((item) => item.tag)
+  return { visible, hiddenCount: tags.length - visible.length }
+}
+
+function CaseRow({
+  genres,
+  item,
+  selectedTag,
+  tagFrequency,
+}: {
+  genres: CaseGenre[]
+  item: CaseItem
+  selectedTag: string | null
+  tagFrequency: Map<string, number>
+}) {
+  const tagDisplay = visibleCaseTags(item.tags, tagFrequency, selectedTag)
   return (
     <AppLink
       className="case-row"
@@ -283,7 +320,12 @@ function CaseRow({ genres, item }: { genres: CaseGenre[]; item: CaseItem }) {
         {item.tags.length === 0 ? (
           <span>{t('cases.tags.empty')}</span>
         ) : (
-          item.tags.map((tag) => <span key={tag}>{tag}</span>)
+          <>
+            {tagDisplay.visible.map((tag) => <span key={tag}>{tag}</span>)}
+            {tagDisplay.hiddenCount > 0 && (
+              <span className="case-row-tags-more">{t('cases.tags.more', { count: String(tagDisplay.hiddenCount) })}</span>
+            )}
+          </>
         )}
       </div>
     </AppLink>
@@ -298,6 +340,8 @@ export function CaseStorageWindow({
   heading = t('storage.objects'),
   body = t('cases.storage.body'),
   deleteMode = 'case',
+  collapsible = false,
+  defaultCollapsed = false,
 }: {
   caseId: string
   rootDirectoryId: string
@@ -306,8 +350,11 @@ export function CaseStorageWindow({
   heading?: string
   body?: string
   deleteMode?: 'case' | 'physical'
+  collapsible?: boolean
+  defaultCollapsed?: boolean
 }) {
   const [currentDirectoryId, setCurrentDirectoryId] = useState(rootDirectoryId)
+  const [isCollapsed, setIsCollapsed] = useState(defaultCollapsed)
   const [objects, setObjects] = useState<StorageObject[]>([])
   const [directories, setDirectories] = useState<StorageDirectory[]>([])
   const [breadcrumbs, setBreadcrumbs] = useState<StorageDirectory[]>([])
@@ -400,6 +447,14 @@ export function CaseStorageWindow({
 
   async function handleMoveStorageObject(objectId: string, directoryId: string) {
     if (objectId === '') return
+    const draggedObject = objects.find((object) => object.id === objectId)
+    if (
+      draggedObject !== undefined &&
+      (draggedObject.physical_directory_id ?? draggedObject.directory_id ?? null) === directoryId
+    ) {
+      setSelectedObjectId(objectId)
+      return
+    }
     setBusy(true)
     setError(null)
     setNotice(null)
@@ -422,23 +477,29 @@ export function CaseStorageWindow({
     )
   }
 
+  function isStorageObjectDrag(event: DragEvent<HTMLElement>) {
+    return Array.from(event.dataTransfer.types).includes(storageObjectDragType)
+  }
+
   function handleDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault()
     setIsDragOver(false)
-    if (event.dataTransfer.files.length > 0) {
-      void uploadFile(event.dataTransfer.files?.[0] ?? null)
-      return
-    }
     const objectId = objectIdFromDragEvent(event)
     if (objectId !== '') {
       void handleMoveStorageObject(objectId, currentDirectoryId)
+      return
+    }
+    if (event.dataTransfer.files.length > 0) {
+      void uploadFile(event.dataTransfer.files?.[0] ?? null)
     }
   }
 
   function handleDragOver(event: DragEvent<HTMLDivElement>) {
     event.preventDefault()
     event.dataTransfer.dropEffect =
-      event.dataTransfer.types.includes('Files') ? 'copy' : 'move'
+      isStorageObjectDrag(event)
+        ? 'move'
+        : event.dataTransfer.types.includes('Files') ? 'copy' : 'none'
     setIsDragOver(true)
   }
 
@@ -494,7 +555,7 @@ export function CaseStorageWindow({
   }
 
   async function handleDelete(object: StorageObject) {
-    if (deleteMode === 'physical') {
+    if (deleteMode === 'physical' || object.display_source !== 'link') {
       if (
         !window.confirm(
           t('storage.delete.confirm', { name: object.original_filename ?? object.id }),
@@ -694,123 +755,147 @@ export function CaseStorageWindow({
   const visibleBreadcrumbs = rootIndex >= 0 ? breadcrumbs.slice(rootIndex + 1) : breadcrumbs
 
   return (
-    <section className="case-storage-window">
+    <section className={`case-storage-window${isCollapsed ? ' is-collapsed' : ''}`}>
+      {collapsible && (
+        <div className="case-storage-window-header">
+          <div>
+            <h2>{heading}</h2>
+            <p>{body}</p>
+          </div>
+          <button
+            aria-expanded={!isCollapsed}
+            onClick={() => {
+              setContextMenu(null)
+              setIsCollapsed((current) => !current)
+            }}
+            type="button"
+          >
+            {isCollapsed ? t('common.expand') : t('common.collapse')}
+          </button>
+        </div>
+      )}
       {(error !== null || notice !== null) && (
         <div className="mail-feedback case-storage-feedback">
           {error !== null && <p role="alert">{error}</p>}
           {notice !== null && <p>{notice}</p>}
         </div>
       )}
-      <nav aria-label={t('storage.directory.breadcrumb')} className="storage-breadcrumb case-storage-breadcrumb">
-        <button
-          onClick={() => setCurrentDirectoryId(rootDirectoryId)}
-          onDragOver={handleDirectoryDragOver}
-          onDrop={(event) => handleDirectoryDrop(event, rootDirectoryId)}
-          type="button"
-        >
-          {rootLabel}
-        </button>
-        {visibleBreadcrumbs.map((directory) => (
-          <button
-            key={directory.id}
-            onClick={() => handleOpenDirectory(directory)}
-            onDragOver={handleDirectoryDragOver}
-            onDrop={(event) => handleDirectoryDrop(event, directory.id)}
-            type="button"
-          >
-            {directory.name}
-          </button>
-        ))}
-      </nav>
-      <div
-        className={`case-storage-drop-zone storage-drop-zone button-loading-dot${
-          busy ? ' is-loading' : ''
-        }${isDragOver ? ' is-drag-over' : ''}`}
-        onContextMenu={handleStoragePanelContextMenu}
-        onDragLeave={handleDragLeave}
-        onDragOver={handleDragOver}
-        onDrop={handleDrop}
-      >
-        <div className="section-heading case-storage-drop-heading">
-          <div>
-            <h2>{heading}</h2>
-          </div>
-          <p>{body}</p>
-        </div>
-        <div className="storage-object-grid">
-          {directories.map((directory) => (
-            <StorageDirectoryCard
-              directory={directory}
-              key={directory.id}
-              onContextMenu={handleStorageDirectoryContextMenu}
-              onDropObject={(objectId, directoryId) => {
-                if (directoryId !== null) void handleMoveStorageObject(objectId, directoryId)
-              }}
-              onOpen={handleOpenDirectory}
-            />
-          ))}
-          {objects.map((object) => (
-            <StorageObjectCard
-              busy={
-                downloadBusyId === object.id ||
-                llmBusyId === object.id ||
-                deleteBusyId === object.id
-              }
-              key={object.id}
-              object={object}
-              onContextMenu={handleStorageObjectContextMenu}
-              onOpen={handleOpenStorageObject}
-              selected={selectedObjectId === object.id}
-            />
-          ))}
-          {objects.length === 0 && directories.length === 0 && (
-            <p>{isLoading ? t('storage.loading') : t('storage.noObjects')}</p>
-          )}
-        </div>
-        {contextMenu !== null && (
-          <div
-            aria-label={t('storage.context.menuLabel')}
-            className="storage-context-menu"
-            onClick={(event) => event.stopPropagation()}
-            role="menu"
-            style={{ left: contextMenu.x, top: contextMenu.y }}
-          >
-            {contextMenu.object === null && contextMenu.directory === null && (
-              <button onClick={handleContextCreateDirectory} role="menuitem" type="button">
-                {t('storage.context.newDirectory')}
+      {!isCollapsed && (
+        <>
+          <nav aria-label={t('storage.directory.breadcrumb')} className="storage-breadcrumb case-storage-breadcrumb">
+            <button
+              onClick={() => setCurrentDirectoryId(rootDirectoryId)}
+              onDragOver={handleDirectoryDragOver}
+              onDrop={(event) => handleDirectoryDrop(event, rootDirectoryId)}
+              type="button"
+            >
+              {rootLabel}
+            </button>
+            {visibleBreadcrumbs.map((directory) => (
+              <button
+                key={directory.id}
+                onClick={() => handleOpenDirectory(directory)}
+                onDragOver={handleDirectoryDragOver}
+                onDrop={(event) => handleDirectoryDrop(event, directory.id)}
+                type="button"
+              >
+                {directory.name}
               </button>
-            )}
-            {contextMenu.directory !== null &&
-              contextMenu.directory.directory_kind !== 'case' &&
-              contextMenu.directory.case_id === null && (
-                <button onClick={handleContextDeleteDirectory} role="menuitem" type="button">
-                  <ActionIconLabel
-                    iconUrl={trashIconUrl}
-                    label={t('storage.context.deleteDirectory')}
-                  />
-                </button>
+            ))}
+          </nav>
+          <div
+            className={`case-storage-drop-zone storage-drop-zone button-loading-dot${
+              busy ? ' is-loading' : ''
+            }${isDragOver ? ' is-drag-over' : ''}`}
+            onContextMenu={handleStoragePanelContextMenu}
+            onDragLeave={handleDragLeave}
+            onDragOver={handleDragOver}
+            onDrop={handleDrop}
+          >
+            <div className="section-heading case-storage-drop-heading">
+              {!collapsible && (
+                <div>
+                  <h2>{heading}</h2>
+                </div>
               )}
-            {contextMenu.object !== null && (
-              <>
-                <button onClick={handleContextDownload} role="menuitem" type="button">
-                  <ActionIconLabel
-                    iconUrl={downloadIconUrl}
-                    label={t('storage.context.download')}
-                  />
-                </button>
-                <button onClick={handleContextLlmInputToggle} role="menuitem" type="button">
-                  {contextMenu.object.llm_input_allowed
-                    ? t('storage.llmInput.disallow')
-                    : t('storage.llmInput.allow')}
-                </button>
-                <button onClick={handleContextDelete} role="menuitem" type="button">
-                  <ActionIconLabel iconUrl={trashIconUrl} label={t('storage.context.delete')} />
-                </button>
-              </>
+              <p>{body}</p>
+            </div>
+            <div className="storage-object-grid">
+              {directories.map((directory) => (
+                <StorageDirectoryCard
+                  directory={directory}
+                  key={directory.id}
+                  onContextMenu={handleStorageDirectoryContextMenu}
+                  onDropObject={(objectId, directoryId) => {
+                    if (directoryId !== null) void handleMoveStorageObject(objectId, directoryId)
+                  }}
+                  onOpen={handleOpenDirectory}
+                />
+              ))}
+              {objects.map((object) => (
+                <StorageObjectCard
+                  busy={
+                    downloadBusyId === object.id ||
+                    llmBusyId === object.id ||
+                    deleteBusyId === object.id
+                  }
+                  key={object.id}
+                  object={object}
+                  onContextMenu={handleStorageObjectContextMenu}
+                  onOpen={handleOpenStorageObject}
+                  selected={selectedObjectId === object.id}
+                />
+              ))}
+              {objects.length === 0 && directories.length === 0 && (
+                <p>{isLoading ? t('storage.loading') : t('storage.noObjects')}</p>
+              )}
+            </div>
+            {contextMenu !== null && (
+              <div
+                aria-label={t('storage.context.menuLabel')}
+                className="storage-context-menu"
+                onClick={(event) => event.stopPropagation()}
+                role="menu"
+                style={{ left: contextMenu.x, top: contextMenu.y }}
+              >
+                {contextMenu.object === null && contextMenu.directory === null && (
+                  <button onClick={handleContextCreateDirectory} role="menuitem" type="button">
+                    {t('storage.context.newDirectory')}
+                  </button>
+                )}
+                {contextMenu.directory !== null &&
+                  contextMenu.directory.directory_kind !== 'case' &&
+                  contextMenu.directory.case_id === null && (
+                    <button onClick={handleContextDeleteDirectory} role="menuitem" type="button">
+                      <ActionIconLabel
+                        iconUrl={trashIconUrl}
+                        label={t('storage.context.deleteDirectory')}
+                      />
+                    </button>
+                  )}
+                {contextMenu.object !== null && (
+                  <>
+                    <button onClick={handleContextDownload} role="menuitem" type="button">
+                      <ActionIconLabel
+                        iconUrl={downloadIconUrl}
+                        label={t('storage.context.download')}
+                      />
+                    </button>
+                    <button onClick={handleContextLlmInputToggle} role="menuitem" type="button">
+                      {contextMenu.object.llm_input_allowed
+                        ? t('storage.llmInput.disallow')
+                        : t('storage.llmInput.allow')}
+                    </button>
+                    <button onClick={handleContextDelete} role="menuitem" type="button">
+                      <ActionIconLabel iconUrl={trashIconUrl} label={t('storage.context.delete')} />
+                    </button>
+                  </>
+                )}
+              </div>
             )}
           </div>
-        )}
-      </div>
+        </>
+      )}
     </section>
   )
 }
@@ -821,30 +906,31 @@ function CaseWorkbenchPanel({
   count,
   actionLabel,
   actionHref,
+  actions,
   children,
 }: {
   title: string
   eyebrow: string
   count: number
-  actionLabel: string
+  actionLabel?: string
   actionHref?: string
+  actions?: ReactNode
   children: ReactNode
 }) {
   return (
     <section className="case-workbench-panel">
       <div className="case-workbench-panel-header">
-        <div>
-          <span>{eyebrow}</span>
-          <h2>{title}</h2>
-        </div>
+        <span>{eyebrow}</span>
         <div className="case-workbench-panel-actions">
-          <strong>{count}</strong>
-          {actionHref === undefined ? (
+          {actions !== undefined ? (
+            actions
+          ) : actionHref === undefined ? (
             <button type="button">{actionLabel}</button>
           ) : (
             <AppLink href={actionHref}>{actionLabel}</AppLink>
           )}
         </div>
+        <h2>{title}: <small>{count}</small></h2>
       </div>
       {children}
     </section>
@@ -861,6 +947,53 @@ function stakeholderRoleLabel(role: string) {
   return role
 }
 
+function StakeholderRoleSuggestInput({
+  role,
+  options,
+  disabled,
+  onCommit,
+  ariaLabel,
+}: {
+  role: string
+  options: string[]
+  disabled: boolean
+  onCommit: (role: string) => void
+  ariaLabel: string
+}) {
+  const [draft, setDraft] = useState(role)
+
+  useEffect(() => {
+    setDraft(role)
+  }, [role])
+
+  function handleChange(nextRole: string) {
+    setDraft(nextRole)
+    const trimmedNextRole = nextRole.trim()
+    const trimmedCurrentRole = role.trim()
+    if (trimmedNextRole === trimmedCurrentRole) return
+    if (trimmedNextRole === '' || options.includes(trimmedNextRole)) {
+      onCommit(nextRole)
+    }
+  }
+
+  return (
+    <SuggestInput
+      ariaLabel={ariaLabel}
+      className={role.trim() === '' ? undefined : 'case-stakeholder-role-suggest'}
+      disabled={disabled}
+      maxItems={1}
+      onChange={handleChange}
+      options={options.map((roleValue) => ({
+        key: roleValue,
+        value: roleValue,
+        label: stakeholderRoleLabel(roleValue),
+        badgeLabel: stakeholderRoleLabel(roleValue),
+      }))}
+      value={draft}
+    />
+  )
+}
+
 function CaseStakeholdersPanel({
   caseId,
   initialStakeholders,
@@ -873,7 +1006,7 @@ function CaseStakeholdersPanel({
   const [caseContexts, setCaseContexts] = useState<ContactSelectorCaseContext[]>([])
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [contactQuery, setContactQuery] = useState('')
-  const [role, setRole] = useState('stakeholder')
+  const [role, setRole] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -922,17 +1055,6 @@ function CaseStakeholdersPanel({
     }
   }, [])
 
-  const normalizedQuery = contactQuery.trim().toLowerCase()
-  const suggestedContacts = normalizedQuery === ''
-    ? []
-    : contacts
-        .filter((contact) =>
-          [contact.display_name, ...contact.email_addresses.map((email) => email.email_address)]
-            .join(' ')
-            .toLowerCase()
-            .includes(normalizedQuery),
-        )
-        .slice(0, 5)
   const selectedContact = contacts.find((contact) => {
     const query = contactQuery.trim().toLowerCase()
     return (
@@ -946,13 +1068,25 @@ function CaseStakeholdersPanel({
     contacts,
     caseContexts,
   ).filter((contact) => !linkedContactIds.has(contact.id))
-  const selectorPreviewItems = describeContactSelectorList(
-    contactQuery,
-    contacts,
-    caseContexts,
-  )
-    .filter((item) => item.contacts.length > 0)
   const caseSelectorSuggestions = caseRoleSelectorSuggestions(contactQuery, caseContexts)
+  const stakeholderContactOptions: SuggestInputOption[] = [
+    ...contacts.map((contact) => {
+      const primaryEmail =
+        contact.email_addresses.find((email) => email.is_primary)?.email_address ?? t('common.none')
+      return {
+        key: contact.id,
+        value: contact.display_name,
+        label: primaryEmail,
+        badgeLabel: contact.display_name,
+      }
+    }),
+    ...caseSelectorSuggestions.map((suggestion) => ({
+      key: suggestion.value,
+      value: suggestion.value,
+      label: suggestion.label,
+      badgeLabel: suggestion.label,
+    })),
+  ]
   const stakeholderRoleSuggestions = Array.from(
     new Set([
       ...defaultStakeholderRoles,
@@ -990,7 +1124,7 @@ function CaseStakeholdersPanel({
       )
       setStakeholders((current) => [...current, ...createdStakeholders])
       setContactQuery('')
-      setRole('stakeholder')
+      setRole('')
     } catch (requestError) {
       setError(describeError(requestError))
     } finally {
@@ -1000,7 +1134,7 @@ function CaseStakeholdersPanel({
 
   async function changeRole(stakeholder: CaseStakeholder, nextRole: string) {
     const trimmedRole = nextRole.trim()
-    if (trimmedRole === '' || trimmedRole === stakeholder.role) return
+    if (trimmedRole === stakeholder.role) return
     setBusy(true)
     setError(null)
     try {
@@ -1071,13 +1205,6 @@ function CaseStakeholdersPanel({
         </button>
       </div>
       {error !== null && <p className="case-stakeholder-error" role="alert">{error}</p>}
-      <datalist id={`case-stakeholder-role-suggestions-${caseId}`}>
-        {stakeholderRoleSuggestions.map((roleValue) => (
-          <option key={roleValue} value={roleValue}>
-            {stakeholderRoleLabel(roleValue)}
-          </option>
-        ))}
-      </datalist>
       <div className="case-stakeholder-list">
         {stakeholders.length === 0 ? (
           <p>{t('cases.stakeholders.empty')}</p>
@@ -1087,17 +1214,22 @@ function CaseStakeholdersPanel({
               className={`case-stakeholder-item${isSettingsOpen ? ' is-editing' : ''}`}
               key={stakeholder.id}
             >
-              <span>{stakeholder.contact_display_name.slice(0, 2).toUpperCase()}</span>
+              <span className="case-stakeholder-avatar">
+                <img
+                  alt=""
+                  aria-hidden="true"
+                  src={stakeholder.contact_avatar_url ?? defaultContactAvatarUrl}
+                />
+              </span>
               <strong>{stakeholder.contact_display_name}</strong>
               {isSettingsOpen ? (
                 <>
-                  <input
-                    aria-label={t('cases.stakeholders.role')}
-                    defaultValue={stakeholder.role}
+                  <StakeholderRoleSuggestInput
+                    ariaLabel={t('cases.stakeholders.role')}
                     disabled={busy}
-                    list={`case-stakeholder-role-suggestions-${caseId}`}
-                    onBlur={(event) => void changeRole(stakeholder, event.target.value)}
-                    type="text"
+                    options={stakeholderRoleSuggestions}
+                    role={stakeholder.role}
+                    onCommit={(nextRole) => void changeRole(stakeholder, nextRole)}
                   />
                   <button
                     disabled={busy || index === 0}
@@ -1121,8 +1253,10 @@ function CaseStakeholdersPanel({
                     {t('cases.stakeholders.delete')}
                   </button>
                 </>
-              ) : (
+              ) : stakeholder.role.trim() !== '' ? (
                 <em>{stakeholderRoleLabel(stakeholder.role)}</em>
+              ) : (
+                <i aria-hidden="true" className="case-stakeholder-empty-role" />
               )}
             </div>
           ))
@@ -1132,84 +1266,31 @@ function CaseStakeholdersPanel({
         <form className="case-stakeholder-form" onSubmit={addStakeholder}>
           <label>
             <span>{t('cases.stakeholders.contact')}</span>
-            <input
-              onChange={(event) => setContactQuery(event.target.value)}
-              type="text"
+            <SuggestInput
+              ariaLabel={t('cases.stakeholders.contact')}
+              onChange={setContactQuery}
+              options={stakeholderContactOptions}
               value={contactQuery}
             />
-            {suggestedContacts.length > 0 && (
-              <div className="case-stakeholder-suggestions">
-                {suggestedContacts.map((contact) => (
-                  <button
-                    key={contact.id}
-                    onClick={() => setContactQuery(contact.display_name)}
-                    type="button"
-                  >
-                    <strong>{contact.display_name}</strong>
-                    <span>
-                      {contact.email_addresses.find((email) => email.is_primary)
-                        ?.email_address ?? t('common.none')}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            )}
-            {caseSelectorSuggestions.length > 0 && (
-              <div className="case-stakeholder-suggestions case-stakeholder-case-suggestions">
-                {caseSelectorSuggestions.map((suggestion) => (
-                  <button
-                    key={suggestion.value}
-                    onClick={() =>
-                      setContactQuery((current) =>
-                        replaceLastContactSelector(current, suggestion.value),
-                      )
-                    }
-                    type="button"
-                  >
-                    <strong>{suggestion.label}</strong>
-                  </button>
-                ))}
-              </div>
-            )}
-            {selectorPreviewItems.length > 0 && (
-              <div className="case-stakeholder-selector-preview" aria-live="polite">
-                {selectorPreviewItems.map((item) => (
-                  <div key={item.selector}>
-                    <span>{item.selector}</span>
-                    <div>
-                      {item.contacts.map((contact) => (
-                        <em key={contact.id}>{contact.display_name}</em>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
           </label>
           <label>
             <span>{t('cases.stakeholders.role')}</span>
-            <input
-              list={`case-stakeholder-role-suggestions-${caseId}`}
-              onChange={(event) => setRole(event.target.value)}
-              type="text"
+            <SuggestInput
+              ariaLabel={t('cases.stakeholders.role')}
+              maxItems={1}
+              onChange={setRole}
+              options={stakeholderRoleSuggestions.map((roleValue) => ({
+                key: roleValue,
+                value: roleValue,
+                label: stakeholderRoleLabel(roleValue),
+                badgeLabel: stakeholderRoleLabel(roleValue),
+              }))}
               value={role}
             />
           </label>
           <button disabled={busy || !canAddStakeholder} type="submit">
             {t('cases.stakeholders.add')}
           </button>
-          {contactQuery.trim() !== '' && selectedContact === undefined && (
-            <p>
-              {selectedContacts.length === 0
-                ? t('cases.stakeholders.noContact')
-                : t('cases.stakeholders.resolvedContacts', {
-                    count: selectedContacts.length,
-                  })}
-            </p>
-          )}
-          {selectedContact !== undefined && linkedContactIds.has(selectedContact.id) && (
-            <p>{t('cases.stakeholders.alreadyLinked')}</p>
-          )}
         </form>
       )}
     </section>
@@ -1271,9 +1352,10 @@ function CaseCalendarGadget({ caseItem }: { caseItem: CaseItem }) {
           const hasEvent = date === eventDate
           return (
             <button
-              aria-current={date === today ? 'date' : undefined}
               aria-label={hasEvent ? t('cases.calendar.openDate', { date }) : date}
-              className={`${hasEvent ? 'mail-calendar-day case-calendar-day-has-event' : 'mail-calendar-day mail-calendar-day-empty'}`}
+              className={`${hasEvent ? 'mail-calendar-day case-calendar-day-has-event' : 'mail-calendar-day mail-calendar-day-empty'}${
+                date === today ? ' is-today' : ''
+              }`}
               disabled={!hasEvent}
               key={date}
               type="button"
@@ -1529,7 +1611,7 @@ function CaseListView() {
   const [status, setStatus] = useState<CaseListStatus>('user_ball')
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedTag, setSelectedTag] = useState<string | null>(null)
-  const [sortMode, setSortMode] = useState('updated_desc')
+  const [sortMode, setSortMode] = useState('genre_name')
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -1597,6 +1679,14 @@ function CaseListView() {
   )
     .map(([, tag]) => tag)
     .sort((first, second) => first.localeCompare(second))
+  const caseTagFrequency = allCases.reduce<Map<string, number>>((counts, item) => {
+    item.tags.forEach((tag) => {
+      const key = tag.toLocaleLowerCase()
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+    })
+    return counts
+  }, new Map<string, number>())
+  const genreOrder = new Map(genres.map((genre, index) => [genre.id, index]))
   const visibleCases = cases
     .filter((item) => {
       if (
@@ -1612,6 +1702,14 @@ function CaseListView() {
         .includes(normalizedQuery)
     })
     .sort((first, second) => {
+      if (sortMode === 'genre_name') {
+        const firstGenreOrder = first.genre_id !== null ? (genreOrder.get(first.genre_id) ?? 9998) : 9999
+        const secondGenreOrder = second.genre_id !== null ? (genreOrder.get(second.genre_id) ?? 9998) : 9999
+        if (firstGenreOrder !== secondGenreOrder) return firstGenreOrder - secondGenreOrder
+        const nameComparison = first.name.localeCompare(second.name)
+        if (nameComparison !== 0) return nameComparison
+        return first.created_at.localeCompare(second.created_at)
+      }
       if (sortMode === 'name') return first.name.localeCompare(second.name)
       if (sortMode === 'created_desc') return second.created_at.localeCompare(first.created_at)
       return second.updated_at.localeCompare(first.updated_at)
@@ -1661,6 +1759,7 @@ function CaseListView() {
                 onChange={(event) => setSortMode(event.target.value)}
                 value={sortMode}
               >
+                <option value="genre_name">{t('cases.sort.genreName')}</option>
                 <option value="updated_desc">{t('cases.sort.updated')}</option>
                 <option value="created_desc">{t('cases.sort.created')}</option>
                 <option value="name">{t('cases.sort.name')}</option>
@@ -1734,7 +1833,15 @@ function CaseListView() {
               ) : visibleCases.length === 0 ? (
                 <p>{t('cases.empty')}</p>
               ) : (
-                visibleCases.map((item) => <CaseRow genres={genres} item={item} key={item.id} />)
+                visibleCases.map((item) => (
+                  <CaseRow
+                    genres={genres}
+                    item={item}
+                    key={item.id}
+                    selectedTag={selectedTag}
+                    tagFrequency={caseTagFrequency}
+                  />
+                ))
               )}
               </div>
             </div>
@@ -1816,6 +1923,26 @@ function CaseGenreGadget({
     }
   }
 
+  async function handleMove(genreId: string, direction: -1 | 1) {
+    const currentIndex = genres.findIndex((genre) => genre.id === genreId)
+    const nextIndex = currentIndex + direction
+    if (currentIndex < 0 || nextIndex < 0 || nextIndex >= genres.length) return
+    const nextGenreIds = genres.map((genre) => genre.id)
+    ;[nextGenreIds[currentIndex], nextGenreIds[nextIndex]] = [
+      nextGenreIds[nextIndex],
+      nextGenreIds[currentIndex],
+    ]
+    setIsSubmitting(true)
+    try {
+      await reorderCaseGenres(nextGenreIds)
+      onUpdated()
+    } catch (requestError) {
+      onError(describeError(requestError))
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
   return (
     <div className="case-gadget-card case-genre-gadget">
       <div className="case-gadget-heading-row">
@@ -1858,6 +1985,11 @@ function CaseGenreGadget({
             <label>
               <span>{t('cases.genre.color')}</span>
               <div className="case-genre-color-row">
+                <i
+                  aria-hidden="true"
+                  className="case-genre-color-swatch"
+                  style={{ background: color }}
+                />
                 <input
                   onChange={(event) => setColor(event.target.value)}
                   required
@@ -1884,18 +2016,34 @@ function CaseGenreGadget({
         {genres.length === 0 ? (
           <p>{t('cases.genre.empty')}</p>
         ) : (
-          genres.map((genre) => (
+          genres.map((genre, index) => (
             <div className="case-genre-item" key={genre.id}>
                   <span>
                     <i style={{ background: genre.color_hex }} />
                     {genre.title}
                   </span>
-                  <button onClick={() => startEdit(genre)} type="button">
-                    {t('cases.genre.edit')}
-                  </button>
-                  <button onClick={() => handleDelete(genre.id)} type="button">
-                    {t('cases.genre.delete')}
-                  </button>
+                  <div className="case-genre-item-actions">
+                    <button
+                      disabled={isSubmitting || index === 0}
+                      onClick={() => handleMove(genre.id, -1)}
+                      type="button"
+                    >
+                      {t('cases.genre.moveUp')}
+                    </button>
+                    <button
+                      disabled={isSubmitting || index === genres.length - 1}
+                      onClick={() => handleMove(genre.id, 1)}
+                      type="button"
+                    >
+                      {t('cases.genre.moveDown')}
+                    </button>
+                    <button onClick={() => startEdit(genre)} type="button">
+                      {t('cases.genre.edit')}
+                    </button>
+                    <button onClick={() => handleDelete(genre.id)} type="button">
+                      {t('cases.genre.delete')}
+                    </button>
+                  </div>
                 </div>
               ))
             )}
@@ -1910,6 +2058,7 @@ function CaseDetailView({ caseId }: { caseId: string }) {
   const [detail, setDetail] = useState<CaseDetail | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isOverviewEditing, setIsOverviewEditing] = useState(false)
+  const [nameDraft, setNameDraft] = useState('')
   const [overviewDraft, setOverviewDraft] = useState('')
   const [openWhenDraft, setOpenWhenDraft] = useState('')
   const [closedWhenDraft, setClosedWhenDraft] = useState('')
@@ -1917,7 +2066,7 @@ function CaseDetailView({ caseId }: { caseId: string }) {
   const [isOverviewSaving, setIsOverviewSaving] = useState(false)
   const [isCaseStateBusy, setIsCaseStateBusy] = useState(false)
   const [isCurrentSituationRefreshing, setIsCurrentSituationRefreshing] = useState(false)
-  const [isCurrentSituationExpanded, setIsCurrentSituationExpanded] = useState(true)
+  const [isCurrentSituationExpanded, setIsCurrentSituationExpanded] = useState(false)
   const [isDeletingCase, setIsDeletingCase] = useState(false)
   const [deleteMenuPosition, setDeleteMenuPosition] = useState<{
     x: number
@@ -1965,6 +2114,7 @@ function CaseDetailView({ caseId }: { caseId: string }) {
 
   function startOverviewEdit() {
     if (item === null) return
+    setNameDraft(item.name)
     setOverviewDraft(item.description ?? '')
     setOpenWhenDraft(item.open_when_date ?? '')
     setClosedWhenDraft(item.closed_when_text ?? '')
@@ -1996,6 +2146,7 @@ function CaseDetailView({ caseId }: { caseId: string }) {
     setError(null)
     try {
       const updatedCase = await updateCase(caseId, {
+        ...(item.is_system_case ? {} : { name: nameDraft.trim() }),
         description: overviewDraft.trim() === '' ? null : overviewDraft,
         open_when_date: openWhenDraft.trim() === '' ? null : openWhenDraft,
         open_when_text: null,
@@ -2125,6 +2276,17 @@ function CaseDetailView({ caseId }: { caseId: string }) {
                   </div>
                   {isOverviewEditing ? (
                     <form className="case-overview-form" onSubmit={handleOverviewSubmit}>
+                      {!item.is_system_case && (
+                        <label>
+                          <span>{t('cases.name')}</span>
+                          <input
+                            aria-label={t('cases.name')}
+                            onChange={(event) => setNameDraft(event.target.value)}
+                            required
+                            value={nameDraft}
+                          />
+                        </label>
+                      )}
                       <textarea
                         aria-label={t('cases.section.overview')}
                         autoFocus
@@ -2262,8 +2424,16 @@ function CaseDetailView({ caseId }: { caseId: string }) {
               </section>
               <div className="case-workbench-grid">
                 <CaseWorkbenchPanel
-                  actionLabel={t('cases.mail.attach')}
-                  actionHref={`/cases/${encodeURIComponent(item.id)}/mails`}
+                  actions={
+                    <>
+                      <AppLink href={`/cases/${encodeURIComponent(item.id)}/mails`}>
+                        {t('cases.mail.viewAll')}
+                      </AppLink>
+                      <AppLink href={`/cases/${encodeURIComponent(item.id)}/mails?assign=1`}>
+                        {t('cases.mail.assign')}
+                      </AppLink>
+                    </>
+                  }
                   count={item.mail_count}
                   eyebrow={t('cases.section.mail')}
                   title={t('cases.mail.window')}
@@ -2276,7 +2446,7 @@ function CaseDetailView({ caseId }: { caseId: string }) {
                         <b>{t('cases.card.none')}</b>
                       </div>
                     ) : (
-                      detail.related_mails.slice(0, 3).map((mail) => (
+                      detail.related_mails.slice(0, 2).map((mail) => (
                         <AppLink className="case-mail-preview-row" href={mail.mail_url} key={mail.id}>
                           <time>{formatDateTime(mail.received_at)}</time>
                           <span>{mail.subject ?? t('mail.noSubject')}</span>
@@ -2309,7 +2479,13 @@ function CaseDetailView({ caseId }: { caseId: string }) {
                   </AppLink>
                 </CaseWorkbenchPanel>
               </div>
-              <CaseStorageWindow caseId={item.id} rootDirectoryId={item.storage_directory_id} />
+              <CaseStorageWindow
+                caseId={item.id}
+                collapsible
+                defaultCollapsed
+                heading={t('cases.storage.heading')}
+                rootDirectoryId={item.storage_directory_id}
+              />
               <CaseStakeholdersPanel
                 caseId={item.id}
                 initialStakeholders={detail.stakeholders ?? []}
@@ -2480,7 +2656,9 @@ function CaseCreateView() {
           genre_id: genreId,
         },
       })
-      if (name.trim() === '' && prefill.name !== null) setName(prefill.name)
+      if (name.trim() === '' && prefill.name !== null) {
+        setName(prefill.name.slice(0, CASE_TITLE_MAX_LENGTH))
+      }
       if (description.trim() === '' && prefill.description !== null) {
         setDescription(prefill.description)
       }
@@ -2534,6 +2712,7 @@ function CaseCreateView() {
                   <span>{t('cases.name')}</span>
                   <input
                     autoFocus
+                    maxLength={CASE_TITLE_MAX_LENGTH}
                     onChange={(event) => setName(event.target.value)}
                     required
                     type="text"
@@ -2660,7 +2839,9 @@ function CaseMailListView({ caseId }: { caseId: string }) {
   const [assignPageSize, setAssignPageSize] = useState(25)
   const [assignSearchRefreshTick, setAssignSearchRefreshTick] = useState(0)
   const [pinnedMails, setPinnedMails] = useState<Record<string, MailListItem>>({})
-  const [isAssignMode, setIsAssignMode] = useState(false)
+  const [isAssignMode, setIsAssignMode] = useState(
+    () => new URLSearchParams(window.location.search).get('assign') === '1',
+  )
   const [isRemoveMode, setIsRemoveMode] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
   const [isSearchingMails, setIsSearchingMails] = useState(false)
@@ -3233,22 +3414,19 @@ function CaseMailListView({ caseId }: { caseId: string }) {
               <form className="case-mail-auto-rule-form" onSubmit={handleCreateAutoAssignRule}>
                 <label>
                   <span>{t('cases.mail.autoRule.senderEmail')}</span>
-                  <input
-                    list="case-auto-rule-stakeholder-suggestions"
-                    onChange={(event) => setAutoRuleSenderEmail(event.target.value)}
+                  <SuggestInput
+                    ariaLabel={t('cases.mail.autoRule.senderEmail')}
+                    maxItems={1}
+                    onChange={setAutoRuleSenderEmail}
+                    options={autoRuleStakeholderSuggestions.map((suggestion) => ({
+                      key: suggestion.email,
+                      value: suggestion.email,
+                      label: suggestion.label,
+                      badgeLabel: suggestion.email,
+                    }))}
                     placeholder={t('cases.mail.autoRule.placeholder')}
-                    type="email"
                     value={autoRuleSenderEmail}
                   />
-                  <datalist id="case-auto-rule-stakeholder-suggestions">
-                    {autoRuleStakeholderSuggestions.map((suggestion) => (
-                      <option
-                        key={suggestion.email}
-                        label={suggestion.label}
-                        value={suggestion.email}
-                      />
-                    ))}
-                  </datalist>
                 </label>
                 <button
                   className={`button-loading-dot${isAutoRuleSaving ? ' is-loading' : ''}`}

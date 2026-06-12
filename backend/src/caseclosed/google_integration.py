@@ -5,11 +5,14 @@ from dataclasses import dataclass
 from datetime import date
 from datetime import datetime
 import json
+import re
 import secrets
+import uuid
 from datetime import timedelta
 from email.utils import getaddresses
 from email.utils import parseaddr
 from urllib.parse import urlencode
+from urllib.parse import quote
 from urllib.error import HTTPError
 from urllib.error import URLError
 from urllib.request import Request
@@ -18,14 +21,25 @@ from urllib.request import urlopen
 from fastapi import APIRouter
 from fastapi import BackgroundTasks
 from fastapi import Depends
+from fastapi import Query
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
+from pydantic import Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DatabaseSession
 
 from caseclosed.auth import json_error
 from caseclosed.db.models import AppSetting
+from caseclosed.db.models import Case
+from caseclosed.db.models import CalendarEvent
+from caseclosed.db.models import CalendarEventLink
 from caseclosed.db.models import GmailMessage
+from caseclosed.db.models import CaseMailLink
+from caseclosed.db.models import LlmRun
+from caseclosed.db.models import MailAutoState
+from caseclosed.db.models import MailSummary
+from caseclosed.db.models import MailThreadSummary
+from caseclosed.db.models import Task
 from caseclosed.db.runtime import get_session
 from caseclosed.db.runtime import JST
 from caseclosed.db.runtime import jst_iso
@@ -36,6 +50,10 @@ from caseclosed.services.mail_ingestion import MailIngestionResult
 from caseclosed.services.mail_ingestion import MailAttachmentInput
 from caseclosed.services.mail_ingestion import MockMailInput
 from caseclosed.services.mail_ingestion import ingest_mock_mail
+from caseclosed.services.llm_provider import FUNCTION_TYPE_CALENDAR_EVENT_PREFILL_GENERATION
+from caseclosed.services.llm_provider import OpenAIProviderError
+from caseclosed.services.llm_provider import build_calendar_event_prefill_provider
+from caseclosed.services.mail_thread_summary import split_quoted_reply_sections
 from caseclosed.settings import get_google_gmail_scopes
 from caseclosed.settings import get_google_oauth_client_id
 from caseclosed.settings import get_google_oauth_client_secret
@@ -46,10 +64,13 @@ router = APIRouter(prefix="/api/v1/google/gmail", tags=["google-gmail"])
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1"
+GOOGLE_CALENDAR_API_BASE_URL = "https://www.googleapis.com/calendar/v3"
 GMAIL_CONNECTION_KEY = "google_gmail_oauth_connection"
 GMAIL_OAUTH_STATE_KEY = "google_gmail_oauth_state"
 GMAIL_AUTO_IMPORT_SETTINGS_KEY = "google_gmail_auto_import_settings"
 GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
+CALENDAR_READ_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
+CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events"
 GMAIL_IMPORT_BY_DATE_MAX_RESULTS = 500
 GMAIL_AUTO_IMPORT_DEFAULT_INTERVAL_MINUTES = 10
 GMAIL_AUTO_IMPORT_MAX_MESSAGES_PER_RUN = 100
@@ -77,6 +98,43 @@ class GmailAutoImportSettingsPayload(BaseModel):
     enabled: bool
     interval_minutes: int
     max_messages_per_run: int | None = None
+
+
+class GoogleCalendarEventCreatePayload(BaseModel):
+    summary: str = Field(min_length=1)
+    start: str = Field(min_length=1)
+    end: str = Field(min_length=1)
+    calendar_id: str = "primary"
+    description: str | None = None
+    location: str | None = None
+    recurrence_rule: str | None = None
+    time_zone: str = "Asia/Tokyo"
+    linked_mail_message_id: str | None = None
+    linked_case_id: str | None = None
+
+
+class CalendarEventMovePayload(BaseModel):
+    start: str = Field(min_length=1)
+    end: str = Field(min_length=1)
+    time_zone: str = "Asia/Tokyo"
+
+
+class CalendarEventFromMailPrefillPayload(BaseModel):
+    message_id: str = Field(min_length=1)
+    case_id: str | None = None
+    prompt: str | None = None
+
+
+class GoogleCalendarSyncPayload(BaseModel):
+    calendar_ids: list[str] = Field(default_factory=lambda: ["primary"])
+    base_date: str | None = None
+    month_count: int = 3
+
+
+class CalendarEventLinkPayload(BaseModel):
+    linked_type: str = Field(min_length=1)
+    linked_id: str = Field(min_length=1)
+    role: str = "related"
 
 
 def read_setting_json(session: DatabaseSession, key: str) -> dict[str, object] | None:
@@ -124,6 +182,9 @@ def google_gmail_status_data(session: DatabaseSession) -> dict[str, object]:
         "last_error": connection.get("last_error"),
         "scopes": connected_scopes,
         "send_enabled": GMAIL_SEND_SCOPE in connected_scopes,
+        "calendar_read_enabled": CALENDAR_READ_SCOPE in connected_scopes
+        or CALENDAR_EVENTS_SCOPE in connected_scopes,
+        "calendar_write_enabled": CALENDAR_EVENTS_SCOPE in connected_scopes,
         "redirect_uri": get_google_oauth_redirect_uri(),
         "has_refresh_token": has_refresh_token,
         "token_expires_at": connection.get("token_expires_at"),
@@ -242,6 +303,19 @@ def gmail_connection_send_state(
     if not connected:
         return False, False
     return True, GMAIL_SEND_SCOPE in connection_scopes(connection)
+
+
+def calendar_connection_state(
+    session: DatabaseSession,
+) -> tuple[bool, bool, bool]:
+    connection = read_setting_json(session, GMAIL_CONNECTION_KEY) or {}
+    connected = bool(connection.get("refresh_token")) or bool(connection.get("access_token"))
+    if not connected:
+        return False, False, False
+    scopes = connection_scopes(connection)
+    can_read = CALENDAR_READ_SCOPE in scopes or CALENDAR_EVENTS_SCOPE in scopes
+    can_write = CALENDAR_EVENTS_SCOPE in scopes
+    return True, can_read, can_write
 
 
 def mail_ingestion_result_data(result: MailIngestionResult) -> dict[str, object]:
@@ -398,6 +472,523 @@ def google_gmail_disconnect(
     )
     session.commit()
     return {"ok": True, "data": google_gmail_status_data(session)}
+
+
+@router.get("/calendar/status")
+def google_calendar_status(
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    status = google_gmail_status_data(session)
+    return {
+        "ok": True,
+        "data": {
+            "configured": status["configured"],
+            "connected": status["connected"],
+            "calendar_read_enabled": status["calendar_read_enabled"],
+            "calendar_write_enabled": status["calendar_write_enabled"],
+            "scopes": status["scopes"],
+            "last_error": status["last_error"],
+        },
+    }
+
+
+@router.get("/calendar/events")
+def google_calendar_events(
+    calendar_id: str = "primary",
+    time_min: str | None = None,
+    time_max: str | None = None,
+    max_results: int = 20,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    connection = read_setting_json(session, GMAIL_CONNECTION_KEY) or {}
+    connected, can_read, _can_write = calendar_connection_state(session)
+    if not connected:
+        raise json_error(409, "GOOGLE_CALENDAR_NOT_CONNECTED", "Google Calendar is not connected.")
+    if not can_read:
+        raise json_error(
+            403,
+            "GOOGLE_CALENDAR_SCOPE_MISSING",
+            "Google Calendar read scope is not granted. Reconnect Google.",
+        )
+    access_token = google_gmail_access_token(session, connection)
+    params: dict[str, object] = {
+        "singleEvents": "true",
+        "orderBy": "startTime",
+        "maxResults": max(1, min(max_results, 100)),
+    }
+    if time_min is not None and time_min.strip() != "":
+        params["timeMin"] = time_min
+    else:
+        params["timeMin"] = jst_now().isoformat()
+    if time_max is not None and time_max.strip() != "":
+        params["timeMax"] = time_max
+    data = calendar_api_get_json(
+        encoded_calendar_path(calendar_id, "/events"),
+        access_token,
+        params,
+    )
+    items = data.get("items")
+    return {
+        "ok": True,
+        "data": {
+            "items": calendar_event_items(items if isinstance(items, list) else []),
+            "calendar_id": calendar_id,
+        },
+    }
+
+
+@router.get("/calendar/db-events")
+def calendar_db_events(
+    calendar_id: list[str] | None = Query(default=None),
+    time_min: str | None = None,
+    time_max: str | None = None,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    calendar_ids = normalized_calendar_ids(calendar_id)
+    statement = select(CalendarEvent).where(CalendarEvent.sync_status != "missing_from_google")
+    statement = statement.where(CalendarEvent.sync_status != "cancelled")
+    statement = statement.where(
+        (CalendarEvent.google_status.is_(None))
+        | (CalendarEvent.google_status != "cancelled")
+    )
+    if calendar_ids:
+        statement = statement.where(CalendarEvent.external_calendar_id.in_(calendar_ids))
+    if time_min is not None and time_min.strip() != "":
+        statement = statement.where(CalendarEvent.end_at > time_min.strip())
+    if time_max is not None and time_max.strip() != "":
+        statement = statement.where(CalendarEvent.start_at < time_max.strip())
+    events = session.scalars(
+        statement.order_by(CalendarEvent.start_at.asc(), CalendarEvent.summary.asc())
+    ).all()
+    return {
+        "ok": True,
+        "data": {
+            "items": [calendar_db_event_item(event) for event in events],
+            "calendar_ids": calendar_ids,
+        },
+    }
+
+
+@router.get("/calendar/db-events/{event_id}")
+def calendar_db_event_detail(
+    event_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    event = session.get(CalendarEvent, event_id)
+    if (
+        event is None
+        or event.sync_status in {"missing_from_google", "cancelled"}
+        or event.google_status == "cancelled"
+    ):
+        raise json_error(404, "CALENDAR_EVENT_NOT_FOUND", "Calendar event was not found.")
+    links = session.scalars(
+        select(CalendarEventLink)
+        .where(CalendarEventLink.calendar_event_id == event.id)
+        .order_by(CalendarEventLink.linked_type.asc(), CalendarEventLink.created_at.asc())
+    ).all()
+    return {
+        "ok": True,
+        "data": {
+            "event": calendar_db_event_item(event),
+            "links": [calendar_event_link_item(session, link) for link in links],
+            "mail_summaries": calendar_event_mail_summaries(session, links),
+        },
+    }
+
+
+@router.patch("/calendar/db-events/{event_id}/move")
+def move_calendar_db_event(
+    event_id: str,
+    payload: CalendarEventMovePayload,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    event = session.get(CalendarEvent, event_id)
+    if (
+        event is None
+        or event.sync_status in {"missing_from_google", "cancelled"}
+        or event.google_status == "cancelled"
+    ):
+        raise json_error(404, "CALENDAR_EVENT_NOT_FOUND", "Calendar event was not found.")
+    if event.all_day:
+        raise json_error(
+            422,
+            "ALL_DAY_EVENT_MOVE_UNSUPPORTED",
+            "All-day events cannot be moved from the week grid.",
+        )
+    if payload.end <= payload.start:
+        raise json_error(422, "VALIDATION_ERROR", "Event end must be after start.")
+
+    now = jst_iso()
+    if event.source == "google":
+        connection = read_setting_json(session, GMAIL_CONNECTION_KEY) or {}
+        connected, _can_read, can_write = calendar_connection_state(session)
+        if not connected:
+            raise json_error(
+                409,
+                "GOOGLE_CALENDAR_NOT_CONNECTED",
+                "Google Calendar is not connected.",
+            )
+        if not can_write:
+            raise json_error(
+                403,
+                "GOOGLE_CALENDAR_SCOPE_MISSING",
+                "Google Calendar event scope is not granted. Reconnect Google.",
+            )
+        if event.external_calendar_id is None or event.external_event_id is None:
+            raise json_error(
+                409,
+                "GOOGLE_CALENDAR_EVENT_NOT_LINKED",
+                "Calendar event is not linked to a Google event.",
+            )
+        access_token = google_gmail_access_token(session, connection)
+        data = calendar_api_patch_json(
+            encoded_calendar_path(
+                event.external_calendar_id,
+                f"/events/{quote(event.external_event_id, safe='')}",
+            ),
+            access_token,
+            {
+                "start": calendar_event_time(payload.start, payload.time_zone),
+                "end": calendar_event_time(payload.end, payload.time_zone),
+            },
+        )
+        db_event = upsert_calendar_event_from_google_response(
+            session,
+            calendar_id=event.external_calendar_id,
+            item=data,
+            now=now,
+        )
+        session.commit()
+        return {
+            "ok": True,
+            "data": {
+                "event": calendar_db_event_item(db_event),
+                "google_event": calendar_event_item(data),
+            },
+        }
+
+    event.start_at = calendar_event_time(payload.start, payload.time_zone)["dateTime"]  # type: ignore[index]
+    event.end_at = calendar_event_time(payload.end, payload.time_zone)["dateTime"]  # type: ignore[index]
+    event.time_zone = payload.time_zone
+    event.updated_at = now
+    event.last_synced_at = now
+    event.version += 1
+    session.commit()
+    return {"ok": True, "data": {"event": calendar_db_event_item(event), "google_event": None}}
+
+
+@router.post("/calendar/db-events/{event_id}/links")
+def create_calendar_db_event_link(
+    event_id: str,
+    payload: CalendarEventLinkPayload,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    event = session.get(CalendarEvent, event_id)
+    if (
+        event is None
+        or event.sync_status in {"missing_from_google", "cancelled"}
+        or event.google_status == "cancelled"
+    ):
+        raise json_error(404, "CALENDAR_EVENT_NOT_FOUND", "Calendar event was not found.")
+    linked_type = payload.linked_type.strip().lower()
+    linked_id = payload.linked_id.strip()
+    role = payload.role.strip() or "related"
+    validate_calendar_event_link_target(session, linked_type, linked_id)
+    existing = session.scalar(
+        select(CalendarEventLink)
+        .where(CalendarEventLink.calendar_event_id == event.id)
+        .where(CalendarEventLink.linked_type == linked_type)
+        .where(CalendarEventLink.linked_id == linked_id)
+        .where(CalendarEventLink.role == role)
+    )
+    if existing is not None:
+        return {"ok": True, "data": {"link": calendar_event_link_item(session, existing)}}
+    now = jst_iso()
+    link = CalendarEventLink(
+        id=f"calendar_event_link_{uuid.uuid4().hex}",
+        calendar_event_id=event.id,
+        linked_type=linked_type,
+        linked_id=linked_id,
+        role=role,
+        created_at=now,
+        updated_at=now,
+        version=1,
+    )
+    session.add(link)
+    event.updated_at = now
+    event.version += 1
+    session.commit()
+    return {"ok": True, "data": {"link": calendar_event_link_item(session, link)}}
+
+
+@router.delete("/calendar/db-events/{event_id}/links/{link_id}")
+def delete_calendar_db_event_link(
+    event_id: str,
+    link_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    link = session.get(CalendarEventLink, link_id)
+    if link is None or link.calendar_event_id != event_id:
+        raise json_error(404, "CALENDAR_EVENT_LINK_NOT_FOUND", "Calendar event link was not found.")
+    event = session.get(CalendarEvent, event_id)
+    session.delete(link)
+    if event is not None:
+        event.updated_at = jst_iso()
+        event.version += 1
+    session.commit()
+    return {"ok": True, "data": {"deleted": True}}
+
+
+@router.post("/calendar/sync")
+def sync_google_calendar_events(
+    payload: GoogleCalendarSyncPayload,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    connection = read_setting_json(session, GMAIL_CONNECTION_KEY) or {}
+    connected, can_read, _can_write = calendar_connection_state(session)
+    if not connected:
+        raise json_error(409, "GOOGLE_CALENDAR_NOT_CONNECTED", "Google Calendar is not connected.")
+    if not can_read:
+        raise json_error(
+            403,
+            "GOOGLE_CALENDAR_SCOPE_MISSING",
+            "Google Calendar read scope is not granted. Reconnect Google.",
+        )
+    calendar_ids = normalized_calendar_ids(payload.calendar_ids)
+    if not calendar_ids:
+        calendar_ids = ["primary"]
+    start_at, end_at = calendar_sync_range(payload.base_date, payload.month_count)
+    access_token = google_gmail_access_token(session, connection)
+    now = jst_iso()
+    imported_count = 0
+    updated_count = 0
+    cancelled_count = 0
+    seen_keys: set[tuple[str, str]] = set()
+    for calendar_id in calendar_ids:
+        google_items = fetch_google_calendar_events(
+            calendar_id,
+            access_token,
+            time_min=start_at,
+            time_max=end_at,
+            show_deleted=True,
+        )
+        for item in google_items:
+            external_event_id = item.get("id") if isinstance(item.get("id"), str) else None
+            if external_event_id is None or external_event_id.strip() == "":
+                continue
+            seen_keys.add((calendar_id, external_event_id))
+            status = item.get("status") if isinstance(item.get("status"), str) else None
+            existing = session.scalar(
+                select(CalendarEvent)
+                .where(CalendarEvent.source == "google")
+                .where(CalendarEvent.external_calendar_id == calendar_id)
+                .where(CalendarEvent.external_event_id == external_event_id)
+            )
+            if status == "cancelled":
+                if existing is not None:
+                    existing.google_status = "cancelled"
+                    existing.sync_status = "cancelled"
+                    existing.last_synced_at = now
+                    existing.updated_at = now
+                    existing.version += 1
+                    cancelled_count += 1
+                continue
+            normalized_event = normalized_google_calendar_event(item)
+            if normalized_event is None:
+                continue
+            if existing is None:
+                session.add(
+                    CalendarEvent(
+                        id=f"calendar_event_{uuid.uuid4().hex}",
+                        source="google",
+                        external_calendar_id=calendar_id,
+                        external_event_id=external_event_id,
+                        external_etag=normalized_event["external_etag"],
+                        external_ical_uid=normalized_event["external_ical_uid"],
+                        external_html_link=normalized_event["external_html_link"],
+                        external_updated_at=normalized_event["external_updated_at"],
+                        google_status=normalized_event["google_status"],
+                        summary=normalized_event["summary"],
+                        description=normalized_event["description"],
+                        location=normalized_event["location"],
+                        start_at=normalized_event["start_at"],
+                        end_at=normalized_event["end_at"],
+                        all_day=normalized_event["all_day"],
+                        time_zone=normalized_event["time_zone"],
+                        recurring_event_id=normalized_event["recurring_event_id"],
+                        attendance_requirement="unknown",
+                        tags_json=None,
+                        metadata_json=None,
+                        sync_status="synced",
+                        last_synced_at=now,
+                        local_note=None,
+                        created_at=now,
+                        updated_at=now,
+                        version=1,
+                    )
+                )
+                imported_count += 1
+            else:
+                apply_google_calendar_event_update(existing, normalized_event, now)
+                updated_count += 1
+
+    missing_count = mark_missing_calendar_events(
+        session,
+        calendar_ids=calendar_ids,
+        seen_keys=seen_keys,
+        time_min=start_at,
+        time_max=end_at,
+        now=now,
+    )
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "calendar_ids": calendar_ids,
+            "time_min": start_at,
+            "time_max": end_at,
+            "imported_count": imported_count,
+            "updated_count": updated_count,
+            "cancelled_count": cancelled_count,
+            "missing_count": missing_count,
+        },
+    }
+
+
+@router.get("/calendar/calendars")
+def google_calendar_list(
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    connection = read_setting_json(session, GMAIL_CONNECTION_KEY) or {}
+    connected, can_read, _can_write = calendar_connection_state(session)
+    if not connected:
+        raise json_error(409, "GOOGLE_CALENDAR_NOT_CONNECTED", "Google Calendar is not connected.")
+    if not can_read:
+        raise json_error(
+            403,
+            "GOOGLE_CALENDAR_SCOPE_MISSING",
+            "Google Calendar read scope is not granted. Reconnect Google.",
+        )
+    access_token = google_gmail_access_token(session, connection)
+    data = calendar_api_get_json("/users/me/calendarList", access_token, {})
+    items = data.get("items")
+    return {
+        "ok": True,
+        "data": {
+            "items": calendar_list_items(items if isinstance(items, list) else []),
+        },
+    }
+
+
+@router.post("/calendar/events/prefill-from-mail")
+def prefill_calendar_event_from_mail(
+    payload: CalendarEventFromMailPrefillPayload,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    message = session.get(GmailMessage, payload.message_id)
+    if message is None:
+        raise json_error(404, "NOT_FOUND", "Mail not found.")
+    auto_state = session.scalar(
+        select(MailAutoState).where(MailAutoState.message_id == message.id)
+    )
+    if auto_state is not None and bool(auto_state.llm_blocked):
+        raise json_error(409, "LLM_BLOCKED", "This mail is blocked from LLM processing.")
+    case = calendar_case_for_mail(
+        session,
+        message=message,
+        preferred_case_id=payload.case_id,
+    )
+    input_payload = calendar_event_prefill_input_from_mail(
+        session,
+        message=message,
+        case=case,
+        prompt=payload.prompt,
+    )
+    prefill, llm_run_id = run_calendar_event_prefill(session, input_payload)
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "prefill": prefill,
+            "llm_run_id": llm_run_id,
+            "linked_mail_message_id": message.id,
+            "linked_case_id": case.id if case is not None else None,
+            "linked_case_name": case.name if case is not None else None,
+        },
+    }
+
+
+@router.post("/calendar/events")
+def create_google_calendar_event(
+    payload: GoogleCalendarEventCreatePayload,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    connection = read_setting_json(session, GMAIL_CONNECTION_KEY) or {}
+    connected, _can_read, can_write = calendar_connection_state(session)
+    if not connected:
+        raise json_error(409, "GOOGLE_CALENDAR_NOT_CONNECTED", "Google Calendar is not connected.")
+    if not can_write:
+        raise json_error(
+            403,
+            "GOOGLE_CALENDAR_SCOPE_MISSING",
+            "Google Calendar event scope is not granted. Reconnect Google.",
+        )
+    access_token = google_gmail_access_token(session, connection)
+    event_payload: dict[str, object] = {
+        "summary": payload.summary.strip(),
+        "start": calendar_event_time(payload.start, payload.time_zone),
+        "end": calendar_event_time(payload.end, payload.time_zone),
+    }
+    if payload.description is not None and payload.description.strip() != "":
+        event_payload["description"] = payload.description.strip()
+    if payload.location is not None and payload.location.strip() != "":
+        event_payload["location"] = payload.location.strip()
+    if payload.recurrence_rule is not None and payload.recurrence_rule.strip() != "":
+        event_payload["recurrence"] = [calendar_recurrence_rule(payload.recurrence_rule)]
+    data = calendar_api_post_json(
+        encoded_calendar_path(payload.calendar_id, "/events"),
+        access_token,
+        event_payload,
+    )
+    now = jst_iso()
+    storage_calendar_id = storage_calendar_id_for_created_event(
+        payload.calendar_id,
+        access_token,
+    )
+    db_event = upsert_calendar_event_from_google_response(
+        session,
+        calendar_id=storage_calendar_id,
+        item=data,
+        now=now,
+    )
+    links = []
+    mail_link = ensure_calendar_event_link(
+        session,
+        event=db_event,
+        linked_type="mail",
+        linked_id=payload.linked_mail_message_id,
+        now=now,
+    )
+    if mail_link is not None:
+        links.append(mail_link)
+    case_link = ensure_calendar_event_link(
+        session,
+        event=db_event,
+        linked_type="case",
+        linked_id=payload.linked_case_id,
+        now=now,
+    )
+    if case_link is not None:
+        links.append(case_link)
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "event": calendar_event_item(data),
+            "db_event": calendar_db_event_item(db_event),
+            "links": [calendar_event_link_item(session, link) for link in links],
+        },
+    }
 
 
 @router.post("/import-latest-unloaded")
@@ -830,6 +1421,799 @@ def gmail_api_post_json(
     if not isinstance(data, dict):
         raise json_error(502, "GOOGLE_GMAIL_API_ERROR", "Invalid Gmail API response.")
     return data
+
+
+def calendar_api_get_json(
+    path: str,
+    access_token: str,
+    params: dict[str, object] | None = None,
+) -> dict[str, object]:
+    query = "" if not params else f"?{urlencode(params)}"
+    request = Request(
+        f"{GOOGLE_CALENDAR_API_BASE_URL}{path}{query}",
+        headers={"Authorization": f"Bearer {access_token}"},
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        details = read_google_error_details(exc)
+        raise json_error(
+            exc.code,
+            "GOOGLE_CALENDAR_API_FORBIDDEN"
+            if exc.code == 403
+            else "GOOGLE_CALENDAR_API_ERROR",
+            details or f"Google Calendar API request failed with HTTP {exc.code}.",
+        ) from exc
+    except URLError as exc:
+        raise json_error(
+            502,
+            "GOOGLE_CALENDAR_API_ERROR",
+            f"Google Calendar API request failed: {exc.reason}",
+        ) from exc
+    if not isinstance(data, dict):
+        raise json_error(502, "GOOGLE_CALENDAR_API_ERROR", "Invalid Calendar API response.")
+    return data
+
+
+def calendar_api_post_json(
+    path: str,
+    access_token: str,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    request = Request(
+        f"{GOOGLE_CALENDAR_API_BASE_URL}{path}",
+        data=json.dumps(payload, ensure_ascii=True).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        details = read_google_error_details(exc)
+        raise json_error(
+            exc.code,
+            "GOOGLE_CALENDAR_API_FORBIDDEN"
+            if exc.code == 403
+            else "GOOGLE_CALENDAR_API_ERROR",
+            details or f"Google Calendar API request failed with HTTP {exc.code}.",
+        ) from exc
+    except URLError as exc:
+        raise json_error(
+            502,
+            "GOOGLE_CALENDAR_API_ERROR",
+            f"Google Calendar API request failed: {exc.reason}",
+        ) from exc
+    if not isinstance(data, dict):
+        raise json_error(502, "GOOGLE_CALENDAR_API_ERROR", "Invalid Calendar API response.")
+    return data
+
+
+def calendar_api_patch_json(
+    path: str,
+    access_token: str,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    request = Request(
+        f"{GOOGLE_CALENDAR_API_BASE_URL}{path}",
+        data=json.dumps(payload, ensure_ascii=True).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        },
+        method="PATCH",
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        details = read_google_error_details(exc)
+        raise json_error(
+            exc.code,
+            "GOOGLE_CALENDAR_API_FORBIDDEN"
+            if exc.code == 403
+            else "GOOGLE_CALENDAR_API_ERROR",
+            details or f"Google Calendar API request failed with HTTP {exc.code}.",
+        ) from exc
+    except URLError as exc:
+        raise json_error(
+            502,
+            "GOOGLE_CALENDAR_API_ERROR",
+            f"Google Calendar API request failed: {exc.reason}",
+        ) from exc
+    if not isinstance(data, dict):
+        raise json_error(502, "GOOGLE_CALENDAR_API_ERROR", "Invalid Calendar API response.")
+    return data
+
+
+def encoded_calendar_path(calendar_id: str, suffix: str = "") -> str:
+    return f"/calendars/{quote(calendar_id, safe='')}{suffix}"
+
+
+def storage_calendar_id_for_created_event(
+    calendar_id: str,
+    access_token: str,
+) -> str:
+    if calendar_id != "primary":
+        return calendar_id
+    try:
+        data = calendar_api_get_json(encoded_calendar_path("primary"), access_token, {})
+    except Exception:
+        return calendar_id
+    primary_id = data.get("id") if isinstance(data.get("id"), str) else None
+    return primary_id.strip() if primary_id is not None and primary_id.strip() != "" else calendar_id
+
+
+def calendar_event_time(value: str, time_zone: str) -> dict[str, object]:
+    stripped = value.strip()
+    date_match = re.fullmatch(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", stripped)
+    if date_match is not None:
+        year, month, day = date_match.groups()
+        return {"date": f"{year}-{int(month):02d}-{int(day):02d}"}
+
+    date_time_match = re.fullmatch(
+        r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})[T ](\d{1,2}):(\d{2})(?::(\d{2}))?",
+        stripped,
+    )
+    if date_time_match is None:
+        raise json_error(
+            400,
+            "INVALID_CALENDAR_EVENT_TIME",
+            f"Invalid calendar event time: {value}",
+        )
+    year, month, day, hour, minute, second = date_time_match.groups()
+    normalized = (
+        f"{year}-{int(month):02d}-{int(day):02d}"
+        f"T{int(hour):02d}:{minute}:{second or '00'}"
+    )
+    return {"dateTime": normalized, "timeZone": time_zone}
+
+
+def calendar_recurrence_rule(value: str) -> str:
+    stripped = value.strip().upper()
+    rule = stripped if stripped.startswith("RRULE:") else f"RRULE:{stripped}"
+    if not re.fullmatch(r"RRULE:[A-Z0-9_=;,\-]+", rule):
+        raise json_error(
+            400,
+            "INVALID_CALENDAR_RECURRENCE_RULE",
+            f"Invalid calendar recurrence rule: {value}",
+        )
+    if "FREQ=" not in rule:
+        raise json_error(
+            400,
+            "INVALID_CALENDAR_RECURRENCE_RULE",
+            "Calendar recurrence rule must include FREQ.",
+        )
+    return rule
+
+
+def calendar_event_items(items: list[object]) -> list[dict[str, object]]:
+    return [calendar_event_item(item) for item in items if isinstance(item, dict)]
+
+
+def normalized_calendar_ids(values: list[str] | None) -> list[str]:
+    if values is None:
+        return []
+    calendar_ids = []
+    for value in values:
+        stripped = value.strip()
+        if stripped != "" and stripped not in calendar_ids:
+            calendar_ids.append(stripped)
+    return calendar_ids
+
+
+def calendar_sync_range(base_date: str | None, month_count: int) -> tuple[str, str]:
+    if base_date is not None and base_date.strip() != "":
+        try:
+            base = datetime.strptime(base_date.strip()[:10], "%Y-%m-%d").replace(tzinfo=JST)
+        except ValueError:
+            base = jst_now().replace(day=1)
+    else:
+        base = jst_now().replace(day=1)
+    start = base.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    safe_month_count = max(1, min(month_count, 12))
+    month_index = start.month - 1 + safe_month_count
+    end = start.replace(
+        year=start.year + month_index // 12,
+        month=month_index % 12 + 1,
+    )
+    return start.isoformat(), end.isoformat()
+
+
+def fetch_google_calendar_events(
+    calendar_id: str,
+    access_token: str,
+    *,
+    time_min: str,
+    time_max: str,
+    show_deleted: bool,
+) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    page_token: str | None = None
+    while True:
+        params: dict[str, object] = {
+            "singleEvents": "true",
+            "orderBy": "startTime",
+            "maxResults": 2500,
+            "timeMin": time_min,
+            "timeMax": time_max,
+            "showDeleted": "true" if show_deleted else "false",
+        }
+        if page_token is not None:
+            params["pageToken"] = page_token
+        data = calendar_api_get_json(
+            encoded_calendar_path(calendar_id, "/events"),
+            access_token,
+            params,
+        )
+        raw_items = data.get("items")
+        if isinstance(raw_items, list):
+            items.extend(item for item in raw_items if isinstance(item, dict))
+        next_page_token = data.get("nextPageToken")
+        if not isinstance(next_page_token, str) or next_page_token.strip() == "":
+            return items
+        page_token = next_page_token
+
+
+def calendar_google_time_value(value: object) -> tuple[str, int, str | None] | None:
+    if not isinstance(value, dict):
+        return None
+    date_time = value.get("dateTime")
+    if isinstance(date_time, str) and date_time.strip() != "":
+        time_zone = value.get("timeZone") if isinstance(value.get("timeZone"), str) else None
+        return date_time.strip(), 0, time_zone
+    date_value = value.get("date")
+    if isinstance(date_value, str) and len(date_value.strip()) == 10:
+        return f"{date_value.strip()}T00:00:00+09:00", 1, None
+    return None
+
+
+def normalized_google_calendar_event(
+    item: dict[str, object],
+) -> dict[str, object] | None:
+    start = calendar_google_time_value(item.get("start"))
+    end = calendar_google_time_value(item.get("end"))
+    if start is None:
+        return None
+    if end is None:
+        end = start
+    start_at, all_day, start_time_zone = start
+    end_at, _end_all_day, end_time_zone = end
+    return {
+        "external_etag": item.get("etag") if isinstance(item.get("etag"), str) else None,
+        "external_ical_uid": item.get("iCalUID")
+        if isinstance(item.get("iCalUID"), str)
+        else None,
+        "external_html_link": item.get("htmlLink")
+        if isinstance(item.get("htmlLink"), str)
+        else None,
+        "external_updated_at": item.get("updated")
+        if isinstance(item.get("updated"), str)
+        else None,
+        "google_status": item.get("status") if isinstance(item.get("status"), str) else None,
+        "summary": item.get("summary") if isinstance(item.get("summary"), str) else "",
+        "description": item.get("description")
+        if isinstance(item.get("description"), str)
+        else None,
+        "location": item.get("location") if isinstance(item.get("location"), str) else None,
+        "start_at": start_at,
+        "end_at": end_at,
+        "all_day": all_day,
+        "time_zone": start_time_zone or end_time_zone,
+        "recurring_event_id": item.get("recurringEventId")
+        if isinstance(item.get("recurringEventId"), str)
+        else None,
+    }
+
+
+def apply_google_calendar_event_update(
+    event: CalendarEvent,
+    values: dict[str, object],
+    now: str,
+) -> None:
+    event.external_etag = values["external_etag"]  # type: ignore[assignment]
+    event.external_ical_uid = values["external_ical_uid"]  # type: ignore[assignment]
+    event.external_html_link = values["external_html_link"]  # type: ignore[assignment]
+    event.external_updated_at = values["external_updated_at"]  # type: ignore[assignment]
+    event.google_status = values["google_status"]  # type: ignore[assignment]
+    event.summary = str(values["summary"])
+    event.description = values["description"]  # type: ignore[assignment]
+    event.location = values["location"]  # type: ignore[assignment]
+    event.start_at = str(values["start_at"])
+    event.end_at = str(values["end_at"])
+    event.all_day = int(values["all_day"])
+    event.time_zone = values["time_zone"]  # type: ignore[assignment]
+    event.recurring_event_id = values["recurring_event_id"]  # type: ignore[assignment]
+    event.sync_status = "synced"
+    event.last_synced_at = now
+    event.updated_at = now
+    event.version += 1
+
+
+def mark_missing_calendar_events(
+    session: DatabaseSession,
+    *,
+    calendar_ids: list[str],
+    seen_keys: set[tuple[str, str]],
+    time_min: str,
+    time_max: str,
+    now: str,
+) -> int:
+    existing_events = session.scalars(
+        select(CalendarEvent)
+        .where(CalendarEvent.source == "google")
+        .where(CalendarEvent.external_calendar_id.in_(calendar_ids))
+        .where(CalendarEvent.start_at < time_max)
+        .where(CalendarEvent.end_at > time_min)
+        .where(CalendarEvent.sync_status != "missing_from_google")
+    ).all()
+    missing_count = 0
+    for event in existing_events:
+        if event.external_calendar_id is None or event.external_event_id is None:
+            continue
+        if (event.external_calendar_id, event.external_event_id) in seen_keys:
+            continue
+        event.sync_status = "missing_from_google"
+        event.last_synced_at = now
+        event.updated_at = now
+        event.version += 1
+        missing_count += 1
+    return missing_count
+
+
+def calendar_db_event_item(event: CalendarEvent) -> dict[str, object]:
+    if event.all_day:
+        start: dict[str, object] = {"date": event.start_at[:10]}
+        end: dict[str, object] = {"date": event.end_at[:10]}
+    else:
+        start = {"dateTime": event.start_at}
+        end = {"dateTime": event.end_at}
+        if event.time_zone is not None:
+            start["timeZone"] = event.time_zone
+            end["timeZone"] = event.time_zone
+    return {
+        "id": event.id,
+        "google_event_id": event.external_event_id,
+        "calendar_source_id": event.external_calendar_id,
+        "summary": event.summary,
+        "description": event.description,
+        "location": event.location,
+        "html_link": event.external_html_link,
+        "start": start,
+        "end": end,
+        "status": event.google_status,
+        "created": event.created_at,
+        "updated": event.external_updated_at or event.updated_at,
+        "sync_status": event.sync_status,
+        "attendance_requirement": event.attendance_requirement,
+        "tags_json": event.tags_json,
+        "metadata_json": event.metadata_json,
+        "local_note": event.local_note,
+    }
+
+
+def calendar_event_link_item(
+    session: DatabaseSession,
+    link: CalendarEventLink,
+) -> dict[str, object]:
+    title = link.linked_id
+    href: str | None = None
+    metadata: dict[str, object] = {}
+    if link.linked_type == "case":
+        case = session.get(Case, link.linked_id)
+        if case is not None:
+            title = case.name
+            href = f"/cases/{case.id}"
+            metadata = {"status": case.progress_status, "ball": case.ball_status}
+    elif link.linked_type == "task":
+        task = session.get(Task, link.linked_id)
+        if task is not None:
+            title = task.title
+            href = f"/tasks/{task.id}"
+            metadata = {
+                "status": task.status,
+                "priority": task.priority,
+                "due_at": task.due_at,
+            }
+    elif link.linked_type in {"mail", "gmail_message"}:
+        message = session.get(GmailMessage, link.linked_id)
+        if message is not None:
+            title = message.subject or "(no subject)"
+            href = f"/mail/{message.id}"
+            metadata = {
+                "from": message.from_name or message.from_address,
+                "received_at": message.received_at,
+            }
+    return {
+        "id": link.id,
+        "calendar_event_id": link.calendar_event_id,
+        "linked_type": link.linked_type,
+        "linked_id": link.linked_id,
+        "role": link.role,
+        "title": title,
+        "href": href,
+        "metadata": metadata,
+        "created_at": link.created_at,
+        "updated_at": link.updated_at,
+        "version": link.version,
+    }
+
+
+def calendar_event_mail_summaries(
+    session: DatabaseSession,
+    links: list[CalendarEventLink],
+) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    seen_message_ids: set[str] = set()
+    for link in links:
+        if link.linked_type not in {"mail", "gmail_message"}:
+            continue
+        message = session.get(GmailMessage, link.linked_id)
+        if message is None or message.id in seen_message_ids:
+            continue
+        seen_message_ids.add(message.id)
+        thread_summary = session.scalar(
+            select(MailThreadSummary).where(MailThreadSummary.thread_id == message.thread_id)
+        )
+        mail_summary = session.scalar(
+            select(MailSummary).where(MailSummary.message_id == message.id)
+        )
+        if thread_summary is not None:
+            summary_text = thread_summary.summary_text
+            next_action = thread_summary.next_action
+            source = "thread_summary"
+        elif mail_summary is not None:
+            summary_text = mail_summary.summary_text
+            next_action = mail_summary.next_action
+            source = "mail_summary"
+        else:
+            summary_text = message.snippet or ""
+            next_action = None
+            source = "snippet"
+        items.append(
+            {
+                "message_id": message.id,
+                "thread_id": message.thread_id,
+                "subject": message.subject,
+                "from": message.from_name or message.from_address,
+                "received_at": message.received_at,
+                "summary": summary_text,
+                "next_action": next_action,
+                "source": source,
+                "href": f"/mail/{message.id}",
+            }
+        )
+    return items
+
+
+def validate_calendar_event_link_target(
+    session: DatabaseSession,
+    linked_type: str,
+    linked_id: str,
+) -> None:
+    if linked_type == "case":
+        if session.get(Case, linked_id) is None:
+            raise json_error(404, "CASE_NOT_FOUND", "Case was not found.")
+        return
+    if linked_type == "task":
+        task = session.get(Task, linked_id)
+        if task is None or task.deleted_at is not None:
+            raise json_error(404, "TASK_NOT_FOUND", "Task was not found.")
+        return
+    if linked_type in {"mail", "gmail_message"}:
+        if session.get(GmailMessage, linked_id) is None:
+            raise json_error(404, "MAIL_NOT_FOUND", "Mail was not found.")
+        return
+    raise json_error(
+        400,
+        "UNSUPPORTED_CALENDAR_EVENT_LINK_TYPE",
+        "Calendar event link type is not supported.",
+    )
+
+
+def calendar_list_items(items: list[object]) -> list[dict[str, object]]:
+    return [calendar_list_item(item) for item in items if isinstance(item, dict)]
+
+
+def calendar_list_item(item: dict[str, object]) -> dict[str, object]:
+    access_role = item.get("accessRole") if isinstance(item.get("accessRole"), str) else ""
+    return {
+        "id": item.get("id") if isinstance(item.get("id"), str) else "",
+        "summary": item.get("summary") if isinstance(item.get("summary"), str) else "",
+        "description": item.get("description")
+        if isinstance(item.get("description"), str)
+        else None,
+        "primary": bool(item.get("primary", False)),
+        "access_role": access_role,
+        "background_color": item.get("backgroundColor")
+        if isinstance(item.get("backgroundColor"), str)
+        else None,
+        "foreground_color": item.get("foregroundColor")
+        if isinstance(item.get("foregroundColor"), str)
+        else None,
+        "time_zone": item.get("timeZone") if isinstance(item.get("timeZone"), str) else None,
+        "can_write": access_role in {"owner", "writer"},
+    }
+
+
+def calendar_event_item(item: dict[str, object]) -> dict[str, object]:
+    start = item.get("start")
+    end = item.get("end")
+    return {
+        "id": item.get("id") if isinstance(item.get("id"), str) else None,
+        "summary": item.get("summary") if isinstance(item.get("summary"), str) else "",
+        "description": item.get("description")
+        if isinstance(item.get("description"), str)
+        else None,
+        "location": item.get("location") if isinstance(item.get("location"), str) else None,
+        "html_link": item.get("htmlLink") if isinstance(item.get("htmlLink"), str) else None,
+        "start": start if isinstance(start, dict) else {},
+        "end": end if isinstance(end, dict) else {},
+        "status": item.get("status") if isinstance(item.get("status"), str) else None,
+        "created": item.get("created") if isinstance(item.get("created"), str) else None,
+        "updated": item.get("updated") if isinstance(item.get("updated"), str) else None,
+    }
+
+
+def normalize_optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    stripped = str(value).strip()
+    return stripped or None
+
+
+def calendar_prefill_default_start() -> tuple[str, str]:
+    today = jst_now().date().isoformat()
+    return f"{today}T10:00", f"{today}T11:00"
+
+
+def normalize_calendar_event_prefill_output(output: dict[str, object]) -> dict[str, object]:
+    summary = normalize_optional_text(output.get("summary")) or "メール由来の予定"
+    description = normalize_optional_text(output.get("description"))
+    location = normalize_optional_text(output.get("location"))
+    start_at = normalize_optional_text(output.get("start_at"))
+    end_at = normalize_optional_text(output.get("end_at"))
+    if start_at is None or end_at is None:
+        default_start, default_end = calendar_prefill_default_start()
+        start_at = start_at or default_start
+        end_at = end_at or default_end
+    time_zone = normalize_optional_text(output.get("time_zone")) or "Asia/Tokyo"
+    warnings = output.get("warnings")
+    return {
+        "summary": summary,
+        "description": description,
+        "location": location,
+        "start_at": start_at,
+        "end_at": end_at,
+        "time_zone": time_zone,
+        "reasoning_summary": normalize_optional_text(output.get("reasoning_summary")),
+        "warnings": warnings if isinstance(warnings, list) else [],
+    }
+
+
+def run_calendar_event_prefill(
+    session: DatabaseSession,
+    input_payload: dict[str, object],
+) -> tuple[dict[str, object], str]:
+    provider = build_calendar_event_prefill_provider()
+    now = jst_iso()
+    try:
+        provider_response = provider.complete_json(
+            function_type=FUNCTION_TYPE_CALENDAR_EVENT_PREFILL_GENERATION,
+            input_payload=input_payload,
+        )
+        status = "succeeded"
+        error_type = None
+        error_message = None
+        output = provider_response.output
+    except OpenAIProviderError as exc:
+        provider_response = None
+        status = "failed"
+        error_type = exc.__class__.__name__
+        error_message = str(exc)
+        output = {}
+    llm_run = LlmRun(
+        id=f"llm_run_{uuid.uuid4().hex}",
+        function_type=FUNCTION_TYPE_CALENDAR_EVENT_PREFILL_GENERATION,
+        provider_name=provider.provider_name,
+        model_name=provider.model_name,
+        prompt_version_id=None,
+        input_hash=None,
+        input_source_json=json.dumps(input_payload, ensure_ascii=False),
+        input_diagnostic_json=None,
+        applied_instruction_rule_ids_json=None,
+        output_json=json.dumps(output, ensure_ascii=False) if output else None,
+        output_text_preview=provider_response.output_preview if provider_response else None,
+        status=status,
+        error_type=error_type,
+        error_message=error_message,
+        retry_count=0,
+        max_retry_count=0,
+        prompt_tokens=provider_response.prompt_tokens if provider_response else None,
+        completion_tokens=provider_response.completion_tokens if provider_response else None,
+        total_tokens=provider_response.total_tokens if provider_response else None,
+        estimated_cost=provider_response.estimated_cost if provider_response else None,
+        started_at=now,
+        finished_at=now,
+        created_at=now,
+    )
+    session.add(llm_run)
+    session.flush()
+    if status != "succeeded":
+        raise json_error(
+            502,
+            "LLM_PREFILL_FAILED",
+            error_message or "Calendar event prefill failed.",
+        )
+    return normalize_calendar_event_prefill_output(output), llm_run.id
+
+
+def calendar_case_for_mail(
+    session: DatabaseSession,
+    *,
+    message: GmailMessage,
+    preferred_case_id: str | None,
+) -> Case | None:
+    if preferred_case_id is not None:
+        return session.get(Case, preferred_case_id)
+    thread_message_ids = session.scalars(
+        select(GmailMessage.id)
+        .where(GmailMessage.thread_id == message.thread_id)
+        .order_by(GmailMessage.received_at.desc(), GmailMessage.id.desc())
+    ).all()
+    return session.scalars(
+        select(Case)
+        .join(CaseMailLink, CaseMailLink.case_id == Case.id)
+        .where(CaseMailLink.message_id.in_(thread_message_ids))
+        .group_by(Case.id)
+        .order_by(Case.archived_at.is_not(None), Case.updated_at.desc(), Case.name.asc())
+        .limit(1)
+    ).first()
+
+
+def calendar_event_prefill_input_from_mail(
+    session: DatabaseSession,
+    *,
+    message: GmailMessage,
+    case: Case | None,
+    prompt: str | None,
+) -> dict[str, object]:
+    current_body_text, quoted_reply_context = split_quoted_reply_sections(
+        message.body_text or ""
+    )
+    mail_summary = session.scalar(
+        select(MailSummary).where(MailSummary.message_id == message.id)
+    )
+    thread_summary = session.scalar(
+        select(MailThreadSummary).where(MailThreadSummary.thread_id == message.thread_id)
+    )
+    return {
+        "prompt": prompt or "",
+        "current_date": jst_now().date().isoformat(),
+        "case": {
+            "id": case.id,
+            "name": case.name,
+            "description": case.description,
+            "open_when_date": case.open_when_date,
+            "closed_when_text": case.closed_when_text,
+        }
+        if case is not None
+        else None,
+        "mail": {
+            "id": message.id,
+            "gmail_thread_id": message.gmail_thread_id,
+            "received_at": message.received_at,
+            "subject": message.subject,
+            "from": f"{message.from_name or ''} <{message.from_address}>",
+            "to": message.to_addresses_json,
+            "cc": message.cc_addresses_json,
+            "snippet": message.snippet,
+            "current_message_body": current_body_text or message.body_text or "",
+            "quoted_reply_context": quoted_reply_context,
+        },
+        "summaries": {
+            "mail_summary": mail_summary.summary_text if mail_summary is not None else "",
+            "thread_summary": thread_summary.summary_text
+            if thread_summary is not None
+            else "",
+        },
+    }
+
+
+def upsert_calendar_event_from_google_response(
+    session: DatabaseSession,
+    *,
+    calendar_id: str,
+    item: dict[str, object],
+    now: str,
+) -> CalendarEvent:
+    external_event_id = item.get("id") if isinstance(item.get("id"), str) else None
+    if external_event_id is None or external_event_id.strip() == "":
+        raise json_error(502, "GOOGLE_CALENDAR_API_ERROR", "Calendar API did not return event id.")
+    normalized_event = normalized_google_calendar_event(item)
+    if normalized_event is None:
+        raise json_error(502, "GOOGLE_CALENDAR_API_ERROR", "Calendar API returned invalid event.")
+    event = session.scalar(
+        select(CalendarEvent)
+        .where(CalendarEvent.source == "google")
+        .where(CalendarEvent.external_calendar_id == calendar_id)
+        .where(CalendarEvent.external_event_id == external_event_id)
+    )
+    if event is None:
+        event = CalendarEvent(
+            id=f"calendar_event_{uuid.uuid4().hex}",
+            source="google",
+            external_calendar_id=calendar_id,
+            external_event_id=external_event_id,
+            external_etag=normalized_event["external_etag"],
+            external_ical_uid=normalized_event["external_ical_uid"],
+            external_html_link=normalized_event["external_html_link"],
+            external_updated_at=normalized_event["external_updated_at"],
+            google_status=normalized_event["google_status"],
+            summary=str(normalized_event["summary"]),
+            description=normalized_event["description"],  # type: ignore[arg-type]
+            location=normalized_event["location"],  # type: ignore[arg-type]
+            start_at=str(normalized_event["start_at"]),
+            end_at=str(normalized_event["end_at"]),
+            all_day=int(normalized_event["all_day"]),
+            time_zone=normalized_event["time_zone"],  # type: ignore[arg-type]
+            recurring_event_id=normalized_event["recurring_event_id"],  # type: ignore[arg-type]
+            attendance_requirement="required",
+            tags_json=None,
+            metadata_json=None,
+            sync_status="synced",
+            last_synced_at=now,
+            local_note=None,
+            created_at=now,
+            updated_at=now,
+            version=1,
+        )
+        session.add(event)
+        session.flush()
+        return event
+    apply_google_calendar_event_update(event, normalized_event, now)
+    return event
+
+
+def ensure_calendar_event_link(
+    session: DatabaseSession,
+    *,
+    event: CalendarEvent,
+    linked_type: str,
+    linked_id: str | None,
+    now: str,
+    role: str = "related",
+) -> CalendarEventLink | None:
+    if linked_id is None or linked_id.strip() == "":
+        return None
+    validate_calendar_event_link_target(session, linked_type, linked_id)
+    existing = session.scalar(
+        select(CalendarEventLink)
+        .where(CalendarEventLink.calendar_event_id == event.id)
+        .where(CalendarEventLink.linked_type == linked_type)
+        .where(CalendarEventLink.linked_id == linked_id)
+        .where(CalendarEventLink.role == role)
+    )
+    if existing is not None:
+        return existing
+    link = CalendarEventLink(
+        id=f"calendar_event_link_{uuid.uuid4().hex}",
+        calendar_event_id=event.id,
+        linked_type=linked_type,
+        linked_id=linked_id,
+        role=role,
+        created_at=now,
+        updated_at=now,
+        version=1,
+    )
+    session.add(link)
+    session.flush()
+    return link
 
 
 def gmail_api_send_raw_message(
