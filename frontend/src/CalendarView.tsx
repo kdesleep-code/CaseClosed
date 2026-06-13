@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { DragEvent } from 'react'
+import type { CSSProperties } from 'react'
 import {
   getGoogleGmailStatus,
   listCalendarDbEvents,
   listGoogleCalendars,
   moveCalendarDbEvent,
   syncGoogleCalendarEvents,
+  updateCalendarDbEventTitleFit,
 } from './phase4Api'
 import type { GoogleCalendarEvent, GoogleCalendarListItem } from './phase4Api'
 import { t } from './i18n'
@@ -13,6 +15,16 @@ import { AppLink } from './navigation'
 
 type CalendarEventWithSource = GoogleCalendarEvent & {
   calendar_source_id?: string | null
+}
+
+type CalendarWeekTitleFit = {
+  fit_version?: number
+  title: string
+  font_size_px: number
+  line_height: number
+  line_clamp: number
+  measured_width: number
+  measured_height: number
 }
 
 function jstDateToday() {
@@ -96,6 +108,19 @@ function weekRange(date: string) {
       start.getUTCDate(),
     ),
     end: formatCalendarDate(end.getUTCFullYear(), end.getUTCMonth() + 1, end.getUTCDate()),
+  }
+}
+
+function calendarEventLoadRange(calendarMonth: string, selectedDate: string) {
+  const month = monthRange(calendarMonth)
+  const week = weekRange(selectedDate)
+  const start = month.start < week.start ? month.start : week.start
+  const end = month.end > week.end ? month.end : week.end
+  return {
+    start,
+    end,
+    timeMin: `${start}T00:00:00+09:00`,
+    timeMax: `${end}T00:00:00+09:00`,
   }
 }
 
@@ -243,11 +268,163 @@ function isCalendarEventAttendanceOptional(event: GoogleCalendarEvent) {
   return ['optional', 'not_required', 'unnecessary', 'no_attendance'].includes(value)
 }
 
+function calendarWeekTitleFit(event: GoogleCalendarEvent): CalendarWeekTitleFit | null {
+  if (event.metadata_json === null || event.metadata_json === undefined || event.metadata_json.trim() === '') {
+    return null
+  }
+  try {
+    const metadata = JSON.parse(event.metadata_json) as Record<string, unknown>
+    const fit = metadata.calendar_week_title_fit
+    if (typeof fit !== 'object' || fit === null) return null
+    const candidate = fit as Partial<CalendarWeekTitleFit>
+    if (
+      candidate.fit_version !== WEEK_EVENT_TITLE_FIT_VERSION ||
+      typeof candidate.title !== 'string' ||
+      typeof candidate.font_size_px !== 'number' ||
+      typeof candidate.line_height !== 'number' ||
+      typeof candidate.line_clamp !== 'number'
+    ) {
+      return null
+    }
+    return {
+      fit_version: candidate.fit_version,
+      title: candidate.title,
+      font_size_px: candidate.font_size_px,
+      line_height: candidate.line_height,
+      line_clamp: candidate.line_clamp,
+      measured_width: typeof candidate.measured_width === 'number' ? candidate.measured_width : 0,
+      measured_height: typeof candidate.measured_height === 'number' ? candidate.measured_height : 0,
+    }
+  } catch {
+    return null
+  }
+}
+
 const WEEK_GRID_HEADER_HEIGHT = 48
 const WEEK_GRID_HOUR_HEIGHT = 45
 const WEEK_GRID_START_MINUTES = 6 * 60
 const WEEK_GRID_END_MINUTES = 21 * 60
 const WEEK_GRID_DROP_STEP_MINUTES = 15
+const WEEK_EVENT_TITLE_FIT_VERSION = 2
+
+const WEEK_EVENT_TITLE_FONT_CANDIDATES = [
+  { fontSizePx: 11.5, lineHeight: 1.14 },
+  { fontSizePx: 11, lineHeight: 1.12 },
+  { fontSizePx: 10.5, lineHeight: 1.1 },
+  { fontSizePx: 10, lineHeight: 1.08 },
+  { fontSizePx: 9.5, lineHeight: 1.07 },
+  { fontSizePx: 9, lineHeight: 1.06 },
+  { fontSizePx: 8.5, lineHeight: 1.05 },
+  { fontSizePx: 8, lineHeight: 1.04 },
+] as const
+
+function savedWeekEventTitleStyle(fit: CalendarWeekTitleFit): CSSProperties {
+  return {
+    '--calendar-event-title-font-size': `${fit.font_size_px}px`,
+    '--calendar-event-title-line-height': String(fit.line_height),
+    '--calendar-event-title-line-clamp': String(fit.line_clamp),
+  } as CSSProperties
+}
+
+function CalendarWeekMeasuredTitle({
+  eventId,
+  title,
+}: {
+  eventId: string | null
+  title: string
+}) {
+  const titleRef = useRef<HTMLElement | null>(null)
+  const [style, setStyle] = useState<CSSProperties>({
+    '--calendar-event-title-font-size': '11.5px',
+    '--calendar-event-title-line-height': '1.14',
+    '--calendar-event-title-line-clamp': '2',
+  } as CSSProperties)
+
+  useLayoutEffect(() => {
+    const element = titleRef.current
+    if (element === null || eventId === null) return
+    const parent = element.parentElement
+    if (parent === null) return
+    const titleElement = element
+    const parentElement = parent
+
+    window.requestAnimationFrame(() => {
+      const width = titleElement.clientWidth
+      if (width <= 0) return
+      const parentStyle = window.getComputedStyle(parentElement)
+      const elementStyle = window.getComputedStyle(titleElement)
+      const paddingTop = Number.parseFloat(parentStyle.paddingTop) || 0
+      const paddingBottom = Number.parseFloat(parentStyle.paddingBottom) || 0
+      const availableHeight = Math.max(8, parentElement.clientHeight - paddingTop - paddingBottom - 2)
+      const measure = document.createElement('strong')
+      measure.textContent = title
+      measure.style.position = 'absolute'
+      measure.style.left = '-10000px'
+      measure.style.top = '0'
+      measure.style.visibility = 'hidden'
+      measure.style.pointerEvents = 'none'
+      measure.style.display = 'block'
+      measure.style.width = `${width}px`
+      measure.style.boxSizing = 'border-box'
+      measure.style.whiteSpace = 'normal'
+      measure.style.overflowWrap = 'anywhere'
+      measure.style.wordBreak = 'normal'
+      measure.style.fontFamily = elementStyle.fontFamily
+      measure.style.fontWeight = elementStyle.fontWeight
+      document.body.appendChild(measure)
+      const smallest = WEEK_EVENT_TITLE_FONT_CANDIDATES.at(-1)!
+      let selected = smallest
+      let lineClamp = Math.max(
+        1,
+        Math.floor(availableHeight / (smallest.fontSizePx * smallest.lineHeight)),
+      )
+      for (const candidate of WEEK_EVENT_TITLE_FONT_CANDIDATES) {
+        measure.style.fontSize = `${candidate.fontSizePx}px`
+        measure.style.lineHeight = String(candidate.lineHeight)
+        const lineHeightPx = candidate.fontSizePx * candidate.lineHeight
+        const fullLineCount = Math.max(1, Math.ceil(measure.scrollHeight / lineHeightPx))
+        if (fullLineCount * lineHeightPx <= availableHeight) {
+          selected = candidate
+          lineClamp = fullLineCount
+          break
+        }
+      }
+      if (selected === smallest) {
+        measure.style.fontSize = `${selected.fontSizePx}px`
+        measure.style.lineHeight = String(selected.lineHeight)
+        const lineHeightPx = selected.fontSizePx * selected.lineHeight
+        const fullLineCount = Math.max(1, Math.ceil(measure.scrollHeight / lineHeightPx))
+        lineClamp = Math.min(
+          fullLineCount,
+          Math.max(1, Math.floor(availableHeight / lineHeightPx)),
+        )
+      }
+      document.body.removeChild(measure)
+      const nextStyle = {
+        '--calendar-event-title-font-size': `${selected.fontSizePx}px`,
+        '--calendar-event-title-line-height': String(selected.lineHeight),
+        '--calendar-event-title-line-clamp': String(lineClamp),
+      } as CSSProperties
+      setStyle(nextStyle)
+      void updateCalendarDbEventTitleFit(eventId, {
+        title,
+        font_size_px: selected.fontSizePx,
+        line_height: selected.lineHeight,
+        line_clamp: lineClamp,
+        measured_width: width,
+        measured_height: parentElement.clientHeight,
+      }).catch(() => {
+        // Display measurement is a performance hint. Ignore persistence failures.
+      })
+    })
+  }, [eventId, title])
+
+  return (
+    <strong ref={titleRef} style={style}>
+      {title}
+    </strong>
+  )
+}
 
 function formatMinutes(minutes: number) {
   const hour = Math.floor(minutes / 60)
@@ -321,11 +498,16 @@ function CalendarView() {
 
   const selectedMonthDays = useMemo(() => calendarDays(calendarMonth), [calendarMonth])
   const selectedWeekDays = useMemo(() => weekDays(selectedDate), [selectedDate])
+  const eventLoadRange = useMemo(
+    () => calendarEventLoadRange(calendarMonth, selectedDate),
+    [calendarMonth, selectedDate],
+  )
   const weekLabel = `${selectedWeekDays[0]} - ${selectedWeekDays[6]}`
   const weekHours = useMemo(
     () => Array.from({ length: 16 }, (_, index) => 6 + index),
     [],
   )
+
   const eventsByDate = useMemo(() => {
     const grouped = new Map<string, CalendarEventWithSource[]>()
     events.forEach((event) => {
@@ -499,11 +681,10 @@ function CalendarView() {
       if (includesPrimaryCalendar && !queryCalendarIds.includes('primary')) {
         queryCalendarIds.push('primary')
       }
-      const range = monthRange(calendarMonth)
       const eventPages = await listCalendarDbEvents({
         calendar_id: queryCalendarIds,
-        time_min: range.timeMin,
-        time_max: range.timeMax,
+        time_min: eventLoadRange.timeMin,
+        time_max: eventLoadRange.timeMax,
       })
       setEvents(
         eventPages.items
@@ -653,7 +834,7 @@ function CalendarView() {
 
   useEffect(() => {
     void loadMonthEvents()
-  }, [calendarMonth, selectedCalendarIds])
+  }, [eventLoadRange.timeMin, eventLoadRange.timeMax, selectedCalendarIds])
 
   function toggleCalendar(calendarId: string) {
     setSelectedCalendarIds((current) => {
@@ -793,7 +974,12 @@ function CalendarView() {
                       {dragPreview.label}
                     </span>
                   )}
-                  {positionedWeekEvents.map(({ event, dayIndex, top, height, isAllDay, isShort, laneCount, laneOffsetRatio, laneWidthRatio }) => (
+                  {positionedWeekEvents.map(({ event, dayIndex, top, height, isAllDay, isShort, laneCount, laneOffsetRatio, laneWidthRatio }) => {
+                    const title = event.summary || t('calendar.noTitle')
+                    const titleFit = calendarWeekTitleFit(event)
+                    const savedTitleStyle =
+                      titleFit !== null && titleFit.title === title ? savedWeekEventTitleStyle(titleFit) : {}
+                    return (
                     <AppLink
                       className={`calendar-week-event calendar-week-event-positioned${
                         isAllDay ? ' calendar-week-event-all-day' : ''
@@ -841,12 +1027,18 @@ function CalendarView() {
                           ? 'calc((100% - 58px) / 7 - 8px)'
                           : `calc(((100% - 58px) / 7 - 8px) * ${laneWidthRatio} - 2px)`,
                         height: `${height}px`,
+                        ...savedTitleStyle,
                       }}
                       href={`/calendar/events/${encodeURIComponent(event.id ?? '')}`}
                     >
-                      <strong>{event.summary || t('calendar.noTitle')}</strong>
+                      {titleFit !== null && titleFit.title === title ? (
+                        <strong>{title}</strong>
+                      ) : (
+                        <CalendarWeekMeasuredTitle eventId={event.id} title={title} />
+                      )}
                     </AppLink>
-                  ))}
+                    )
+                  })}
                   <div aria-hidden="true" className="calendar-week-corner" />
                   {selectedWeekDays.map((date) => {
                     const weekdayIndex = new Date(`${date}T00:00:00Z`).getUTCDay()

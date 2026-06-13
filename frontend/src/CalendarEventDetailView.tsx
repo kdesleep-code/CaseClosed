@@ -5,10 +5,12 @@ import {
   createCalendarDbEventLink,
   deleteCalendarDbEventLink,
   getCalendarDbEvent,
+  listGoogleCalendars,
   moveCalendarDbEvent,
+  updateCalendarDbEvent,
 } from './phase4Api'
 import { listMailPage } from './phase4Api'
-import type { CalendarEventDetail, GoogleCalendarEvent, MailListItem } from './phase4Api'
+import type { CalendarEventDetail, GoogleCalendarEvent, GoogleCalendarListItem, MailListItem } from './phase4Api'
 import { listCases } from './phase7Api'
 import type { CaseItem } from './phase7Api'
 import { listTasks } from './phase8Api'
@@ -176,8 +178,11 @@ export default function CalendarEventDetailView({
   mode?: 'detail' | 'edit' | 'attach-mail'
 }) {
   const [detail, setDetail] = useState<CalendarEventDetail | null>(null)
+  const [calendars, setCalendars] = useState<GoogleCalendarListItem[]>([])
   const [cases, setCases] = useState<CaseItem[]>([])
   const [tasks, setTasks] = useState<TaskItem[]>([])
+  const [summaryDraft, setSummaryDraft] = useState('')
+  const [calendarIdDraft, setCalendarIdDraft] = useState('')
   const [caseQuery, setCaseQuery] = useState('')
   const [taskQuery, setTaskQuery] = useState('')
   const [startDraft, setStartDraft] = useState('')
@@ -190,6 +195,7 @@ export default function CalendarEventDetailView({
   const [selectedMails, setSelectedMails] = useState<Record<string, MailListItem>>({})
   const [isLoading, setIsLoading] = useState(true)
   const [isSavingLink, setIsSavingLink] = useState(false)
+  const [isSavingEvent, setIsSavingEvent] = useState(false)
   const [isSavingTime, setIsSavingTime] = useState(false)
   const [isSearchingMails, setIsSearchingMails] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -225,11 +231,12 @@ export default function CalendarEventDetailView({
       return
     }
     let isMounted = true
-    Promise.all([listCases('all'), listTasks({ limit: 200 })])
-      .then(([caseItems, taskItems]) => {
+    Promise.all([listCases('all'), listTasks({ limit: 200 }), listGoogleCalendars()])
+      .then(([caseItems, taskItems, calendarItems]) => {
         if (isMounted) {
           setCases(caseItems.filter((item) => item.archived_at === null))
           setTasks(taskItems.filter((item) => item.deleted_at === null))
+          setCalendars(calendarItems)
         }
       })
       .catch((requestError) => {
@@ -322,9 +329,31 @@ export default function CalendarEventDetailView({
 
   useEffect(() => {
     if (mode !== 'edit' || event === null) return
+    setSummaryDraft(event.summary)
+    setCalendarIdDraft(event.calendar_source_id ?? 'primary')
     setStartDraft(eventDateTimeInputValue(event, 'start'))
     setEndDraft(eventDateTimeInputValue(event, 'end'))
   }, [event?.id, mode])
+
+  async function saveEventBasics() {
+    if (summaryDraft.trim() === '') {
+      setLinkError(t('calendar.event.titleRequired'))
+      return
+    }
+    setIsSavingEvent(true)
+    setLinkError(null)
+    try {
+      await updateCalendarDbEvent(eventId, {
+        summary: summaryDraft,
+        calendar_id: calendarIdDraft,
+      })
+      setDetail(await getCalendarDbEvent(eventId))
+    } catch (requestError) {
+      setLinkError(requestError instanceof Error ? requestError.message : t('app.requestFailed'))
+    } finally {
+      setIsSavingEvent(false)
+    }
+  }
 
   async function saveDateTime() {
     if (startDraft.trim() === '' || endDraft.trim() === '') {
@@ -530,6 +559,41 @@ export default function CalendarEventDetailView({
                       <p role="alert">{linkError}</p>
                     </div>
                   )}
+                  <section className="calendar-event-link-editor">
+                    <div className="calendar-event-link-row calendar-event-basics-row">
+                      <label className="calendar-event-link-field">
+                        <span>{t('calendar.event.title')}</span>
+                        <input
+                          onChange={(inputEvent) => setSummaryDraft(inputEvent.target.value)}
+                          value={summaryDraft}
+                        />
+                      </label>
+                      <label className="calendar-event-link-field">
+                        <span>{t('calendar.event.calendarSource')}</span>
+                        <select
+                          onChange={(inputEvent) => setCalendarIdDraft(inputEvent.target.value)}
+                          value={calendarIdDraft}
+                        >
+                          {calendars.map((calendar) => (
+                            <option key={calendar.id} value={calendar.id}>
+                              {calendar.summary}
+                            </option>
+                          ))}
+                          {calendars.length === 0 && (
+                            <option value={calendarIdDraft}>{calendarIdDraft || '-'}</option>
+                          )}
+                        </select>
+                      </label>
+                      <button
+                        className={`button-loading-dot${isSavingEvent ? ' is-loading' : ''}`}
+                        disabled={isSavingEvent}
+                        onClick={() => void saveEventBasics()}
+                        type="button"
+                      >
+                        {t('common.update')}
+                      </button>
+                    </div>
+                  </section>
                   <section className="calendar-event-link-editor">
                     <div className="calendar-event-datetime-row">
                       <label>

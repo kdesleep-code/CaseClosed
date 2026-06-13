@@ -89,6 +89,7 @@ class CaseUpdate(BaseModel):
     open_when_date: str | None = None
     open_when_text: str | None = None
     closed_when_text: str | None = None
+    genre_id: str | None = None
     tags: list[str] | None = None
 
 
@@ -500,6 +501,38 @@ def case_next_calendar_event_data(
         "all_day": bool(event.all_day),
         "location": event.location,
     }
+
+
+def case_calendar_event_items(
+    session: DatabaseSession,
+    case_id: str,
+    *,
+    limit: int = 500,
+) -> list[dict[str, object]]:
+    events = session.scalars(
+        select(CalendarEvent)
+        .join(CalendarEventLink, CalendarEventLink.calendar_event_id == CalendarEvent.id)
+        .where(CalendarEventLink.linked_type == "case")
+        .where(CalendarEventLink.linked_id == case_id)
+        .where(CalendarEvent.sync_status != "cancelled")
+        .where(
+            (CalendarEvent.google_status.is_(None))
+            | (CalendarEvent.google_status != "cancelled"),
+        )
+        .order_by(CalendarEvent.start_at.asc(), CalendarEvent.summary.asc())
+        .limit(limit)
+    ).all()
+    return [
+        {
+            "id": event.id,
+            "title": event.summary,
+            "starts_at": event.start_at,
+            "ends_at": event.end_at,
+            "all_day": bool(event.all_day),
+            "location": event.location,
+        }
+        for event in events
+    ]
 
 
 def case_mail_link_data(
@@ -1523,7 +1556,7 @@ def get_case(
             "case": case_data(case, session),
             "related_mails": case_mail_link_items(session, case.id),
             "tasks": [case_task_data(task) for task in case_open_tasks(session, case.id)],
-            "calendar_events": [],
+            "calendar_events": case_calendar_event_items(session, case.id),
             "contacts": [],
             "files": [],
             "stakeholders": stakeholder_items(session, case.id),
@@ -2244,6 +2277,9 @@ def update_case(
     )
     case.open_when_text = None
     case.closed_when_text = normalized_optional_text(payload.closed_when_text)
+    if payload.genre_id is not None and session.get(CaseGenre, payload.genre_id) is None:
+        raise json_error(422, "VALIDATION_ERROR", "Case genre not found.")
+    case.genre_id = payload.genre_id
     if payload.tags is not None:
         case.tags_json = json.dumps(normalize_case_tags(payload.tags), ensure_ascii=False)
     case.updated_at = jst_iso()

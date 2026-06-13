@@ -7338,6 +7338,7 @@
 
 .case-overview-form textarea,
 .case-overview-form input,
+.case-overview-form select,
 .case-overview-panel dl input,
 .case-overview-panel dl textarea {
   width: 100%;
@@ -7352,8 +7353,10 @@
   resize: vertical;
 }
 
-.case-overview-form input {
+.case-overview-form input,
+.case-overview-form select {
   resize: none;
+  min-height: 42px;
 }
 
 .case-overview-panel dl input {
@@ -7952,6 +7955,68 @@
   height: 5px;
   border-radius: 999px;
   background: var(--accent);
+}
+
+.case-calendar-day-popover {
+  width: max-content;
+  min-width: 150px;
+  max-width: 240px;
+  border: 1px solid rgba(145, 78, 43, 0.18);
+  border-radius: 8px;
+  padding: 8px;
+  display: none;
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  z-index: 20;
+  color: var(--text-heading);
+  background: rgba(255, 253, 247, 0.98);
+  box-shadow: var(--shadow-lg);
+  text-align: left;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.case-calendar-day-popover::after {
+  width: 9px;
+  height: 9px;
+  border-right: 1px solid rgba(145, 78, 43, 0.18);
+  border-bottom: 1px solid rgba(145, 78, 43, 0.18);
+  position: absolute;
+  left: 50%;
+  bottom: -5px;
+  background: rgba(255, 253, 247, 0.98);
+  content: '';
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.case-calendar-day-has-event:hover .case-calendar-day-popover,
+.case-calendar-day-has-event:focus-visible .case-calendar-day-popover {
+  display: grid;
+  gap: 6px;
+}
+
+.case-calendar-day-popover > span {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.case-calendar-day-popover strong,
+.case-calendar-day-popover small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.case-calendar-day-popover strong {
+  font-size: 0.76rem;
+}
+
+.case-calendar-day-popover small {
+  color: var(--text-soft);
+  font-size: 0.68rem;
 }
 
 .case-calendar-gadget-next {
@@ -8614,9 +8679,9 @@
   border: 1px solid rgba(145, 78, 43, 0.14);
   border-radius: 8px;
   display: grid;
-  grid-template-columns: 58px repeat(7, minmax(84px, 1fr));
+  grid-template-columns: 58px repeat(7, minmax(0, 1fr));
   position: relative;
-  overflow: auto;
+  overflow: hidden;
   background: rgba(255, 253, 247, 0.54);
 }
 
@@ -8648,6 +8713,7 @@
 
 .calendar-week-corner,
 .calendar-week-day-heading {
+  min-width: 0;
   min-height: 48px;
   border: 0;
   border-right: 1px solid rgba(145, 78, 43, 0.12);
@@ -8723,6 +8789,7 @@
 }
 
 .calendar-week-row > time {
+  min-width: 0;
   min-height: 45px;
   border-right: 1px solid rgba(145, 78, 43, 0.12);
   border-bottom: 1px solid rgba(145, 78, 43, 0.1);
@@ -8824,12 +8891,21 @@
 
 .calendar-week-event strong {
   color: var(--text-heading);
-  font-size: 0.72rem;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: var(--calendar-event-title-line-clamp, 2);
+  line-clamp: var(--calendar-event-title-line-clamp, 2);
+  max-height: calc(
+    var(--calendar-event-title-font-size, 0.72rem) *
+      var(--calendar-event-title-line-height, 1.2) *
+      var(--calendar-event-title-line-clamp, 2)
+  );
+  font-size: var(--calendar-event-title-font-size, 0.72rem);
   font-weight: 820;
-  line-height: 1.2;
+  line-height: var(--calendar-event-title-line-height, 1.2);
   white-space: normal;
   overflow-wrap: anywhere;
-  word-break: break-word;
+  word-break: normal;
 }
 
 .calendar-week-event span {
@@ -8850,10 +8926,9 @@
 }
 
 .calendar-week-event-narrow strong {
-  font-size: 0.62rem;
-  line-height: 1.12;
   letter-spacing: 0;
-  word-break: break-all;
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 
 .calendar-event-detail-layout {
@@ -9084,7 +9159,8 @@
   font-weight: 720;
 }
 
-.calendar-event-link-field input {
+.calendar-event-link-field input,
+.calendar-event-link-field select {
   min-width: 0;
   width: 100%;
   min-height: 38px;
@@ -9097,7 +9173,8 @@
   font-size: 0.95rem;
 }
 
-.calendar-event-link-field input:focus-visible {
+.calendar-event-link-field input:focus-visible,
+.calendar-event-link-field select:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
@@ -11169,16 +11246,18 @@ button.task-gadget-action:disabled {
 }
 
 .case-row {
+  --case-row-tags-width: clamp(248px, 16vw, 258px);
   position: relative;
   box-sizing: border-box;
   width: 100%;
   min-width: 0;
   border-left: 6px solid var(--case-genre-color, #ffffff);
   display: grid;
-  grid-template-columns: minmax(210px, 0.7fr) minmax(420px, 1.45fr) minmax(292px, 292px);
+  grid-template-columns: minmax(160px, 0.68fr) minmax(0, 1.32fr);
   align-items: center;
   gap: 14px;
   padding-left: 14px;
+  padding-right: calc(var(--case-row-tags-width) + 28px);
   color: inherit;
   text-decoration: none;
   cursor: pointer;
@@ -11236,13 +11315,16 @@ button.task-gadget-action:disabled {
 }
 
 .case-row-tags span {
-  max-width: min(100%, 180px);
+  width: fit-content;
+  max-width: 132px;
+  flex: 0 0 auto;
+  min-width: 0;
   border: 1px solid rgba(145, 78, 43, 0.18);
   border-radius: 999px;
-  padding: 4px 9px;
+  padding: 4px 8px;
   color: var(--text-heading);
   background: rgba(255, 246, 232, 0.86);
-  font-size: 0.82rem;
+  font-size: 0.78rem;
   font-weight: 760;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -11250,7 +11332,7 @@ button.task-gadget-action:disabled {
 }
 
 .case-row-tags-more {
-  max-width: 64px;
+  max-width: 58px;
 }
 
 .case-row-meta,
@@ -11313,19 +11395,34 @@ button.task-gadget-action:disabled {
 }
 
 .case-row-tags {
-  width: 100%;
+  width: var(--case-row-tags-width);
   min-width: 0;
-  max-height: 64px;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 138px));
+  height: 64px;
+  box-sizing: border-box;
+  padding-block: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  position: absolute;
+  right: 16px;
+  top: 50%;
   justify-content: flex-end;
   align-content: center;
-  gap: 7px;
+  align-items: center;
+  gap: 6px;
   overflow: hidden;
+  transform: translateY(-50%);
 }
 
 .case-overview-tags {
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  margin-top: 10px;
+  padding-block: 0;
+  position: static;
   justify-content: flex-start;
+  align-content: start;
+  transform: none;
 }
 
 .case-form button {
@@ -11396,6 +11493,7 @@ button.task-gadget-action:disabled {
   .case-row {
     grid-template-columns: minmax(0, 1fr);
     align-items: stretch;
+    padding-right: 16px;
   }
 
   .case-main-layout,
@@ -11455,6 +11553,9 @@ button.task-gadget-action:disabled {
   }
 
   .case-row-tags {
+    position: static;
+    width: 100%;
+    transform: none;
     width: 100%;
   }
 

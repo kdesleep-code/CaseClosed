@@ -13,6 +13,8 @@ from email.utils import getaddresses
 from email.utils import parseaddr
 from urllib.parse import urlencode
 from urllib.parse import quote
+from urllib.parse import unquote
+from urllib.parse import unquote_plus
 from urllib.error import HTTPError
 from urllib.error import URLError
 from urllib.request import Request
@@ -83,6 +85,10 @@ class GmailImportByDatePayload(BaseModel):
     date: str
 
 
+class GmailSpecialImportPayload(BaseModel):
+    source: str = Field(min_length=1)
+
+
 @dataclass(frozen=True)
 class GmailAutoImportPlan:
     import_message_ids: list[str]
@@ -117,6 +123,23 @@ class CalendarEventMovePayload(BaseModel):
     start: str = Field(min_length=1)
     end: str = Field(min_length=1)
     time_zone: str = "Asia/Tokyo"
+
+
+class CalendarEventUpdatePayload(BaseModel):
+    summary: str | None = None
+    calendar_id: str | None = None
+
+
+class CalendarEventTitleFitPayload(BaseModel):
+    title: str = Field(min_length=1)
+    font_size_px: float = Field(gt=0)
+    line_height: float = Field(gt=0)
+    line_clamp: int = Field(ge=1)
+    measured_width: float = Field(ge=0)
+    measured_height: float = Field(ge=0)
+
+
+CALENDAR_WEEK_TITLE_FIT_VERSION = 2
 
 
 class CalendarEventFromMailPrefillPayload(BaseModel):
@@ -596,6 +619,100 @@ def calendar_db_event_detail(
     }
 
 
+@router.patch("/calendar/db-events/{event_id}")
+def update_calendar_db_event(
+    event_id: str,
+    payload: CalendarEventUpdatePayload,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    event = session.get(CalendarEvent, event_id)
+    if (
+        event is None
+        or event.sync_status in {"missing_from_google", "cancelled"}
+        or event.google_status == "cancelled"
+    ):
+        raise json_error(404, "CALENDAR_EVENT_NOT_FOUND", "Calendar event was not found.")
+
+    summary = payload.summary.strip() if payload.summary is not None else None
+    if payload.summary is not None and (summary is None or summary == ""):
+        raise json_error(422, "VALIDATION_ERROR", "Event title is required.")
+    target_calendar_id = payload.calendar_id.strip() if payload.calendar_id is not None else None
+    if target_calendar_id == "":
+        target_calendar_id = None
+
+    now = jst_iso()
+    if event.source == "google":
+        connection = read_setting_json(session, GMAIL_CONNECTION_KEY) or {}
+        connected, _can_read, can_write = calendar_connection_state(session)
+        if not connected:
+            raise json_error(
+                409,
+                "GOOGLE_CALENDAR_NOT_CONNECTED",
+                "Google Calendar is not connected.",
+            )
+        if not can_write:
+            raise json_error(
+                403,
+                "GOOGLE_CALENDAR_SCOPE_MISSING",
+                "Google Calendar event scope is not granted. Reconnect Google.",
+            )
+        if event.external_calendar_id is None or event.external_event_id is None:
+            raise json_error(
+                409,
+                "GOOGLE_CALENDAR_EVENT_NOT_LINKED",
+                "Calendar event is not linked to a Google event.",
+            )
+        access_token = google_gmail_access_token(session, connection)
+        calendar_id = event.external_calendar_id
+        google_event_id = event.external_event_id
+        google_data: dict[str, object] | None = None
+        if summary is not None:
+            google_data = calendar_api_patch_json(
+                encoded_calendar_path(calendar_id, f"/events/{quote(google_event_id, safe='')}"),
+                access_token,
+                {"summary": summary},
+            )
+        if target_calendar_id is not None and target_calendar_id != calendar_id:
+            google_data = calendar_api_post_json(
+                encoded_calendar_path(
+                    calendar_id,
+                    f"/events/{quote(google_event_id, safe='')}/move?destination={quote(target_calendar_id, safe='')}",
+                ),
+                access_token,
+                {},
+            )
+            calendar_id = target_calendar_id
+        if google_data is None:
+            google_data = calendar_api_get_json(
+                encoded_calendar_path(calendar_id, f"/events/{quote(google_event_id, safe='')}"),
+                access_token,
+                {},
+            )
+        db_event = upsert_calendar_event_from_google_response(
+            session,
+            calendar_id=calendar_id,
+            item=google_data,
+            now=now,
+        )
+        session.commit()
+        return {
+            "ok": True,
+            "data": {
+                "event": calendar_db_event_item(db_event),
+                "google_event": calendar_event_item(google_data),
+            },
+        }
+
+    if summary is not None:
+        event.summary = summary
+    if target_calendar_id is not None:
+        event.external_calendar_id = target_calendar_id
+    event.updated_at = now
+    event.version += 1
+    session.commit()
+    return {"ok": True, "data": {"event": calendar_db_event_item(event), "google_event": None}}
+
+
 @router.patch("/calendar/db-events/{event_id}/move")
 def move_calendar_db_event(
     event_id: str,
@@ -675,6 +792,44 @@ def move_calendar_db_event(
     event.version += 1
     session.commit()
     return {"ok": True, "data": {"event": calendar_db_event_item(event), "google_event": None}}
+
+
+@router.patch("/calendar/db-events/{event_id}/title-fit")
+def update_calendar_db_event_title_fit(
+    event_id: str,
+    payload: CalendarEventTitleFitPayload,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    event = session.get(CalendarEvent, event_id)
+    if (
+        event is None
+        or event.sync_status in {"missing_from_google", "cancelled"}
+        or event.google_status == "cancelled"
+    ):
+        raise json_error(404, "CALENDAR_EVENT_NOT_FOUND", "Calendar event was not found.")
+    metadata: dict[str, object] = {}
+    if event.metadata_json is not None and event.metadata_json.strip() != "":
+        try:
+            loaded = json.loads(event.metadata_json)
+            if isinstance(loaded, dict):
+                metadata = loaded
+        except json.JSONDecodeError:
+            metadata = {}
+    metadata["calendar_week_title_fit"] = {
+        "fit_version": CALENDAR_WEEK_TITLE_FIT_VERSION,
+        "title": payload.title,
+        "font_size_px": payload.font_size_px,
+        "line_height": payload.line_height,
+        "line_clamp": payload.line_clamp,
+        "measured_width": payload.measured_width,
+        "measured_height": payload.measured_height,
+        "measured_at": jst_iso(),
+    }
+    event.metadata_json = json.dumps(metadata, ensure_ascii=True, sort_keys=True)
+    event.updated_at = jst_iso()
+    event.version += 1
+    session.commit()
+    return {"ok": True, "data": {"event": calendar_db_event_item(event)}}
 
 
 @router.post("/calendar/db-events/{event_id}/links")
@@ -1092,6 +1247,54 @@ def import_unloaded_google_gmail_by_date(
     }
 
 
+@router.post("/import-special-thread")
+def import_special_google_gmail_thread(
+    payload: GmailSpecialImportPayload,
+    background_tasks: BackgroundTasks,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    gmail_source_id = gmail_source_identifier(payload.source)
+    gmail_search_query = gmail_search_query_from_source(payload.source)
+    connection = read_setting_json(session, GMAIL_CONNECTION_KEY) or {}
+    access_token = google_gmail_access_token(session, connection)
+    gmail_messages = gmail_messages_for_special_import(
+        access_token,
+        gmail_source_id,
+        gmail_search_query,
+    )
+    imported: list[dict[str, object]] = []
+    skipped_drafts = 0
+    for gmail_message in gmail_messages:
+        if gmail_message_is_draft(gmail_message):
+            skipped_drafts += 1
+            continue
+        mail_input = gmail_message_to_mail_input(gmail_message)
+        result = ingest_mock_mail(session, mail_input, force_skip=True)
+        imported.append(
+            {
+                "mail": mail_ingestion_result_data(result),
+                "subject": mail_input.subject,
+                "from_address": mail_input.from_address,
+                "received_at": mail_input.received_at,
+            }
+        )
+    if imported:
+        background_tasks.add_task(
+            kick_job_drain,
+            reason="google_gmail_special_import",
+        )
+    return {
+        "ok": True,
+        "data": {
+            "source_id": gmail_source_id,
+            "imported_count": len(imported),
+            "candidate_count": len(gmail_messages),
+            "skipped_drafts": skipped_drafts,
+            "items": imported,
+        },
+    }
+
+
 def run_google_gmail_auto_import_once(
     session: DatabaseSession,
     *,
@@ -1242,6 +1445,122 @@ def parse_import_date(value: str) -> date:
         ) from error
 
 
+def gmail_source_identifier(value: str) -> str:
+    source = value.strip()
+    if source == "":
+        raise json_error(422, "VALIDATION_ERROR", "Gmail URL or ID is required.")
+    decoded = unquote(source)
+    for pattern in (r"[?&#]th=([^&#/?\])\)]+)", r"[?&#]msg=([^&#/?\])\)]+)"):
+        match = re.search(pattern, decoded)
+        if match is not None:
+            source = match.group(1)
+            break
+    else:
+        source = gmail_url_tail_identifier(decoded)
+    source = clean_gmail_identifier(source)
+    if source == "":
+        raise json_error(422, "VALIDATION_ERROR", "Gmail URL or ID is required.")
+    return source
+
+
+def gmail_search_query_from_source(value: str) -> str | None:
+    source = value.strip()
+    if "#search/" not in source:
+        return None
+    search_tail = source.rsplit("#search/", 1)[-1]
+    query_part = search_tail.split("/", 1)[0].strip()
+    if query_part == "":
+        return None
+    query = unquote_plus(query_part).strip()
+    return query if query != "" else None
+
+
+def gmail_url_tail_identifier(value: str) -> str:
+    candidates: list[str] = []
+    if "#" in value:
+        candidates.extend(value.rsplit("#", 1)[1].split("/"))
+    candidates.extend(re.split(r"[/#]", value))
+    for candidate in reversed(candidates):
+        identifier = clean_gmail_identifier(candidate)
+        if gmail_identifier_like(identifier):
+            return identifier
+    return value
+
+
+def clean_gmail_identifier(value: str) -> str:
+    return value.strip().strip("<>[](){}'\".,;")
+
+
+def gmail_identifier_like(value: str) -> bool:
+    if len(value) < 8:
+        return False
+    return re.fullmatch(r"[A-Za-z0-9_-]+", value) is not None
+
+
+def gmail_messages_for_special_import(
+    access_token: str,
+    gmail_source_id: str,
+    search_query: str | None = None,
+) -> list[dict[str, object]]:
+    thread_data = gmail_api_try_get_json(
+        f"/users/me/threads/{quote(gmail_source_id, safe='')}",
+        access_token,
+        {"format": "full"},
+    )
+    if thread_data is not None:
+        messages = thread_data.get("messages")
+        if isinstance(messages, list):
+            return [message for message in messages if isinstance(message, dict)]
+        return []
+
+    message_data = gmail_api_try_get_json(
+        f"/users/me/messages/{quote(gmail_source_id, safe='')}",
+        access_token,
+        {"format": "full"},
+    )
+    if message_data is not None:
+        thread_id = message_data.get("threadId")
+        if isinstance(thread_id, str) and thread_id.strip() != "":
+            thread_data = gmail_api_try_get_json(
+                f"/users/me/threads/{quote(thread_id, safe='')}",
+                access_token,
+                {"format": "full"},
+            )
+            if thread_data is not None:
+                messages = thread_data.get("messages")
+                if isinstance(messages, list):
+                    return [message for message in messages if isinstance(message, dict)]
+        return [message_data]
+
+    if search_query is not None:
+        thread_list_data = gmail_api_try_get_json(
+            "/users/me/threads",
+            access_token,
+            {"q": search_query, "maxResults": 1},
+        )
+        if thread_list_data is not None:
+            thread_refs = thread_list_data.get("threads")
+            if isinstance(thread_refs, list) and thread_refs:
+                thread_ref = thread_refs[0]
+                if isinstance(thread_ref, dict):
+                    thread_id = thread_ref.get("id")
+                    if isinstance(thread_id, str) and thread_id.strip() != "":
+                        thread_data = gmail_api_try_get_json(
+                            f"/users/me/threads/{quote(thread_id, safe='')}",
+                            access_token,
+                            {"format": "full"},
+                        )
+                        if thread_data is not None:
+                            messages = thread_data.get("messages")
+                            if isinstance(messages, list):
+                                return [message for message in messages if isinstance(message, dict)]
+    raise json_error(
+        404,
+        "GOOGLE_GMAIL_NOT_FOUND",
+        "Gmail thread or message was not found.",
+    )
+
+
 def exchange_authorization_code(code: str) -> dict[str, object]:
     client_id = get_google_oauth_client_id()
     client_secret = get_google_oauth_client_secret()
@@ -1368,6 +1687,46 @@ def gmail_api_get_json(
             data = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         details = read_google_error_details(exc)
+        raise json_error(
+            exc.code,
+            "GOOGLE_GMAIL_API_FORBIDDEN"
+            if exc.code == 403
+            else "GOOGLE_GMAIL_API_ERROR",
+            details or f"Gmail API request failed with HTTP {exc.code}.",
+        ) from exc
+    except URLError as exc:
+        raise json_error(
+            502,
+            "GOOGLE_GMAIL_API_ERROR",
+            f"Gmail API request failed: {exc.reason}",
+        ) from exc
+    if not isinstance(data, dict):
+        raise json_error(502, "GOOGLE_GMAIL_API_ERROR", "Invalid Gmail API response.")
+    return data
+
+
+def gmail_api_try_get_json(
+    path: str,
+    access_token: str,
+    params: dict[str, object] | None = None,
+) -> dict[str, object] | None:
+    query = "" if not params else f"?{urlencode(params)}"
+    request = Request(
+        f"{GMAIL_API_BASE_URL}{path}{query}",
+        headers={"Authorization": f"Bearer {access_token}"},
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        details = read_google_error_details(exc)
+        if exc.code == 404 or (
+            exc.code == 400
+            and isinstance(details, str)
+            and "Invalid id value" in details
+        ):
+            return None
         raise json_error(
             exc.code,
             "GOOGLE_GMAIL_API_FORBIDDEN"

@@ -48,6 +48,7 @@ from caseclosed.db.models import StorageObject
 from caseclosed.db.models import StorageObjectVersion
 from caseclosed.db.models import StorageOperationHistory
 from caseclosed.db.models import Task
+from caseclosed.db.runtime import case_handover_storage_directory_id
 from caseclosed.db.runtime import case_storage_directory_id
 from caseclosed.db.runtime import get_session
 from caseclosed.db.runtime import jst_iso
@@ -60,7 +61,7 @@ router = APIRouter(prefix="/api/v1/storage", tags=["storage"])
 
 MAX_CONTACT_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_CONTACT_IMAGE_SIDE = 256
-MAX_TMP_OBJECT_BYTES = 300 * 1024 * 1024
+MAX_TMP_OBJECT_BYTES = 1024 * 1024 * 1024
 MAX_ARCHIVE_TREE_ENTRIES = 1000
 MAX_FILE_SUMMARY_INPUT_BYTES = 900 * 1024
 MAX_FILE_SUMMARY_INPUT_CHARS = 60000
@@ -125,6 +126,10 @@ class StorageObjectLlmInputPatch(BaseModel):
 
 class StorageObjectDirectoryPatch(BaseModel):
     directory_id: str | None = None
+
+
+class StorageDirectoryParentPatch(BaseModel):
+    parent_id: str | None = None
 
 
 class StorageObjectCaseLinkCreate(BaseModel):
@@ -537,6 +542,25 @@ def storage_directory_case_id(
     return None
 
 
+def is_case_handover_directory_descendant(
+    session: DatabaseSession,
+    directory_id: str | None,
+) -> bool:
+    current = ensure_storage_directory(session, directory_id)
+    seen: set[str] = set()
+    while current is not None:
+        if current.id in seen:
+            return False
+        seen.add(current.id)
+        if (
+            current.case_id is not None
+            and current.id == case_handover_storage_directory_id(current.case_id)
+        ):
+            return True
+        current = ensure_storage_directory(session, current.parent_id)
+    return False
+
+
 def storage_object_linked_case_data(
     case: Case,
     *,
@@ -814,7 +838,7 @@ def save_storage_object(
         byte_size=len(data),
         sha256_hex=sha256(data).hexdigest(),
         storage_path=relative_path.as_posix(),
-        llm_input_allowed=0,
+        llm_input_allowed=1 if is_case_handover_directory_descendant(session, directory_id) else 0,
         source_type=source_type,
         source_message_id=source_message_id,
         status="active",
@@ -896,7 +920,7 @@ async def save_uploaded_storage_object(
         byte_size=byte_size,
         sha256_hex=hasher.hexdigest(),
         storage_path=relative_path.as_posix(),
-        llm_input_allowed=0,
+        llm_input_allowed=1 if is_case_handover_directory_descendant(session, directory_id) else 0,
         source_type=source_type,
         source_message_id=source_message_id,
         status="active",
@@ -2729,6 +2753,71 @@ def create_storage_directory(
     return {"ok": True, "data": {"directory": storage_directory_data(directory)}}
 
 
+@router.patch("/directories/{directory_id}/parent")
+def update_storage_directory_parent(
+    directory_id: str,
+    payload: StorageDirectoryParentPatch,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    directory = ensure_storage_directory(session, directory_id)
+    if directory is None:
+        raise json_error(404, "NOT_FOUND", "Storage directory not found.")
+    if directory.directory_kind != "normal":
+        raise json_error(
+            409,
+            "DIRECTORY_MOVE_PROTECTED",
+            "Only normal directories can be moved.",
+        )
+    if (
+        directory.case_id is not None
+        and directory.id == case_handover_storage_directory_id(directory.case_id)
+    ):
+        raise json_error(
+            409,
+            "DIRECTORY_MOVE_PROTECTED",
+            "Case handover directory cannot be moved.",
+        )
+
+    parent_id = normalize_directory_id(payload.parent_id)
+    ensure_storage_directory(session, parent_id)
+    if parent_id == directory.id:
+        raise json_error(
+            409,
+            "INVALID_DIRECTORY_MOVE",
+            "Directory cannot be moved into itself.",
+        )
+    if parent_id is not None and parent_id in storage_directory_descendant_ids(
+        session,
+        directory.id,
+    ):
+        raise json_error(
+            409,
+            "INVALID_DIRECTORY_MOVE",
+            "Directory cannot be moved into its descendant.",
+        )
+
+    duplicate_statement = (
+        select(StorageDirectory)
+        .where(StorageDirectory.status == "active")
+        .where(StorageDirectory.name == directory.name)
+        .where(StorageDirectory.id != directory.id)
+    )
+    if parent_id is None:
+        duplicate_statement = duplicate_statement.where(StorageDirectory.parent_id.is_(None))
+    else:
+        duplicate_statement = duplicate_statement.where(StorageDirectory.parent_id == parent_id)
+    if session.scalar(duplicate_statement.limit(1)) is not None:
+        raise json_error(409, "DUPLICATE_DIRECTORY", "Directory already exists.")
+
+    if directory.parent_id != parent_id:
+        directory.parent_id = parent_id
+        directory.updated_at = jst_iso()
+        directory.version += 1
+        session.commit()
+
+    return {"ok": True, "data": {"directory": storage_directory_data(directory)}}
+
+
 @router.delete("/directories/{directory_id}")
 def delete_storage_directory(
     directory_id: str,
@@ -3074,6 +3163,8 @@ def update_storage_object_directory(
             )
 
     storage_object.directory_id = new_directory_id
+    if is_case_handover_directory_descendant(session, storage_object.directory_id):
+        storage_object.llm_input_allowed = 1
     moved_into_case_id = storage_directory_case_id(session, storage_object.directory_id)
     redundant_file_links: list[FileLink] = []
     if moved_into_case_id is not None:

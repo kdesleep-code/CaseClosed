@@ -34,10 +34,10 @@ import {
   listStorageObjectVersions,
   listStorageDirectories,
   listStorageObjects,
+  moveStorageDirectoryToDirectory,
   moveStorageObjectToDirectory,
   searchStorageObjects,
   prepareStorageObjectLlmDigest,
-  uploadManagedStorageFile,
   uploadStorageObjectVersion,
   updateStorageObjectLlmInput,
 } from './phase3Api'
@@ -50,6 +50,10 @@ import type { StorageObjectLinkedCase } from './phase3Api'
 import { isCaseOpenForSuggestion, listCases } from './phase7Api'
 import type { CaseItem } from './phase7Api'
 import SuggestInput from './SuggestInput'
+import {
+  droppedStorageFilesFromDataTransfer,
+  uploadDroppedStorageFiles,
+} from './storageDirectoryDrop'
 
 type StoragePreviewFile = {
   id: string
@@ -253,6 +257,7 @@ function isPreviewableZip(object: StoragePreviewFile) {
 
 const textPreviewByteLimit = 2 * 1024 * 1024
 export const storageObjectDragType = 'application/x-caseclosed-storage-object'
+export const storageDirectoryDragType = 'application/x-caseclosed-storage-directory'
 
 function storageSourceLabel(object: StorageObject) {
   if (object.source_type === 'direct_upload') {
@@ -451,11 +456,15 @@ export function StorageObjectCard({
 
 export function StorageDirectoryCard({
   directory,
+  onDropFiles,
+  onDropDirectory,
   onDropObject,
   onContextMenu,
   onOpen,
 }: {
   directory: StorageDirectory
+  onDropFiles?: (dataTransfer: DataTransfer, directoryId: string) => void
+  onDropDirectory?: (directoryId: string, parentId: string | null) => void
   onDropObject: (objectId: string, directoryId: string | null) => void
   onContextMenu: (event: MouseEvent<HTMLButtonElement>, directory: StorageDirectory) => void
   onOpen: (directory: StorageDirectory) => void
@@ -470,20 +479,39 @@ export function StorageDirectoryCard({
         isCaseDirectory ? ' storage-case-directory-card' : ''
       }${isTaskDirectory ? ' storage-task-directory-card' : ''
       }`}
+      draggable
       onClick={() => onOpen(directory)}
       onContextMenu={(event) => onContextMenu(event, directory)}
+      onDragStart={(event) => {
+        event.dataTransfer.clearData()
+        event.dataTransfer.setData(storageDirectoryDragType, directory.id)
+        event.dataTransfer.effectAllowed = 'move'
+      }}
       onDragOver={(event) => {
         event.preventDefault()
         event.stopPropagation()
-        event.dataTransfer.dropEffect = 'move'
+        event.dataTransfer.dropEffect = event.dataTransfer.types.includes('Files') ? 'copy' : 'move'
       }}
       onDrop={(event) => {
         event.preventDefault()
         event.stopPropagation()
+        const draggedDirectoryId = event.dataTransfer.getData(storageDirectoryDragType)
+        if (draggedDirectoryId !== '') {
+          if (draggedDirectoryId !== directory.id) {
+            onDropDirectory?.(draggedDirectoryId, directory.id)
+          }
+          return
+        }
         const objectId =
           event.dataTransfer.getData(storageObjectDragType) ||
           event.dataTransfer.getData('text/plain')
-        if (objectId !== '') onDropObject(objectId, directory.id)
+        if (objectId !== '') {
+          onDropObject(objectId, directory.id)
+          return
+        }
+        if (event.dataTransfer.types.includes('Files')) {
+          onDropFiles?.(event.dataTransfer, directory.id)
+        }
       }}
       type="button"
     >
@@ -1818,17 +1846,22 @@ function StorageListView() {
     }
   }, [contextMenu])
 
-  async function uploadFile(file: File | null) {
-    if (file === null) {
-      setError(t('storage.noFileSelected'))
-      return
-    }
+  async function uploadDroppedItems(dataTransfer: DataTransfer, directoryId: string | null) {
     setBusy(true)
     setError(null)
     setNotice(null)
     try {
-      const response = await uploadManagedStorageFile(file, currentDirectoryId)
-      setNotice(t('storage.uploaded', { name: response.storage_object.original_filename ?? response.storage_object.id }))
+      const droppedFiles = await droppedStorageFilesFromDataTransfer(dataTransfer)
+      if (droppedFiles.length === 0) {
+        setError(t('storage.noFileSelected'))
+        return
+      }
+      const result = await uploadDroppedStorageFiles(droppedFiles, directoryId)
+      setNotice(
+        result.count === 1
+          ? t('storage.uploaded', { name: result.lastUploadedName })
+          : t('storage.uploadedMany', { count: String(result.count) }),
+      )
       await refreshStorage()
     } catch (requestError) {
       setError(describeError(requestError))
@@ -1854,7 +1887,32 @@ function StorageListView() {
     }
   }
 
+  async function handleMoveStorageDirectory(directoryId: string, parentId: string | null) {
+    if (directoryId === '') return
+    if (directoryId === parentId) return
+    setBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const movedDirectory = await moveStorageDirectoryToDirectory(directoryId, parentId)
+      setSelectedObjectId(null)
+      setNotice(t('storage.directory.moved', { name: movedDirectory.name }))
+      await refreshStorage()
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function directoryIdFromDragEvent(event: DragEvent<HTMLElement>) {
+    return event.dataTransfer.getData(storageDirectoryDragType)
+  }
+
   function objectIdFromDragEvent(event: DragEvent<HTMLElement>) {
+    if (directoryIdFromDragEvent(event) !== '') {
+      return ''
+    }
     return (
       event.dataTransfer.getData(storageObjectDragType) ||
       event.dataTransfer.getData('text/plain')
@@ -1870,21 +1928,41 @@ function StorageListView() {
   function handleDirectoryDrop(event: DragEvent<HTMLElement>, directoryId: string | null) {
     event.preventDefault()
     event.stopPropagation()
+    const draggedDirectoryId = directoryIdFromDragEvent(event)
+    if (draggedDirectoryId !== '') {
+      void handleMoveStorageDirectory(draggedDirectoryId, directoryId)
+      return
+    }
     const objectId = objectIdFromDragEvent(event)
-    if (objectId !== '') void handleMoveStorageObject(objectId, directoryId)
+    if (objectId !== '') {
+      void handleMoveStorageObject(objectId, directoryId)
+      return
+    }
+    if (Array.from(event.dataTransfer.types).includes('Files')) {
+      void uploadDroppedItems(event.dataTransfer, directoryId)
+    }
   }
 
   function handleDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault()
     setIsDragOver(false)
-    if (event.dataTransfer.files.length === 0) return
-    const file = event.dataTransfer.files?.[0] ?? null
-    void uploadFile(file)
+    const draggedDirectoryId = directoryIdFromDragEvent(event)
+    if (draggedDirectoryId !== '') {
+      void handleMoveStorageDirectory(draggedDirectoryId, currentDirectoryId)
+      return
+    }
+    const objectId = objectIdFromDragEvent(event)
+    if (objectId !== '') {
+      void handleMoveStorageObject(objectId, currentDirectoryId)
+      return
+    }
+    if (!Array.from(event.dataTransfer.types).includes('Files')) return
+    void uploadDroppedItems(event.dataTransfer, currentDirectoryId)
   }
 
   function handleDragOver(event: DragEvent<HTMLDivElement>) {
     event.preventDefault()
-    event.dataTransfer.dropEffect = 'copy'
+    event.dataTransfer.dropEffect = event.dataTransfer.types.includes('Files') ? 'copy' : 'move'
     setIsDragOver(true)
   }
 
@@ -2210,6 +2288,12 @@ function StorageListView() {
                 directory={directory}
                 key={directory.id}
                 onContextMenu={handleStorageDirectoryContextMenu}
+                onDropFiles={(dataTransfer, directoryId) =>
+                  void uploadDroppedItems(dataTransfer, directoryId)
+                }
+                onDropDirectory={(directoryId, parentId) =>
+                  void handleMoveStorageDirectory(directoryId, parentId)
+                }
                 onDropObject={(objectId, directoryId) =>
                   void handleMoveStorageObject(objectId, directoryId)
                 }

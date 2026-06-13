@@ -410,6 +410,19 @@ export type GoogleGmailImportByDateResult = {
   }>
 }
 
+export type GoogleGmailSpecialImportResult = {
+  source_id: string
+  imported_count: number
+  candidate_count: number
+  skipped_drafts: number
+  items: Array<{
+    subject: string | null
+    from_address: string
+    received_at: string
+    mail: NonNullable<GoogleGmailImportResult['mail']>
+  }>
+}
+
 export type GoogleCalendarEvent = {
   id: string | null
   google_event_id?: string | null
@@ -428,6 +441,20 @@ export type GoogleCalendarEvent = {
   tags_json?: string | null
   metadata_json?: string | null
   local_note?: string | null
+}
+
+export type CalendarEventTitleFitPayload = {
+  title: string
+  font_size_px: number
+  line_height: number
+  line_clamp: number
+  measured_width: number
+  measured_height: number
+}
+
+export type CalendarEventUpdatePayload = {
+  summary?: string | null
+  calendar_id?: string | null
 }
 
 export type CalendarEventLink = {
@@ -859,6 +886,16 @@ export function importUnloadedGoogleGmailByDate(
   })
 }
 
+export function importSpecialGoogleGmailThread(
+  source: string,
+): Promise<GoogleGmailSpecialImportResult> {
+  return request('/api/v1/google/gmail/import-special-thread', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source }),
+  })
+}
+
 export function updateGoogleGmailAutoImportSettings(payload: {
   enabled: boolean
   interval_minutes: number
@@ -930,6 +967,28 @@ export function moveCalendarDbEvent(
   payload: { start: string; end: string; time_zone?: string },
 ): Promise<{ event: GoogleCalendarEvent; google_event: GoogleCalendarEvent | null }> {
   return request(`/api/v1/google/gmail/calendar/db-events/${encodeURIComponent(eventId)}/move`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export function updateCalendarDbEvent(
+  eventId: string,
+  payload: CalendarEventUpdatePayload,
+): Promise<{ event: GoogleCalendarEvent; google_event: GoogleCalendarEvent | null }> {
+  return request(`/api/v1/google/gmail/calendar/db-events/${encodeURIComponent(eventId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export function updateCalendarDbEventTitleFit(
+  eventId: string,
+  payload: CalendarEventTitleFitPayload,
+): Promise<{ event: GoogleCalendarEvent }> {
+  return request(`/api/v1/google/gmail/calendar/db-events/${encodeURIComponent(eventId)}/title-fit`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),

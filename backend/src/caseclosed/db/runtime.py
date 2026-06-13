@@ -934,6 +934,10 @@ def case_storage_directory_id(case_id: str) -> str:
     return f"storage_directory_case_{case_id}"
 
 
+def case_handover_storage_directory_id(case_id: str) -> str:
+    return f"storage_directory_case_{case_id}_handover"
+
+
 def ensure_case_storage_directory(
     session: Session,
     case: Case,
@@ -961,6 +965,7 @@ def ensure_case_storage_directory(
             version=1,
         )
         session.add(directory)
+        ensure_case_handover_storage_directory(session, case, now=timestamp, case_directory=directory)
         return directory
 
     changed = False
@@ -969,6 +974,67 @@ def ensure_case_storage_directory(
         changed = True
     if directory.name != case.name:
         directory.name = case.name
+        changed = True
+    if directory.status != "active":
+        directory.status = "active"
+        changed = True
+    if changed:
+        directory.updated_at = timestamp
+        directory.version += 1
+    ensure_case_handover_storage_directory(session, case, now=timestamp, case_directory=directory)
+    return directory
+
+
+def ensure_case_handover_storage_directory(
+    session: Session,
+    case: Case,
+    *,
+    now: str | None = None,
+    case_directory: StorageDirectory | None = None,
+) -> StorageDirectory:
+    timestamp = now or jst_iso()
+    parent = case_directory or session.get(StorageDirectory, case_storage_directory_id(case.id))
+    if parent is None:
+        parent = StorageDirectory(
+            id=case_storage_directory_id(case.id),
+            parent_id=None,
+            directory_kind="case",
+            case_id=case.id,
+            name=case.name,
+            status="active",
+            created_at=timestamp,
+            updated_at=timestamp,
+            version=1,
+        )
+        session.add(parent)
+    directory = session.get(StorageDirectory, case_handover_storage_directory_id(case.id))
+    if directory is None:
+        directory = StorageDirectory(
+            id=case_handover_storage_directory_id(case.id),
+            parent_id=parent.id,
+            directory_kind="normal",
+            case_id=case.id,
+            name="引継ぎ資料",
+            status="active",
+            created_at=timestamp,
+            updated_at=timestamp,
+            version=1,
+        )
+        session.add(directory)
+        return directory
+
+    changed = False
+    if directory.parent_id != parent.id:
+        directory.parent_id = parent.id
+        changed = True
+    if directory.directory_kind != "normal":
+        directory.directory_kind = "normal"
+        changed = True
+    if directory.case_id != case.id:
+        directory.case_id = case.id
+        changed = True
+    if directory.name != "引継ぎ資料":
+        directory.name = "引継ぎ資料"
         changed = True
     if directory.status != "active":
         directory.status = "active"

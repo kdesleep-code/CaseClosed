@@ -548,6 +548,21 @@ export function deleteStorageDirectory(
   )
 }
 
+export async function moveStorageDirectoryToDirectory(
+  directoryId: string,
+  parentId: string | null,
+): Promise<StorageDirectory> {
+  const data = await request<{ directory: StorageDirectory }>(
+    `/api/v1/storage/directories/${encodeURIComponent(directoryId)}/parent`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ parent_id: parentId }),
+    },
+  )
+  return data.directory
+}
+
 export async function getStorageObject(storageObjectId: string): Promise<StorageObject> {
   const data = await request<{ storage_object: StorageObject }>(
     `/api/v1/storage/objects/${encodeURIComponent(storageObjectId)}`,

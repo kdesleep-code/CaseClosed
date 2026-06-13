@@ -177,7 +177,7 @@ export type CaseDetail = {
   case: CaseItem
   related_mails: CaseMailLink[]
   tasks: CaseTaskSummary[]
-  calendar_events: unknown[]
+  calendar_events: CaseCalendarSummary[]
   contacts: unknown[]
   files: unknown[]
   stakeholders?: CaseStakeholder[]
@@ -432,6 +432,7 @@ export async function updateCase(
     open_when_date: string | null
     open_when_text: string | null
     closed_when_text: string | null
+    genre_id?: string | null
     tags?: string[]
   },
 ): Promise<CaseItem> {

@@ -1535,6 +1535,7 @@ function ContactsView({
                       value={status}
                     >
                       <option value="active">{t('common.active')}</option>
+                      <option value="archived">{t('common.archived')}</option>
                       <option value="skipped">{t('common.skipped')}</option>
                       <option value="spam">{t('common.spam')}</option>
                     </select>

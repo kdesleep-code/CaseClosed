@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { CSSProperties, DragEvent, FormEvent, MouseEvent, ReactNode } from 'react'
 import { t } from './i18n'
 import { AppLink, navigateTo } from './navigation'
@@ -16,14 +16,15 @@ import {
   deleteStorageObject,
   listStorageDirectories,
   listStorageObjects,
+  moveStorageDirectoryToDirectory,
   moveStorageObjectToDirectory,
   updateStorageObjectLlmInput,
-  uploadManagedStorageFile,
 } from './phase3Api'
 import { listContacts } from './phase3Api'
 import type { Contact, StorageDirectory, StorageObject } from './phase3Api'
 import {
   assignMailThreadToCase,
+  importSpecialGoogleGmailThread,
   listMailPage,
   unassignMailThreadFromCase,
 } from './phase4Api'
@@ -32,6 +33,10 @@ import {
   caseRoleSelectorSuggestions,
   resolveContactSelectorListWithCases,
 } from './contactSelectors'
+import {
+  droppedStorageFilesFromDataTransfer,
+  uploadDroppedStorageFiles,
+} from './storageDirectoryDrop'
 import type { ContactSelectorCaseContext } from './contactSelectors'
 import SuggestInput from './SuggestInput'
 import type { SuggestInputOption } from './SuggestInput'
@@ -67,12 +72,13 @@ import {
   updateCaseGenre,
   unlinkCaseFile,
 } from './phase7Api'
-import type { CaseAutoAssignRule, CaseDetail, CaseGenre, CaseItem, CaseListStatus, CaseMailLink, CaseStakeholder, CaseToolLink } from './phase7Api'
+import type { CaseAutoAssignRule, CaseCalendarSummary, CaseDetail, CaseGenre, CaseItem, CaseListStatus, CaseMailLink, CaseStakeholder, CaseToolLink } from './phase7Api'
 import {
   ActionIconLabel,
   downloadStorageObject,
   StorageDirectoryCard,
   StorageObjectCard,
+  storageDirectoryDragType,
   storageObjectDragType,
 } from './StorageView'
 
@@ -253,6 +259,7 @@ function randomGenreColor() {
 }
 
 const CASE_TITLE_MAX_LENGTH = 42
+const CASE_ROW_VISIBLE_TAG_LIMIT = 4
 
 function genreColor(item: CaseItem, genres: CaseGenre[]) {
   return genres.find((genre) => genre.id === item.genre_id)?.color_hex ?? '#ffffff'
@@ -263,7 +270,7 @@ function visibleCaseTags(
   tagFrequency: Map<string, number>,
   selectedTag: string | null,
 ) {
-  if (tags.length <= 3) return { visible: tags, hiddenCount: 0 }
+  if (tags.length <= CASE_ROW_VISIBLE_TAG_LIMIT) return { visible: tags, hiddenCount: 0 }
   const normalizedSelectedTag = selectedTag?.toLocaleLowerCase() ?? null
   const indexedTags = tags.map((tag, index) => ({ tag, index, key: tag.toLocaleLowerCase() }))
   const selected = normalizedSelectedTag === null
@@ -277,7 +284,7 @@ function visibleCaseTags(
       if (frequency !== 0) return frequency
       return first.index - second.index
     })
-  const visible = [...selected, ...others].slice(0, 3).map((item) => item.tag)
+  const visible = [...selected, ...others].slice(0, CASE_ROW_VISIBLE_TAG_LIMIT).map((item) => item.tag)
   return { visible, hiddenCount: tags.length - visible.length }
 }
 
@@ -422,20 +429,21 @@ export function CaseStorageWindow({
     }
   }, [contextMenu])
 
-  async function uploadFile(file: File | null) {
-    if (file === null) {
-      setError(t('storage.noFileSelected'))
-      return
-    }
+  async function uploadDroppedItems(dataTransfer: DataTransfer, directoryId: string) {
     setBusy(true)
     setError(null)
     setNotice(null)
     try {
-      const response = await uploadManagedStorageFile(file, currentDirectoryId)
+      const droppedFiles = await droppedStorageFilesFromDataTransfer(dataTransfer)
+      if (droppedFiles.length === 0) {
+        setError(t('storage.noFileSelected'))
+        return
+      }
+      const result = await uploadDroppedStorageFiles(droppedFiles, directoryId)
       setNotice(
-        t('storage.uploaded', {
-          name: response.storage_object.original_filename ?? response.storage_object.id,
-        }),
+        result.count === 1
+          ? t('storage.uploaded', { name: result.lastUploadedName })
+          : t('storage.uploadedMany', { count: String(result.count) }),
       )
       await refreshStorage()
     } catch (requestError) {
@@ -470,7 +478,32 @@ export function CaseStorageWindow({
     }
   }
 
+  async function handleMoveStorageDirectory(directoryId: string, parentId: string | null) {
+    if (directoryId === '') return
+    if (directoryId === parentId) return
+    setBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const movedDirectory = await moveStorageDirectoryToDirectory(directoryId, parentId)
+      setSelectedObjectId(null)
+      setNotice(t('storage.directory.moved', { name: movedDirectory.name }))
+      await refreshStorage()
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function directoryIdFromDragEvent(event: DragEvent<HTMLElement>) {
+    return event.dataTransfer.getData(storageDirectoryDragType)
+  }
+
   function objectIdFromDragEvent(event: DragEvent<HTMLElement>) {
+    if (directoryIdFromDragEvent(event) !== '') {
+      return ''
+    }
     return (
       event.dataTransfer.getData(storageObjectDragType) ||
       event.dataTransfer.getData('text/plain')
@@ -481,23 +514,32 @@ export function CaseStorageWindow({
     return Array.from(event.dataTransfer.types).includes(storageObjectDragType)
   }
 
+  function isStorageDirectoryDrag(event: DragEvent<HTMLElement>) {
+    return Array.from(event.dataTransfer.types).includes(storageDirectoryDragType)
+  }
+
   function handleDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault()
     setIsDragOver(false)
+    const draggedDirectoryId = directoryIdFromDragEvent(event)
+    if (draggedDirectoryId !== '') {
+      void handleMoveStorageDirectory(draggedDirectoryId, currentDirectoryId)
+      return
+    }
     const objectId = objectIdFromDragEvent(event)
     if (objectId !== '') {
       void handleMoveStorageObject(objectId, currentDirectoryId)
       return
     }
     if (event.dataTransfer.files.length > 0) {
-      void uploadFile(event.dataTransfer.files?.[0] ?? null)
+      void uploadDroppedItems(event.dataTransfer, currentDirectoryId)
     }
   }
 
   function handleDragOver(event: DragEvent<HTMLDivElement>) {
     event.preventDefault()
     event.dataTransfer.dropEffect =
-      isStorageObjectDrag(event)
+      isStorageDirectoryDrag(event) || isStorageObjectDrag(event)
         ? 'move'
         : event.dataTransfer.types.includes('Files') ? 'copy' : 'none'
     setIsDragOver(true)
@@ -518,8 +560,19 @@ export function CaseStorageWindow({
   function handleDirectoryDrop(event: DragEvent<HTMLElement>, directoryId: string) {
     event.preventDefault()
     event.stopPropagation()
+    const draggedDirectoryId = directoryIdFromDragEvent(event)
+    if (draggedDirectoryId !== '') {
+      void handleMoveStorageDirectory(draggedDirectoryId, directoryId)
+      return
+    }
     const objectId = objectIdFromDragEvent(event)
-    if (objectId !== '') void handleMoveStorageObject(objectId, directoryId)
+    if (objectId !== '') {
+      void handleMoveStorageObject(objectId, directoryId)
+      return
+    }
+    if (Array.from(event.dataTransfer.types).includes('Files')) {
+      void uploadDroppedItems(event.dataTransfer, directoryId)
+    }
   }
 
   async function handleDownload(object: StorageObject) {
@@ -826,6 +879,12 @@ export function CaseStorageWindow({
                   directory={directory}
                   key={directory.id}
                   onContextMenu={handleStorageDirectoryContextMenu}
+                  onDropFiles={(dataTransfer, directoryId) =>
+                    void uploadDroppedItems(dataTransfer, directoryId)
+                  }
+                  onDropDirectory={(directoryId, parentId) =>
+                    void handleMoveStorageDirectory(directoryId, parentId)
+                  }
                   onDropObject={(objectId, directoryId) => {
                     if (directoryId !== null) void handleMoveStorageObject(objectId, directoryId)
                   }}
@@ -1297,12 +1356,42 @@ function CaseStakeholdersPanel({
   )
 }
 
-function CaseCalendarGadget({ caseItem }: { caseItem: CaseItem }) {
+function CaseCalendarGadget({
+  caseItem,
+  calendarEvents,
+}: {
+  caseItem: CaseItem
+  calendarEvents: CaseCalendarSummary[]
+}) {
   const today = jstDateToday()
-  const initialMonth = caseItem.next_calendar_event?.starts_at?.slice(0, 10) ?? today
+  const latestCalendarEventDate = calendarEvents
+    .map((event) => event.starts_at?.slice(0, 10) ?? '')
+    .filter((date) => date !== '')
+    .toSorted((first, second) => second.localeCompare(first))[0]
+  const initialMonth =
+    caseItem.next_calendar_event?.starts_at?.slice(0, 10) ?? latestCalendarEventDate ?? today
   const [calendarMonth, setCalendarMonth] = useState(initialMonth)
-  const eventDate = caseItem.next_calendar_event?.starts_at?.slice(0, 10) ?? null
   const selectedMonthDays = calendarDays(calendarMonth)
+  const eventsByDate = useMemo(() => {
+    const grouped = new Map<string, CaseCalendarSummary[]>()
+    calendarEvents.forEach((event) => {
+      const startsAt = event.starts_at ?? ''
+      const date = startsAt.slice(0, 10)
+      if (date === '') return
+      const events = grouped.get(date) ?? []
+      events.push(event)
+      grouped.set(date, events)
+    })
+    grouped.forEach((events) => {
+      events.sort((first, second) => {
+        const firstTime = first.starts_at ?? ''
+        const secondTime = second.starts_at ?? ''
+        if (firstTime !== secondTime) return firstTime.localeCompare(secondTime)
+        return first.title.localeCompare(second.title)
+      })
+    })
+    return grouped
+  }, [calendarEvents])
 
   return (
     <section
@@ -1349,7 +1438,8 @@ function CaseCalendarGadget({ caseItem }: { caseItem: CaseItem }) {
               />
             )
           }
-          const hasEvent = date === eventDate
+          const dayEvents = eventsByDate.get(date) ?? []
+          const hasEvent = dayEvents.length > 0
           return (
             <button
               aria-label={hasEvent ? t('cases.calendar.openDate', { date }) : date}
@@ -1361,6 +1451,21 @@ function CaseCalendarGadget({ caseItem }: { caseItem: CaseItem }) {
               type="button"
             >
               {Number(date.slice(8, 10))}
+              {hasEvent && (
+                <span className="case-calendar-day-popover" role="tooltip">
+                  {dayEvents.slice(0, 4).map((event) => (
+                    <span key={event.id}>
+                      <strong>{event.title}</strong>
+                      <small>{formatDateTime(event.starts_at)}</small>
+                    </span>
+                  ))}
+                  {dayEvents.length > 4 && (
+                    <span>
+                      <strong>{`+${dayEvents.length - 4}`}</strong>
+                    </span>
+                  )}
+                </span>
+              )}
             </button>
           )
         })}
@@ -2063,6 +2168,8 @@ function CaseDetailView({ caseId }: { caseId: string }) {
   const [openWhenDraft, setOpenWhenDraft] = useState('')
   const [closedWhenDraft, setClosedWhenDraft] = useState('')
   const [tagDraft, setTagDraft] = useState('')
+  const [genreDraft, setGenreDraft] = useState('')
+  const [genres, setGenres] = useState<CaseGenre[]>([])
   const [isOverviewSaving, setIsOverviewSaving] = useState(false)
   const [isCaseStateBusy, setIsCaseStateBusy] = useState(false)
   const [isCurrentSituationRefreshing, setIsCurrentSituationRefreshing] = useState(false)
@@ -2094,6 +2201,20 @@ function CaseDetailView({ caseId }: { caseId: string }) {
   }, [caseId])
 
   useEffect(() => {
+    let isMounted = true
+    listCaseGenres()
+      .then((items) => {
+        if (isMounted) setGenres(items)
+      })
+      .catch(() => {
+        if (isMounted) setGenres([])
+      })
+    return () => {
+      isMounted = false
+    }
+  }, [])
+
+  useEffect(() => {
     if (deleteMenuPosition === null) {
       return
     }
@@ -2119,6 +2240,7 @@ function CaseDetailView({ caseId }: { caseId: string }) {
     setOpenWhenDraft(item.open_when_date ?? '')
     setClosedWhenDraft(item.closed_when_text ?? '')
     setTagDraft(item.tags.join(', '))
+    setGenreDraft(item.genre_id ?? '')
     setIsOverviewEditing(true)
   }
 
@@ -2151,6 +2273,7 @@ function CaseDetailView({ caseId }: { caseId: string }) {
         open_when_date: openWhenDraft.trim() === '' ? null : openWhenDraft,
         open_when_text: null,
         closed_when_text: closedWhenDraft.trim() === '' ? null : closedWhenDraft,
+        genre_id: genreDraft === '' ? null : genreDraft,
         tags: parseTagDraft(tagDraft),
       })
       setDetail((currentDetail) =>
@@ -2302,6 +2425,21 @@ function CaseDetailView({ caseId }: { caseId: string }) {
                           placeholder={t('cases.tags.placeholder')}
                           value={tagDraft}
                         />
+                      </label>
+                      <label className="case-overview-tags-field">
+                        <span>{t('cases.genre.select')}</span>
+                        <select
+                          aria-label={t('cases.genre.select')}
+                          onChange={(event) => setGenreDraft(event.target.value)}
+                          value={genreDraft}
+                        >
+                          <option value="">{t('cases.genre.none')}</option>
+                          {genres.map((genre) => (
+                            <option key={genre.id} value={genre.id}>
+                              {genre.title}
+                            </option>
+                          ))}
+                        </select>
                       </label>
                       <div className="case-overview-actions">
                         <button
@@ -2492,7 +2630,7 @@ function CaseDetailView({ caseId }: { caseId: string }) {
               />
             </div>
             <aside aria-label={t('cases.gadgets')} className="case-gadget-column">
-              <CaseCalendarGadget caseItem={item} />
+              <CaseCalendarGadget caseItem={item} calendarEvents={detail.calendar_events} />
               <CaseToolsGadget caseId={item.id} initialTools={detail.tool_links ?? []} />
               {!item.is_system_case && (
                 <>
@@ -2835,6 +2973,7 @@ function CaseMailListView({ caseId }: { caseId: string }) {
   const [searchQuery, setSearchQuery] = useState('')
   const [autoRuleSenderEmail, setAutoRuleSenderEmail] = useState('')
   const [assignSearchQuery, setAssignSearchQuery] = useState('')
+  const [specialGmailSource, setSpecialGmailSource] = useState('')
   const [assignSort, setAssignSort] = useState<CaseMailAssignSort>('importance')
   const [assignPageSize, setAssignPageSize] = useState(25)
   const [assignSearchRefreshTick, setAssignSearchRefreshTick] = useState(0)
@@ -2846,6 +2985,7 @@ function CaseMailListView({ caseId }: { caseId: string }) {
   const [isLoading, setIsLoading] = useState(true)
   const [isSearchingMails, setIsSearchingMails] = useState(false)
   const [isAssigning, setIsAssigning] = useState(false)
+  const [isSpecialGmailLoading, setIsSpecialGmailLoading] = useState(false)
   const [isAutoRuleSaving, setIsAutoRuleSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -3080,6 +3220,33 @@ function CaseMailListView({ caseId }: { caseId: string }) {
       setError(describeError(requestError))
     } finally {
       setIsAutoRuleSaving(false)
+    }
+  }
+
+  async function handleSpecialGmailImport(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const source = specialGmailSource.trim()
+    if (source === '' || isSpecialGmailLoading) {
+      return
+    }
+    setError(null)
+    setNotice(null)
+    setIsSpecialGmailLoading(true)
+    try {
+      const result = await importSpecialGoogleGmailThread(source)
+      const firstItem = result.items[0] ?? null
+      if (firstItem?.subject !== null && firstItem?.subject !== undefined) {
+        setAssignSearchQuery(firstItem.subject)
+      } else {
+        setAssignSearchQuery(result.source_id)
+      }
+      setAssignSearchRefreshTick((tick) => tick + 1)
+      setSpecialGmailSource('')
+      setNotice(t('cases.mail.specialImport.done', { count: result.imported_count }))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setIsSpecialGmailLoading(false)
     }
   }
 
@@ -3327,6 +3494,34 @@ function CaseMailListView({ caseId }: { caseId: string }) {
                         type="button"
                       >
                         {t('mail.search.clear')}
+                      </button>
+                    </div>
+                  </form>
+                </section>
+
+                <section aria-labelledby="case-mail-special-import-heading" className="mail-panel mail-search-panel">
+                  <div className="section-heading">
+                    <div>
+                      <h2 id="case-mail-special-import-heading">
+                        {t('cases.mail.specialImport.heading')}
+                      </h2>
+                      <p>{t('cases.mail.specialImport.body')}</p>
+                    </div>
+                  </div>
+                  <form className="mail-search-form" onSubmit={handleSpecialGmailImport}>
+                    <input
+                      aria-label={t('cases.mail.specialImport.label')}
+                      onChange={(event) => setSpecialGmailSource(event.target.value)}
+                      placeholder={t('cases.mail.specialImport.placeholder')}
+                      value={specialGmailSource}
+                    />
+                    <div className="mail-search-actions">
+                      <button
+                        className={`button-loading-dot${isSpecialGmailLoading ? ' is-loading' : ''}`}
+                        disabled={isSpecialGmailLoading || specialGmailSource.trim() === ''}
+                        type="submit"
+                      >
+                        {t('cases.mail.specialImport.load')}
                       </button>
                     </div>
                   </form>

@@ -90,6 +90,8 @@ class MailLlmBlockMatch:
 def ingest_mock_mail(
     session: DatabaseSession,
     mail_input: MockMailInput,
+    *,
+    force_skip: bool = False,
 ) -> MailIngestionResult:
     is_sent = mail_input_is_sent(mail_input)
     existing_message = session.scalar(
@@ -103,6 +105,16 @@ def ingest_mock_mail(
         existing_auto_state = session.scalar(
             select(MailAutoState).where(MailAutoState.message_id == existing_message.id)
         )
+        if force_skip and existing_auto_state is not None:
+            existing_auto_state.effective_importance = "skip"
+            existing_auto_state.pending_reason = None
+            existing_auto_state.pending_from_address_id = None
+            existing_auto_state.llm_blocked = 0
+            existing_auto_state.llm_block_reason = None
+            existing_auto_state.llm_blocked_at = None
+            existing_auto_state.updated_at = now
+            existing_auto_state.version += 1
+            session.commit()
         pending_email_address = (
             session.get(ContactEmailAddress, existing_auto_state.pending_from_address_id)
             if existing_auto_state is not None
@@ -196,15 +208,19 @@ def ingest_mock_mail(
         else match_mail_input_llm_block_filter(session, mail_input)
     )
     effective_importance = effective_importance_for_message(
-        pending=sender_resolution.pending_address is not None,
+        pending=False if force_skip else sender_resolution.pending_address is not None,
         skipped=sender_resolution.skipped,
         external_starred=mail_input.external_starred,
         sent=is_sent,
         fixed_importance=sender_resolution.fixed_importance,
         llm_blocked=llm_block_match.blocked,
     )
+    if force_skip:
+        effective_importance = "skip"
     queued_job_id = None
     if (
+        not force_skip
+        and
         not llm_block_match.blocked
         and sender_resolution.pending_address is None
         and sender_resolution.should_classify
@@ -216,13 +232,19 @@ def ingest_mock_mail(
             llm_instruction=sender_resolution.llm_instruction,
         )
     elif (
+        not force_skip
+        and
         not llm_block_match.blocked
         and effective_importance in SUMMARY_TARGET_IMPORTANCE
         and not is_sent
     ):
         queued_job_id = enqueue_summary_job(session, message, now)
     queued_contact_ai_memo_job_id = None
-    if not llm_block_match.blocked and sender_resolution.resolved_contact is not None:
+    if (
+        not force_skip
+        and not llm_block_match.blocked
+        and sender_resolution.resolved_contact is not None
+    ):
         queued_contact_ai_memo_job_id = enqueue_contact_ai_memo_update_job(
             session,
             contact=sender_resolution.resolved_contact,
@@ -242,15 +264,17 @@ def ingest_mock_mail(
             suggested_importance=None,
             llm_run_id=None,
             effective_importance=effective_importance,
-            pending_reason=sender_resolution.pending_reason,
+            pending_reason=None if force_skip else sender_resolution.pending_reason,
             pending_from_address_id=(
-                sender_resolution.pending_address.id
+                None
+                if force_skip
+                else sender_resolution.pending_address.id
                 if sender_resolution.pending_address is not None
                 else None
             ),
-            llm_blocked=1 if llm_block_match.blocked else 0,
-            llm_block_reason=llm_block_match.reason,
-            llm_blocked_at=now if llm_block_match.blocked else None,
+            llm_blocked=0 if force_skip else 1 if llm_block_match.blocked else 0,
+            llm_block_reason=None if force_skip else llm_block_match.reason,
+            llm_blocked_at=None if force_skip else now if llm_block_match.blocked else None,
             created_at=now,
             updated_at=now,
             version=1,
@@ -271,12 +295,12 @@ def ingest_mock_mail(
         message_id=message.id,
         gmail_message_id=message.gmail_message_id,
         pending=sender_resolution.pending_address is not None,
-        pending_address=(
+        pending_address=None if force_skip else (
             sender_resolution.pending_address.normalized_email_address
             if sender_resolution.pending_address is not None
             else None
         ),
-        pending_reason=sender_resolution.pending_reason,
+        pending_reason=None if force_skip else sender_resolution.pending_reason,
         queued_job_id=queued_job_id,
         queued_contact_ai_memo_job_id=queued_contact_ai_memo_job_id,
     )
