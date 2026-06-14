@@ -235,6 +235,30 @@ export type FileSummaryPrepareResponse = {
   diff: FileVersionDiff | null
 }
 
+export type StorageEmlPreview = {
+  subject: string | null
+  from: string | null
+  to: string | null
+  cc: string | null
+  date: string | null
+  reply_to: string | null
+  message_id: string | null
+  body_text: string | null
+  body_html: string | null
+  sender_contact: {
+    id: string
+    display_name: string
+    avatar_url: string | null
+    kind: string
+    status: string
+  } | null
+  attachments: Array<{
+    filename: string
+    content_type: string
+    byte_size: number
+  }>
+}
+
 export type StorageObjectSearchResult = {
   items: StorageObject[]
   extensions: string[]
@@ -586,6 +610,25 @@ export function getStorageObjectVersionArchiveTree(
     `/api/v1/storage/objects/${encodeURIComponent(
       storageObjectId,
     )}/versions/${encodeURIComponent(versionId)}/archive-tree`,
+  )
+}
+
+export function getStorageObjectEmlPreview(
+  storageObjectId: string,
+): Promise<StorageEmlPreview> {
+  return request<StorageEmlPreview>(
+    `/api/v1/storage/objects/${encodeURIComponent(storageObjectId)}/eml-preview`,
+  )
+}
+
+export function getStorageObjectVersionEmlPreview(
+  storageObjectId: string,
+  versionId: string,
+): Promise<StorageEmlPreview> {
+  return request<StorageEmlPreview>(
+    `/api/v1/storage/objects/${encodeURIComponent(
+      storageObjectId,
+    )}/versions/${encodeURIComponent(versionId)}/eml-preview`,
   )
 }
 

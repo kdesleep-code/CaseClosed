@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { DragEvent, FormEvent } from 'react'
 import { t } from './i18n'
-import { AppLink, navigateTo } from './navigation'
+import { TopNav, navigateTo } from './navigation'
 import { listContacts } from './phase3Api'
 import type { Contact } from './phase3Api'
 import {
@@ -841,10 +841,13 @@ export default function ComposeMailView() {
             <p>CaseClosed</p>
             <h1>{t('mail.compose.heading')}</h1>
           </div>
-          <nav aria-label={t('mail.compose.navigation')} className="maintenance-nav">
-            <AppLink href="/mail">{t('mail.heading')}</AppLink>
-            <AppLink href="/">{t('top.heading')}</AppLink>
-          </nav>
+          <TopNav
+            ariaLabelKey="mail.compose.navigation"
+            items={[
+              { href: '/mail', labelKey: 'mail.heading' },
+              { href: '/', labelKey: 'top.heading' },
+            ]}
+          />
         </header>
 
         <div className="compose-layout">

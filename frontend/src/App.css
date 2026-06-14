@@ -6137,6 +6137,29 @@
   font-weight: 780;
 }
 
+.storage-path-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.storage-path-case-link {
+  border: 1px solid rgba(145, 78, 43, 0.18);
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: var(--text-strong);
+  background: rgba(255, 250, 240, 0.72);
+  font-size: 0.74rem;
+  font-weight: 780;
+  line-height: 1.1;
+  text-decoration: none;
+}
+
+.storage-path-case-link:hover {
+  border-color: rgba(145, 78, 43, 0.32);
+  background: rgba(255, 238, 208, 0.82);
+}
+
 .storage-breadcrumb {
   display: flex;
   flex-wrap: wrap;
@@ -6913,6 +6936,164 @@
   text-align: left;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.storage-eml-preview {
+  width: 100%;
+  display: grid;
+  gap: 12px;
+  padding: 4px 20px 4px 0;
+}
+
+.storage-eml-message {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.storage-eml-sender-card {
+  cursor: default;
+}
+
+.storage-eml-sender-card:hover {
+  border-color: var(--tag-border);
+  background: var(--surface-control);
+}
+
+.storage-eml-sender-initial {
+  width: 42px;
+  height: 42px;
+  border: 1px solid var(--surface-warm-border);
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  color: var(--text-heading);
+  background: var(--surface-warm);
+  font-size: 1.1rem;
+  font-weight: 860;
+}
+
+.storage-eml-sender-avatar {
+  width: 42px;
+  height: 42px;
+  border: 1px solid var(--surface-warm-border);
+  border-radius: 999px;
+  object-fit: cover;
+  background: var(--surface-warm);
+}
+
+.storage-eml-preview header {
+  display: grid;
+  gap: 4px;
+}
+
+.storage-eml-preview header span {
+  color: var(--text-soft);
+  font-size: 0.82rem;
+  font-weight: 760;
+}
+
+.storage-eml-preview header h2 {
+  margin: 0;
+  color: var(--text-heading);
+  font-size: 1.2rem;
+  overflow-wrap: anywhere;
+}
+
+.storage-eml-meta {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+}
+
+.storage-eml-meta div {
+  min-width: 0;
+  border: 1px solid rgba(145, 78, 43, 0.14);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: rgba(255, 250, 242, 0.6);
+}
+
+.storage-eml-meta dt {
+  color: var(--text-soft);
+  font-size: 0.74rem;
+  font-weight: 760;
+}
+
+.storage-eml-meta dd {
+  margin: 3px 0 0;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.storage-eml-html-body {
+  width: 100%;
+  min-height: 460px;
+  border: 1px solid var(--surface-warm-border);
+  border-radius: var(--radius-card);
+  background: var(--surface-control);
+}
+
+.storage-eml-text-body {
+  max-height: 640px;
+}
+
+.storage-eml-attachments {
+  display: grid;
+  gap: 8px;
+}
+
+.storage-eml-attachments h3 {
+  margin: 0;
+  color: var(--text-heading);
+  font-size: 0.92rem;
+}
+
+.storage-eml-attachments div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.storage-eml-attachments span {
+  border: 1px solid var(--tag-border);
+  border-radius: 999px;
+  padding: 5px 9px;
+  color: var(--text-muted);
+  background: var(--surface-tag);
+  font-size: 0.82rem;
+  font-weight: 720;
+}
+
+.storage-eml-attachments .mail-attachment-badge {
+  display: inline-flex;
+}
+
+.storage-eml-attachments .mail-attachment-badge small {
+  color: var(--text-soft);
+  font-size: 0.74rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+@media (max-width: 760px) {
+  .storage-eml-preview.mail-thread-item-received {
+    grid-template-columns: 1fr;
+    padding-right: 0;
+  }
+
+  .storage-eml-sender-card {
+    width: 100%;
+    min-height: auto;
+    grid-template-columns: 42px minmax(0, 1fr);
+    justify-items: start;
+    text-align: left;
+  }
+
+  .storage-eml-meta {
+    grid-template-columns: 1fr;
+  }
 }
 
 .case-shell {
@@ -7938,6 +8119,26 @@
   display: grid;
   align-content: start;
   gap: 4px;
+}
+
+.case-task-next-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.case-task-status-badge {
+  max-width: 100%;
+  border: 1px solid rgba(145, 78, 43, 0.16);
+  border-radius: 999px;
+  padding: 2px 7px;
+  background: rgba(246, 222, 187, 0.42);
+  color: var(--text-strong);
+  font-size: 0.68rem;
+  font-weight: 760;
+  line-height: 1.1;
+  white-space: nowrap;
 }
 
 .case-calendar-gadget {
@@ -10148,6 +10349,87 @@ button.task-gadget-secondary-action {
   gap: 18px;
 }
 
+.task-batch-generate-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+  align-items: start;
+  gap: 18px;
+}
+
+.task-batch-source-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.task-batch-selection-column {
+  position: sticky;
+  top: 18px;
+  display: grid;
+  gap: 14px;
+}
+
+.task-batch-selected-list {
+  display: grid;
+  gap: 8px;
+}
+
+.task-batch-selected-item {
+  width: 100%;
+  border: 1px solid rgba(145, 78, 43, 0.16);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--text-heading);
+  background: rgba(255, 250, 242, 0.72);
+  text-align: left;
+}
+
+.task-batch-selected-item:hover {
+  border-color: rgba(145, 78, 43, 0.3);
+  background: rgba(255, 238, 208, 0.68);
+}
+
+.task-batch-selected-item span {
+  display: block;
+  font-weight: 820;
+  overflow-wrap: anywhere;
+}
+
+.task-batch-selected-item small {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-soft);
+  font-weight: 740;
+}
+
+.task-batch-prompt-field {
+  display: grid;
+  gap: 6px;
+}
+
+.task-batch-prompt-field span {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+
+.task-batch-prompt-field textarea {
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+  border: 1px solid var(--surface-warm-border);
+  border-radius: var(--radius-ui);
+  padding: 8px 10px;
+  color: var(--text-strong);
+  background: var(--surface-warm);
+  font: inherit;
+  line-height: 1.45;
+}
+
+.task-batch-generate-button {
+  width: 100%;
+  margin-top: 10px;
+}
+
 .task-create-field,
 .task-create-gadget-field {
   display: grid;
@@ -11503,8 +11785,13 @@ button.task-gadget-action:disabled {
   .calendar-main-layout,
   .task-main-layout,
   .task-detail-layout,
-  .task-new-layout {
+  .task-new-layout,
+  .task-batch-generate-layout {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .task-batch-selection-column {
+    position: static;
   }
 
   .case-tools [role='search'],
@@ -11653,6 +11940,47 @@ button.task-gadget-action:disabled {
 .storage-markdown-preview a {
   color: var(--text-heading);
   font-weight: 720;
+}
+
+.storage-markdown-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  margin: 1em 0;
+  border: 1px solid rgba(145, 78, 43, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 250, 242, 0.72);
+}
+
+.storage-markdown-table-wrap table {
+  width: 100%;
+  min-width: max-content;
+  border-collapse: collapse;
+}
+
+.storage-markdown-table-wrap th,
+.storage-markdown-table-wrap td {
+  border-bottom: 1px solid rgba(145, 78, 43, 0.12);
+  border-right: 1px solid rgba(145, 78, 43, 0.12);
+  padding: 8px 10px;
+  vertical-align: top;
+  overflow-wrap: normal;
+  word-break: keep-all;
+}
+
+.storage-markdown-table-wrap th {
+  color: var(--text-heading);
+  background: rgba(255, 238, 208, 0.58);
+  font-weight: 820;
+  text-align: left;
+}
+
+.storage-markdown-table-wrap tr:last-child td {
+  border-bottom: 0;
+}
+
+.storage-markdown-table-wrap th:last-child,
+.storage-markdown-table-wrap td:last-child {
+  border-right: 0;
 }
 
 .storage-table-preview {

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
-import { AppLink } from './navigation'
+import { AppLink, TopNav } from './navigation'
 import { CaseStorageWindow } from './CaseView'
 import { t } from './i18n'
 import gmailIconUrl from './assets/gmail-icon-2020.svg'
@@ -553,11 +553,14 @@ export default function TaskDetailView({ taskId }: { taskId: string }) {
             <p>{t('app.name')}</p>
             <h1>{task?.title ?? t('tasks.detail.heading')}</h1>
           </div>
-          <nav aria-label={t('tasks.navigation')} className="maintenance-nav">
-            <AppLink href="/">{t('top.heading')}</AppLink>
-            <AppLink href="/tasks">{t('tasks.heading')}</AppLink>
-            <AppLink href="/cases">{t('cases.heading')}</AppLink>
-          </nav>
+          <TopNav
+            ariaLabelKey="tasks.navigation"
+            items={[
+              { href: '/', labelKey: 'top.heading' },
+              { href: '/tasks', labelKey: 'tasks.heading' },
+              { href: '/cases', labelKey: 'cases.heading' },
+            ]}
+          />
         </header>
 
         {error !== null && (

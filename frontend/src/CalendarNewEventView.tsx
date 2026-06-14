@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
-import { AppLink, navigateTo } from './navigation'
+import { AppLink, TopNav, navigateTo } from './navigation'
 import {
   createCalendarDbEventLink,
   createGoogleCalendarEvent,
@@ -147,6 +147,7 @@ function visibleTimeFromMinutes(value: number) {
 }
 
 export default function CalendarNewEventView() {
+  const preselectedCaseId = new URLSearchParams(window.location.search).get('case_id')
   const [calendars, setCalendars] = useState<GoogleCalendarListItem[]>([])
   const [cases, setCases] = useState<CaseItem[]>([])
   const [tasks, setTasks] = useState<TaskItem[]>([])
@@ -253,7 +254,14 @@ export default function CalendarNewEventView() {
         const writableItems = calendarItems.filter((calendar) => calendar.can_write)
         const primaryWritable = writableItems.find((calendar) => calendar.primary)
         setCalendarId(primaryWritable?.id ?? writableItems[0]?.id ?? 'primary')
-        setCases(caseItems.filter((item) => isCaseOpenForSuggestion(item)))
+        const openCaseItems = caseItems.filter((item) => isCaseOpenForSuggestion(item))
+        setCases(openCaseItems)
+        if (preselectedCaseId !== null) {
+          const preselectedCase = openCaseItems.find((item) => item.id === preselectedCaseId)
+          if (preselectedCase !== undefined) {
+            setCaseInput(preselectedCase.name)
+          }
+        }
         setTasks(
           taskItems.filter(
             (item) => item.deleted_at === null && item.status !== 'done' && item.status !== 'archived',
@@ -269,7 +277,7 @@ export default function CalendarNewEventView() {
     return () => {
       isMounted = false
     }
-  }, [])
+  }, [preselectedCaseId])
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -399,10 +407,13 @@ export default function CalendarNewEventView() {
             <p>{t('app.name')}</p>
             <h1>{t('calendar.create.heading')}</h1>
           </div>
-          <nav aria-label={t('calendar.navigation')} className="maintenance-nav">
-            <AppLink href="/calendar">{t('nav.calendar')}</AppLink>
-            <AppLink href="/">{t('top.heading')}</AppLink>
-          </nav>
+          <TopNav
+            ariaLabelKey="calendar.navigation"
+            items={[
+              { href: '/calendar', labelKey: 'nav.calendar' },
+              { href: '/', labelKey: 'top.heading' },
+            ]}
+          />
         </header>
 
         {error !== null && (

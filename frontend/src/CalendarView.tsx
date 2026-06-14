@@ -11,7 +11,7 @@ import {
 } from './phase4Api'
 import type { GoogleCalendarEvent, GoogleCalendarListItem } from './phase4Api'
 import { t } from './i18n'
-import { AppLink } from './navigation'
+import { AppLink, TopNav } from './navigation'
 
 type CalendarEventWithSource = GoogleCalendarEvent & {
   calendar_source_id?: string | null
@@ -885,11 +885,14 @@ function CalendarView() {
             <p>{t('app.name')}</p>
             <h1>{t('calendar.heading')}</h1>
           </div>
-          <nav aria-label={t('calendar.navigation')} className="maintenance-nav">
-            <AppLink href="/tasks">{t('nav.tasks')}</AppLink>
-            <AppLink href="/cases">{t('nav.cases')}</AppLink>
-            <AppLink href="/">{t('top.heading')}</AppLink>
-          </nav>
+          <TopNav
+            ariaLabelKey="calendar.navigation"
+            items={[
+              { href: '/tasks', labelKey: 'nav.tasks' },
+              { href: '/cases', labelKey: 'nav.cases' },
+              { href: '/', labelKey: 'top.heading' },
+            ]}
+          />
         </header>
 
         {error !== null && (

@@ -43,6 +43,7 @@ from caseclosed.db.models import AuditLog
 from caseclosed.db.models import StorageDirectory
 from caseclosed.db.models import StorageObject
 from caseclosed.db.models import Task
+from caseclosed.db.runtime import case_handover_storage_directory_id
 from caseclosed.db.runtime import case_storage_directory_id
 from caseclosed.db.runtime import ensure_case_storage_directory
 from caseclosed.db.runtime import get_session
@@ -384,6 +385,26 @@ def case_open_tasks(session: DatabaseSession, case_id: str) -> list[Task]:
     return sorted(tasks, key=cmp_to_key(compare_case_tasks))
 
 
+def case_not_started_preview_tasks(session: DatabaseSession, case_id: str) -> list[Task]:
+    today = jst_iso()[:10]
+    tasks = session.scalars(
+        select(Task)
+        .where(Task.case_id == case_id)
+        .where(Task.deleted_at.is_(None))
+        .where(Task.status == "not_started")
+    ).all()
+    tasks = [task for task in tasks if not task_is_actionable_for_case(task, today)]
+    return sorted(tasks, key=cmp_to_key(compare_case_tasks))
+
+
+def case_next_task(session: DatabaseSession, case_id: str) -> Task | None:
+    open_tasks = case_open_tasks(session, case_id)
+    if open_tasks:
+        return open_tasks[0]
+    preview_tasks = case_not_started_preview_tasks(session, case_id)
+    return preview_tasks[0] if preview_tasks else None
+
+
 def case_task_counts(session: DatabaseSession, case_id: str) -> tuple[int, int]:
     open_tasks = case_open_tasks(session, case_id)
     now = jst_iso()
@@ -440,8 +461,9 @@ def case_data(case: Case, session: DatabaseSession | None = None) -> dict[str, o
         overdue_task_count = sum(
             1 for task in open_tasks if task.due_at is not None and task.due_at < now
         )
-        if open_tasks:
-            next_task = case_task_data(open_tasks[0])
+        next_case_task = case_next_task(session, case.id)
+        if next_case_task is not None:
+            next_task = case_task_data(next_case_task)
         next_calendar_event = case_next_calendar_event_data(session, case.id)
     return {
         "id": case.id,
@@ -463,6 +485,7 @@ def case_data(case: Case, session: DatabaseSession | None = None) -> dict[str, o
         "overdue_task_count": overdue_task_count,
         "file_count": 0,
         "storage_directory_id": case_storage_directory_id(case.id),
+        "handover_storage_directory_id": case_handover_storage_directory_id(case.id),
         "next_task": next_task,
         "next_calendar_event": next_calendar_event,
         "created_at": case.created_at,

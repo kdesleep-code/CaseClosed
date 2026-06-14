@@ -1,8 +1,8 @@
 import { Fragment, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { DragEvent, MouseEvent } from 'react'
+import type { MouseEvent } from 'react'
 import { t } from './i18n'
-import { AppLink, navigateTo } from './navigation'
+import { AppLink, TopNav, navigateTo } from './navigation'
 import defaultContactAvatarUrl from './assets/default-contact-avatar.svg'
 import downloadIconUrl from './assets/download-icon.svg'
 import folderDirectoryIconUrl from './assets/folder-directory-icon.svg'
@@ -13,6 +13,7 @@ import {
   fileExtension,
   isPreviewableImageFile,
   isPreviewableDelimitedTableFile,
+  isPreviewableEmlFile,
   isPreviewableMarkdownFile,
   isPreviewablePdfFile,
   isPreviewableTextFile,
@@ -20,23 +21,18 @@ import {
   isPreviewableZipFile,
 } from './storagePreview'
 import {
-  createStorageDirectory,
-  deleteStorageDirectory,
   deleteStorageObject,
   deleteStorageObjectCaseLink,
   deleteOlderStorageObjectVersions,
   createStorageObjectCaseLink,
   getStorageObject,
   getStorageObjectArchiveTree,
+  getStorageObjectEmlPreview,
   getStorageObjectLlmDigest,
+  getStorageObjectVersionEmlPreview,
   getStorageObjectVersionArchiveTree,
   listStorageObjectLinkedCases,
   listStorageObjectVersions,
-  listStorageDirectories,
-  listStorageObjects,
-  moveStorageDirectoryToDirectory,
-  moveStorageObjectToDirectory,
-  searchStorageObjects,
   prepareStorageObjectLlmDigest,
   uploadStorageObjectVersion,
   updateStorageObjectLlmInput,
@@ -45,15 +41,13 @@ import type { StorageObject } from './phase3Api'
 import type { StorageDirectory } from './phase3Api'
 import type { StorageObjectVersion } from './phase3Api'
 import type { StorageSourceMail } from './phase3Api'
+import type { StorageEmlPreview } from './phase3Api'
 import type { FileSummary, FileVersionDiff } from './phase3Api'
 import type { StorageObjectLinkedCase } from './phase3Api'
 import { isCaseOpenForSuggestion, listCases } from './phase7Api'
 import type { CaseItem } from './phase7Api'
 import SuggestInput from './SuggestInput'
-import {
-  droppedStorageFilesFromDataTransfer,
-  uploadDroppedStorageFiles,
-} from './storageDirectoryDrop'
+import StorageBrowser from './StorageBrowser'
 
 type StoragePreviewFile = {
   id: string
@@ -143,19 +137,9 @@ function textDecodeScore(text: string) {
     if (char === '\uFFFD') score += 100
     if ((code < 32 && !['\n', '\r', '\t'].includes(char)) || code === 0x7f) score += 25
   }
-  const mojibakePatterns = [
-    /縺/g,
-    /繧/g,
-    /繝/g,
-    /譁/g,
-    /荳/g,
-    /邱/g,
-    /螟/g,
-    /豌/g,
-    /�/g,
-  ]
+  const mojibakePatterns = ['邵ｺ', '郢ｧ', '闕ｳ', '驍ｱ', '・ｽ']
   for (const pattern of mojibakePatterns) {
-    score += (text.match(pattern)?.length ?? 0) * 12
+    score += Math.max(0, text.split(pattern).length - 1) * 12
   }
   return score
 }
@@ -250,6 +234,13 @@ function isPreviewableDelimitedTable(object: StoragePreviewFile) {
 
 function isPreviewableZip(object: StoragePreviewFile) {
   return isPreviewableZipFile({
+    contentType: object.content_type,
+    filename: object.original_filename,
+  })
+}
+
+function isPreviewableEml(object: StoragePreviewFile) {
+  return isPreviewableEmlFile({
     contentType: object.content_type,
     filename: object.original_filename,
   })
@@ -541,6 +532,10 @@ function StorageObjectDetailView({ storageObjectId }: { storageObjectId: string 
   const [archiveTreeStatus, setArchiveTreeStatus] = useState<
     'idle' | 'loading' | 'loaded' | 'failed'
   >('idle')
+  const [emlPreview, setEmlPreview] = useState<StorageEmlPreview | null>(null)
+  const [emlPreviewStatus, setEmlPreviewStatus] = useState<
+    'idle' | 'loading' | 'loaded' | 'failed'
+  >('idle')
   const [downloadBusyId, setDownloadBusyId] = useState<string | null>(null)
   const [llmBusy, setLlmBusy] = useState(false)
   const [digestBusy, setDigestBusy] = useState(false)
@@ -646,6 +641,44 @@ function StorageObjectDetailView({ storageObjectId }: { storageObjectId: string 
         if (!isMounted) return
         setTextPreview(null)
         setTextPreviewStatus('failed')
+      })
+    return () => {
+      isMounted = false
+    }
+  }, [object, selectedVersionId, versions])
+
+  useEffect(() => {
+    const selectedVersion = versions.find((version) => version.id === selectedVersionId) ?? null
+    const previewFile =
+      object === null
+        ? null
+        : selectedVersion === null
+          ? currentStoragePreviewFile(object)
+          : versionStoragePreviewFile(selectedVersion)
+
+    if (object === null || previewFile === null || !isPreviewableEml(previewFile)) {
+      setEmlPreview(null)
+      setEmlPreviewStatus('idle')
+      return undefined
+    }
+
+    let isMounted = true
+    setEmlPreview(null)
+    setEmlPreviewStatus('loading')
+    const request =
+      selectedVersion === null
+        ? getStorageObjectEmlPreview(object.id)
+        : getStorageObjectVersionEmlPreview(object.id, selectedVersion.id)
+    request
+      .then((preview) => {
+        if (!isMounted) return
+        setEmlPreview(preview)
+        setEmlPreviewStatus('loaded')
+      })
+      .catch(() => {
+        if (!isMounted) return
+        setEmlPreview(null)
+        setEmlPreviewStatus('failed')
       })
     return () => {
       isMounted = false
@@ -973,10 +1006,13 @@ function StorageObjectDetailView({ storageObjectId }: { storageObjectId: string 
             <p>{t('storage.heading')}</p>
             <h1>{filename}</h1>
           </div>
-          <nav aria-label={t('storage.navigation')} className="maintenance-nav">
-            <AppLink href="/files">{t('storage.heading')}</AppLink>
-            <AppLink href="/">{t('top.heading')}</AppLink>
-          </nav>
+          <TopNav
+            ariaLabelKey="storage.navigation"
+            items={[
+              { href: '/files', labelKey: 'storage.heading' },
+              { href: '/', labelKey: 'top.heading' },
+            ]}
+          />
         </header>
 
         {error !== null && (
@@ -1254,6 +1290,11 @@ function StorageObjectDetailView({ storageObjectId }: { storageObjectId: string 
                     status={archiveTreeStatus}
                     text={archiveTreeText}
                   />
+                ) : isPreviewableEml(previewFile) ? (
+                  <StorageEmlPreviewCard
+                    preview={emlPreview}
+                    status={emlPreviewStatus}
+                  />
                 ) : isPreviewableMarkdown(previewFile) ? (
                   <StorageMarkdownPreview
                     status={textPreviewStatus}
@@ -1337,7 +1378,8 @@ function renderMarkdownBlocks(text: string) {
       /^>\s?/.test(line) ||
       /^[-*]\s+/.test(line) ||
       /^\d+\.\s+/.test(line) ||
-      /^```/.test(line)
+      /^```/.test(line) ||
+      isMarkdownTableStart(lines, index)
     )
   }
 
@@ -1360,6 +1402,46 @@ function renderMarkdownBlocks(text: string) {
         <pre className="storage-markdown-code" key={`code-${index}`}>
           <code>{codeLines.join('\n')}</code>
         </pre>,
+      )
+      continue
+    }
+
+    if (isMarkdownTableStart(lines, index)) {
+      const headerCells = splitMarkdownTableRow(lines[index])
+      index += 2
+      const rows: string[][] = []
+      while (index < lines.length && splitMarkdownTableRow(lines[index]).length > 1) {
+        rows.push(splitMarkdownTableRow(lines[index]))
+        index += 1
+      }
+      blocks.push(
+        <div className="storage-markdown-table-wrap" key={`table-${index}`}>
+          <table>
+            <thead>
+              <tr>
+                {headerCells.map((cell, cellIndex) => (
+                  <th key={`table-${index}-head-${cellIndex}`} scope="col">
+                    {markdownInlineNodes(cell, `table-${index}-head-${cellIndex}`)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, rowIndex) => (
+                <tr key={`table-${index}-row-${rowIndex}`}>
+                  {headerCells.map((_, cellIndex) => (
+                    <td key={`table-${index}-row-${rowIndex}-${cellIndex}`}>
+                      {markdownInlineNodes(
+                        row[cellIndex] ?? '',
+                        `table-${index}-row-${rowIndex}-${cellIndex}`,
+                      )}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
       )
       continue
     }
@@ -1457,6 +1539,25 @@ function renderMarkdownBlocks(text: string) {
   }
 
   return blocks
+}
+
+function isMarkdownTableStart(lines: string[], index: number) {
+  const headerCells = splitMarkdownTableRow(lines[index] ?? '')
+  const separatorCells = splitMarkdownTableRow(lines[index + 1] ?? '')
+  return (
+    headerCells.length > 1 &&
+    separatorCells.length === headerCells.length &&
+    separatorCells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()))
+  )
+}
+
+function splitMarkdownTableRow(line: string) {
+  const trimmed = line.trim()
+  if (!trimmed.includes('|')) {
+    return []
+  }
+  const withoutOuterPipes = trimmed.replace(/^\|/, '').replace(/\|$/, '')
+  return withoutOuterPipes.split('|').map((cell) => cell.trim())
 }
 
 function StorageMarkdownPreview({
@@ -1638,6 +1739,106 @@ function StorageArchivePreview({
   return <p>{t('storage.preview.unavailable')}</p>
 }
 
+function StorageEmlPreviewCard({
+  preview,
+  status,
+}: {
+  preview: StorageEmlPreview | null
+  status: 'idle' | 'loading' | 'loaded' | 'failed'
+}) {
+  if (status === 'loading') {
+    return <p>{t('storage.eml.loading')}</p>
+  }
+  if (status === 'failed') {
+    return <p>{t('storage.eml.failed')}</p>
+  }
+  if (status !== 'loaded' || preview === null) {
+    return <p>{t('storage.preview.unavailable')}</p>
+  }
+  const metaItems = [
+    [t('storage.eml.to'), preview.to],
+    [t('storage.eml.cc'), preview.cc],
+    [t('storage.eml.replyTo'), preview.reply_to],
+    [t('storage.eml.date'), preview.date],
+    [t('storage.eml.messageId'), preview.message_id],
+  ].filter(([, value]) => value !== null && value !== '')
+  const senderLabel = preview.from ?? t('storage.eml.heading')
+  const senderContact = preview.sender_contact
+  return (
+    <div className="storage-eml-preview mail-thread-item mail-thread-item-received">
+      <aside className="mail-thread-sender-card storage-eml-sender-card">
+        {senderContact?.avatar_url ? (
+          <img
+            alt=""
+            className="storage-eml-sender-avatar"
+            src={senderContact.avatar_url}
+          />
+        ) : (
+          <span aria-hidden="true" className="storage-eml-sender-initial">
+            {senderLabel.trim().charAt(0).toUpperCase()}
+          </span>
+        )}
+        <strong>{senderLabel}</strong>
+        <span>
+          <small>{senderContact?.display_name ?? t('storage.eml.heading')}</small>
+        </span>
+      </aside>
+      <article className="mail-panel mail-thread-message storage-eml-message">
+        <header>
+          <div>
+            <span>{preview.date ?? t('time.unavailable')}</span>
+            <h2>{preview.subject ?? t('mail.noSubject')}</h2>
+          </div>
+        </header>
+        {metaItems.length > 0 && (
+          <details className="mail-thread-head-details storage-eml-head-details">
+            <summary>{t('mail.thread.head')}</summary>
+            <div className="mail-thread-head">
+              <dl className="mail-thread-meta storage-eml-meta">
+                <div>
+                  <dt>{t('storage.eml.from')}</dt>
+                  <dd>{preview.from ?? t('common.none')}</dd>
+                </div>
+                {metaItems.map(([label, value]) => (
+                  <div key={label}>
+                    <dt>{label}</dt>
+                    <dd>{value}</dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+          </details>
+        )}
+        {preview.body_html !== null && preview.body_html.trim() !== '' ? (
+          <iframe
+            className="mail-thread-html-body storage-eml-html-body"
+            sandbox=""
+            srcDoc={preview.body_html}
+            title={preview.subject ?? t('storage.eml.heading')}
+          />
+        ) : (
+          <pre className="mail-thread-body storage-eml-text-body">
+            {preview.body_text ?? t('storage.eml.noBody')}
+          </pre>
+        )}
+        {preview.attachments.length > 0 && (
+          <section className="mail-thread-section storage-eml-attachments">
+            <h3>{t('storage.eml.attachments')}</h3>
+            <div className="mail-attachment-badges">
+              {preview.attachments.map((attachment, index) => (
+                <span className="mail-attachment-badge" key={`${attachment.filename}-${index}`}>
+                  <span>{attachment.filename}</span>
+                  <small>{formatBytes(attachment.byte_size)}</small>
+                </span>
+              ))}
+            </div>
+          </section>
+        )}
+      </article>
+    </div>
+  )
+}
+
 function FileSummaryCard({
   isStale,
   staleReason,
@@ -1701,7 +1902,7 @@ function FileVersionDiffCard({ diff }: { diff: FileVersionDiff | null }) {
           <h2>{t('storage.diff.cardHeading')}</h2>
           <p>{diff.summary_text}</p>
         </div>
-        <span>{isOpen ? '−' : '+'}</span>
+        <span>{isOpen ? '-' : '+'}</span>
       </button>
       {isOpen && diff.display_lines.length > 0 ? (
         <pre className="storage-file-diff-view">
@@ -1730,10 +1931,7 @@ function FileVersionDiffCard({ diff }: { diff: FileVersionDiff | null }) {
   )
 }
 
-function StorageListView() {
-  const [objects, setObjects] = useState<StorageObject[]>([])
-  const [directories, setDirectories] = useState<StorageDirectory[]>([])
-  const [breadcrumbs, setBreadcrumbs] = useState<StorageDirectory[]>([])
+function StorageListBrowserView() {
   const [currentDirectoryId, setCurrentDirectoryId] = useState<string | null>(
     directoryIdFromLocation,
   )
@@ -1743,84 +1941,6 @@ function StorageListView() {
   )
   const [extensionFilter, setExtensionFilter] = useState<string | null>(null)
   const [availableExtensions, setAvailableExtensions] = useState<string[]>([])
-  const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null)
-  const [contextMenu, setContextMenu] = useState<{
-    directory: StorageDirectory | null
-    object: StorageObject | null
-    x: number
-    y: number
-  } | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
-  const [busy, setBusy] = useState(false)
-  const [isDragOver, setIsDragOver] = useState(false)
-  const [downloadBusyId, setDownloadBusyId] = useState<string | null>(null)
-  const [llmBusyId, setLlmBusyId] = useState<string | null>(null)
-  const [deleteBusyId, setDeleteBusyId] = useState<string | null>(null)
-  const [notice, setNotice] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const isSearchMode = searchQuery.trim() !== '' || extensionFilter !== null
-
-  useEffect(() => {
-    function syncDirectoryFromLocation() {
-      setCurrentDirectoryId(directoryIdFromLocation())
-    }
-    window.addEventListener('popstate', syncDirectoryFromLocation)
-    return () => window.removeEventListener('popstate', syncDirectoryFromLocation)
-  }, [])
-
-  async function refreshStorage() {
-    setError(null)
-    if (isSearchMode) {
-      const [searchResult, nextDirectories] = await Promise.all([
-        searchStorageObjects({
-          query: searchQuery,
-          directory_id: currentDirectoryId,
-          recursive: true,
-          sort: sortMode,
-          extension: extensionFilter,
-          limit: 200,
-        }),
-        listStorageDirectories(currentDirectoryId),
-      ])
-      setObjects(searchResult.items)
-      setDirectories([])
-      setBreadcrumbs(nextDirectories.breadcrumbs)
-      setAvailableExtensions(searchResult.extensions)
-      return
-    }
-
-    const [nextObjects, nextDirectories, nextExtensions] = await Promise.all([
-      listStorageObjects({ directory_id: currentDirectoryId, limit: 200 }),
-      listStorageDirectories(currentDirectoryId),
-      searchStorageObjects({
-        query: searchQuery,
-        directory_id: currentDirectoryId,
-        recursive: true,
-        sort: sortMode,
-        extension: null,
-        limit: 1,
-      }),
-    ])
-    setObjects(nextObjects)
-    setDirectories(nextDirectories.items)
-    setBreadcrumbs(nextDirectories.breadcrumbs)
-    setAvailableExtensions(nextExtensions.extensions)
-  }
-
-  useEffect(() => {
-    let isMounted = true
-    setIsLoading(true)
-    refreshStorage()
-      .catch((requestError) => {
-        if (isMounted) setError(describeError(requestError))
-      })
-      .finally(() => {
-        if (isMounted) setIsLoading(false)
-      })
-    return () => {
-      isMounted = false
-    }
-  }, [currentDirectoryId, searchQuery, sortMode, extensionFilter])
 
   useEffect(() => {
     const syncDirectoryFromLocation = () => setCurrentDirectoryId(directoryIdFromLocation())
@@ -1828,336 +1948,13 @@ function StorageListView() {
     return () => window.removeEventListener('popstate', syncDirectoryFromLocation)
   }, [])
 
-  useEffect(() => {
-    if (contextMenu === null) return undefined
-
-    const closeMenu = () => setContextMenu(null)
-    const closeMenuOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') closeMenu()
-    }
-
-    window.addEventListener('click', closeMenu)
-    window.addEventListener('scroll', closeMenu, true)
-    window.addEventListener('keydown', closeMenuOnEscape)
-    return () => {
-      window.removeEventListener('click', closeMenu)
-      window.removeEventListener('scroll', closeMenu, true)
-      window.removeEventListener('keydown', closeMenuOnEscape)
-    }
-  }, [contextMenu])
-
-  async function uploadDroppedItems(dataTransfer: DataTransfer, directoryId: string | null) {
-    setBusy(true)
-    setError(null)
-    setNotice(null)
-    try {
-      const droppedFiles = await droppedStorageFilesFromDataTransfer(dataTransfer)
-      if (droppedFiles.length === 0) {
-        setError(t('storage.noFileSelected'))
-        return
-      }
-      const result = await uploadDroppedStorageFiles(droppedFiles, directoryId)
-      setNotice(
-        result.count === 1
-          ? t('storage.uploaded', { name: result.lastUploadedName })
-          : t('storage.uploadedMany', { count: String(result.count) }),
-      )
-      await refreshStorage()
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function handleMoveStorageObject(objectId: string, directoryId: string | null) {
-    if (objectId === '') return
-    setBusy(true)
-    setError(null)
-    setNotice(null)
-    try {
-      const movedObject = await moveStorageObjectToDirectory(objectId, directoryId)
-      setSelectedObjectId((currentId) => (currentId === objectId ? null : currentId))
-      setNotice(t('storage.moved', { name: movedObject.original_filename ?? movedObject.id }))
-      await refreshStorage()
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function handleMoveStorageDirectory(directoryId: string, parentId: string | null) {
-    if (directoryId === '') return
-    if (directoryId === parentId) return
-    setBusy(true)
-    setError(null)
-    setNotice(null)
-    try {
-      const movedDirectory = await moveStorageDirectoryToDirectory(directoryId, parentId)
-      setSelectedObjectId(null)
-      setNotice(t('storage.directory.moved', { name: movedDirectory.name }))
-      await refreshStorage()
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  function directoryIdFromDragEvent(event: DragEvent<HTMLElement>) {
-    return event.dataTransfer.getData(storageDirectoryDragType)
-  }
-
-  function objectIdFromDragEvent(event: DragEvent<HTMLElement>) {
-    if (directoryIdFromDragEvent(event) !== '') {
-      return ''
-    }
-    return (
-      event.dataTransfer.getData(storageObjectDragType) ||
-      event.dataTransfer.getData('text/plain')
-    )
-  }
-
-  function handleDirectoryDragOver(event: DragEvent<HTMLElement>) {
-    event.preventDefault()
-    event.stopPropagation()
-    event.dataTransfer.dropEffect = 'move'
-  }
-
-  function handleDirectoryDrop(event: DragEvent<HTMLElement>, directoryId: string | null) {
-    event.preventDefault()
-    event.stopPropagation()
-    const draggedDirectoryId = directoryIdFromDragEvent(event)
-    if (draggedDirectoryId !== '') {
-      void handleMoveStorageDirectory(draggedDirectoryId, directoryId)
+  function updateDirectoryLocation(directoryId: string | null) {
+    setCurrentDirectoryId(directoryId)
+    if (directoryId === null) {
+      navigateTo('/files')
       return
     }
-    const objectId = objectIdFromDragEvent(event)
-    if (objectId !== '') {
-      void handleMoveStorageObject(objectId, directoryId)
-      return
-    }
-    if (Array.from(event.dataTransfer.types).includes('Files')) {
-      void uploadDroppedItems(event.dataTransfer, directoryId)
-    }
-  }
-
-  function handleDrop(event: DragEvent<HTMLDivElement>) {
-    event.preventDefault()
-    setIsDragOver(false)
-    const draggedDirectoryId = directoryIdFromDragEvent(event)
-    if (draggedDirectoryId !== '') {
-      void handleMoveStorageDirectory(draggedDirectoryId, currentDirectoryId)
-      return
-    }
-    const objectId = objectIdFromDragEvent(event)
-    if (objectId !== '') {
-      void handleMoveStorageObject(objectId, currentDirectoryId)
-      return
-    }
-    if (!Array.from(event.dataTransfer.types).includes('Files')) return
-    void uploadDroppedItems(event.dataTransfer, currentDirectoryId)
-  }
-
-  function handleDragOver(event: DragEvent<HTMLDivElement>) {
-    event.preventDefault()
-    event.dataTransfer.dropEffect = event.dataTransfer.types.includes('Files') ? 'copy' : 'move'
-    setIsDragOver(true)
-  }
-
-  function handleDragLeave(event: DragEvent<HTMLDivElement>) {
-    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-      setIsDragOver(false)
-    }
-  }
-
-  async function handleDownload(object: StorageObject) {
-    setDownloadBusyId(object.id)
-    setError(null)
-    try {
-      await downloadStorageObject(object)
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setDownloadBusyId(null)
-    }
-  }
-
-  async function handleUpdateLlmInput(object: StorageObject, allowed: boolean) {
-    setLlmBusyId(object.id)
-    setError(null)
-    try {
-      const updatedObject = await updateStorageObjectLlmInput(object.id, allowed)
-      setObjects((currentObjects) =>
-        currentObjects.map((currentObject) =>
-          currentObject.id === updatedObject.id ? updatedObject : currentObject,
-        ),
-      )
-      if (contextMenu?.object?.id === updatedObject.id) {
-        setContextMenu({ ...contextMenu, object: updatedObject })
-      }
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setLlmBusyId(null)
-    }
-  }
-
-  async function handleDelete(object: StorageObject) {
-    if (!window.confirm(t('storage.delete.confirm', { name: object.original_filename ?? object.id }))) {
-      return
-    }
-    setDeleteBusyId(object.id)
-    setError(null)
-    setNotice(null)
-    try {
-      await deleteStorageObject(object.id)
-      setObjects((currentObjects) =>
-        currentObjects.filter((currentObject) => currentObject.id !== object.id),
-      )
-      setSelectedObjectId((currentId) => (currentId === object.id ? null : currentId))
-      setNotice(t('storage.deleted', { name: object.original_filename ?? object.id }))
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setDeleteBusyId(null)
-    }
-  }
-
-  function handleOpenStorageObject(object: StorageObject) {
-    setSelectedObjectId(object.id)
-    setContextMenu(null)
-    navigateTo(`/files/${encodeURIComponent(object.id)}`)
-  }
-
-  function handleOpenDirectory(directory: StorageDirectory) {
-    setSelectedObjectId(null)
-    setContextMenu(null)
-    setCurrentDirectoryId(directory.id)
-    navigateTo(`/files?directory=${encodeURIComponent(directory.id)}`)
-  }
-
-  function handleOpenRootDirectory() {
-    setSelectedObjectId(null)
-    setContextMenu(null)
-    setCurrentDirectoryId(null)
-    navigateTo('/files')
-  }
-
-  async function createDirectoryByPrompt() {
-    const name = window.prompt(t('storage.directory.namePrompt'))?.trim() ?? ''
-    if (name === '') return
-    setBusy(true)
-    setError(null)
-    setNotice(null)
-    try {
-      await createStorageDirectory({ name, parent_id: currentDirectoryId })
-      await refreshStorage()
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  function handleStorageObjectContextMenu(event: MouseEvent<HTMLButtonElement>, object: StorageObject) {
-    event.preventDefault()
-    event.stopPropagation()
-    setSelectedObjectId(object.id)
-    setContextMenu({
-      directory: null,
-      object,
-      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 180)),
-      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 64)),
-    })
-  }
-
-  function handleStoragePanelContextMenu(event: MouseEvent<HTMLElement>) {
-    event.preventDefault()
-    const target = event.target instanceof Element ? event.target : null
-    if (target?.closest('.storage-object-card') !== null) {
-      return
-    }
-    setSelectedObjectId(null)
-    setContextMenu({
-      directory: null,
-      object: null,
-      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 180)),
-      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 64)),
-    })
-  }
-
-  function handleStorageDirectoryContextMenu(
-    event: MouseEvent<HTMLButtonElement>,
-    directory: StorageDirectory,
-  ) {
-    event.preventDefault()
-    event.stopPropagation()
-    if (directory.directory_kind === 'case' || directory.case_id !== null) {
-      setContextMenu(null)
-      return
-    }
-    setSelectedObjectId(null)
-    setContextMenu({
-      directory,
-      object: null,
-      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 180)),
-      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 64)),
-    })
-  }
-
-  function handleContextDownload() {
-    if (contextMenu === null || contextMenu.object === null) return
-    const object = contextMenu.object
-    setContextMenu(null)
-    void handleDownload(object)
-  }
-
-  function handleContextLlmInputToggle() {
-    if (contextMenu === null || contextMenu.object === null) return
-    const object = contextMenu.object
-    setContextMenu(null)
-    void handleUpdateLlmInput(object, !object.llm_input_allowed)
-  }
-
-  function handleContextDelete() {
-    if (contextMenu === null || contextMenu.object === null) return
-    const object = contextMenu.object
-    setContextMenu(null)
-    void handleDelete(object)
-  }
-
-  function handleContextCreateDirectory() {
-    setContextMenu(null)
-    void createDirectoryByPrompt()
-  }
-
-  async function handleDeleteDirectory(directory: StorageDirectory) {
-    if (!window.confirm(t('storage.directory.deleteConfirm', { name: directory.name }))) {
-      return
-    }
-    setBusy(true)
-    setError(null)
-    setNotice(null)
-    try {
-      await deleteStorageDirectory(directory.id)
-      setDirectories((currentDirectories) =>
-        currentDirectories.filter((currentDirectory) => currentDirectory.id !== directory.id),
-      )
-      setNotice(t('storage.directory.deleted', { name: directory.name }))
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  function handleContextDeleteDirectory() {
-    if (contextMenu === null || contextMenu.directory === null) return
-    const directory = contextMenu.directory
-    setContextMenu(null)
-    void handleDeleteDirectory(directory)
+    navigateTo(`/files?directory=${encodeURIComponent(directoryId)}`)
   }
 
   return (
@@ -2168,214 +1965,143 @@ function StorageListView() {
             <p>{t('app.name')}</p>
             <h1>{t('storage.heading')}</h1>
           </div>
-          <nav aria-label={t('storage.navigation')} className="maintenance-nav">
-            <AppLink href="/">{t('top.heading')}</AppLink>
-            <AppLink href="/maintenance">{t('nav.maintenance')}</AppLink>
-          </nav>
+          <TopNav
+            ariaLabelKey="storage.navigation"
+            items={[
+              { href: '/', labelKey: 'top.heading' },
+              { href: '/maintenance', labelKey: 'nav.maintenance' },
+            ]}
+          />
         </header>
 
-        {(error !== null || notice !== null) && (
-          <div className="mail-feedback">
-            {error !== null && <p role="alert">{error}</p>}
-            {notice !== null && <p>{notice}</p>}
-          </div>
-        )}
-
-        <div className="storage-top-tools">
-          <section className="storage-path-card" aria-label={t('storage.directory.path')}>
-            <h3>{t('storage.directory.path')}</h3>
-            <nav aria-label={t('storage.directory.breadcrumb')} className="storage-breadcrumb">
-              <button
-                onClick={handleOpenRootDirectory}
-                onDragOver={handleDirectoryDragOver}
-                onDrop={(event) => handleDirectoryDrop(event, null)}
-                type="button"
-              >
-                {t('storage.directory.root')}
-              </button>
-              {breadcrumbs.map((directory) => (
-                <button
-                  key={directory.id}
-                  onClick={() => handleOpenDirectory(directory)}
-                  onDragOver={handleDirectoryDragOver}
-                  onDrop={(event) => handleDirectoryDrop(event, directory.id)}
-                  type="button"
-                >
-                  {directory.name}
-                </button>
-              ))}
-            </nav>
-          </section>
-          <section className="storage-search-tools" aria-label={t('storage.search.region')}>
-            <div aria-label={t('storage.search.region')} role="search">
-              <label>
-                <span>{t('storage.search.label')}</span>
-                <input
-                  aria-label={t('storage.search.label')}
-                  onChange={(event) => setSearchQuery(event.target.value)}
-                  placeholder={t('storage.search.placeholder')}
-                  type="search"
-                  value={searchQuery}
-                />
-              </label>
-            </div>
-            <label className="storage-sort-control">
-              <span>{t('storage.sort.label')}</span>
-              <select
-                aria-label={t('storage.sort.aria')}
-                onChange={(event) =>
-                  setSortMode(event.target.value as 'created_desc' | 'created_asc' | 'name')
-                }
-                value={sortMode}
-              >
-                <option value="created_desc">{t('storage.sort.createdDesc')}</option>
-                <option value="created_asc">{t('storage.sort.createdAsc')}</option>
-                <option value="name">{t('storage.sort.name')}</option>
-              </select>
-            </label>
-            <div className="storage-extension-filters" aria-label={t('storage.extension.label')}>
-              <button
-                aria-pressed={extensionFilter === null}
-                onClick={() => setExtensionFilter(null)}
-                type="button"
-              >
-                {t('common.all')}
-              </button>
-              {availableExtensions.map((extension) => (
-                <button
-                  aria-pressed={extensionFilter === extension}
-                  key={extension}
-                  onClick={() =>
-                    setExtensionFilter((current) => (current === extension ? null : extension))
-                  }
-                  type="button"
-                >
-                  .{extension}
-                </button>
-              ))}
-            </div>
-          </section>
-        </div>
-
-        <section
-          className={`mail-panel storage-objects-panel storage-drop-zone button-loading-dot${
-            busy ? ' is-loading' : ''
-          }${isDragOver ? ' is-drag-over' : ''}`}
-          onContextMenu={handleStoragePanelContextMenu}
-          onDragLeave={handleDragLeave}
-          onDragOver={handleDragOver}
-          onDrop={handleDrop}
-        >
-          <div className="section-heading">
-            <div>
-              <h2>{t('storage.objects')}</h2>
-            </div>
-            <div className="storage-heading-actions">
-              <p>{t('storage.objectsBody')}</p>
-              <AppLink
-                aria-label={t('storage.fileIcons.configure')}
-                className="case-icon-button"
-                href="/file-icons"
-                title={t('storage.fileIcons.configure')}
-              >
-                <img alt="" aria-hidden="true" src={settingsGearIconUrl} />
-              </AppLink>
-            </div>
-          </div>
-          <div className="storage-object-grid">
-            {directories.map((directory) => (
-              <StorageDirectoryCard
-                directory={directory}
-                key={directory.id}
-                onContextMenu={handleStorageDirectoryContextMenu}
-                onDropFiles={(dataTransfer, directoryId) =>
-                  void uploadDroppedItems(dataTransfer, directoryId)
-                }
-                onDropDirectory={(directoryId, parentId) =>
-                  void handleMoveStorageDirectory(directoryId, parentId)
-                }
-                onDropObject={(objectId, directoryId) =>
-                  void handleMoveStorageObject(objectId, directoryId)
-                }
-                onOpen={handleOpenDirectory}
-              />
-            ))}
-            {objects.map((object) => (
-              <StorageObjectCard
-                busy={
-                  downloadBusyId === object.id ||
-                  llmBusyId === object.id ||
-                  deleteBusyId === object.id
-                }
-                key={object.id}
-                object={object}
-                onContextMenu={handleStorageObjectContextMenu}
-                onOpen={handleOpenStorageObject}
-                selected={selectedObjectId === object.id}
-                showPath={isSearchMode}
-              />
-            ))}
-            {objects.length === 0 && directories.length === 0 && (
-              <p>{isLoading ? t('storage.loading') : t('storage.noObjects')}</p>
-            )}
-          </div>
-          {contextMenu !== null && (
-            <div
-              aria-label={t('storage.context.menuLabel')}
-              className="storage-context-menu"
-              onClick={(event) => event.stopPropagation()}
-              role="menu"
-              style={{ left: contextMenu.x, top: contextMenu.y }}
+        <StorageBrowser
+          body={t('storage.objectsBody')}
+          currentDirectoryId={currentDirectoryId}
+          extensionFilter={extensionFilter}
+          extraHeadingActions={
+            <AppLink
+              aria-label={t('storage.fileIcons.configure')}
+              className="case-icon-button"
+              href="/file-icons"
+              title={t('storage.fileIcons.configure')}
             >
-              {contextMenu.object === null && contextMenu.directory === null && (
-                <button onClick={handleContextCreateDirectory} role="menuitem" type="button">
-                  {t('storage.context.newDirectory')}
-                </button>
-              )}
-              {contextMenu.directory !== null && (
-                <>
-                  {contextMenu.directory.directory_kind !== 'case' &&
-                    contextMenu.directory.case_id === null && (
+              <img alt="" aria-hidden="true" src={settingsGearIconUrl} />
+            </AppLink>
+          }
+          heading={t('storage.objects')}
+          onAvailableExtensionsChange={setAvailableExtensions}
+          onDirectoryChange={updateDirectoryLocation}
+          onOpenObject={(object) => navigateTo(`/files/${encodeURIComponent(object.id)}`)}
+          panelClassName="mail-panel storage-objects-panel"
+          renderTopTools={({
+            breadcrumbs,
+            openRootDirectory,
+            openDirectory,
+            onDirectoryDragOver,
+            onDirectoryDrop,
+          }) => {
+            const caseDirectory = breadcrumbs.find((directory) => directory.case_id !== null)
+            return (
+              <div className="storage-top-tools">
+                <section className="storage-path-card" aria-label={t('storage.directory.path')}>
+                  <div className="storage-path-heading">
+                    <h3>{t('storage.directory.path')}</h3>
+                    {caseDirectory?.case_id ? (
+                      <AppLink
+                        className="storage-path-case-link"
+                        href={`/cases/${encodeURIComponent(caseDirectory.case_id)}`}
+                      >
+                        {t('storage.directory.openCase')}
+                      </AppLink>
+                    ) : null}
+                  </div>
+                  <nav aria-label={t('storage.directory.breadcrumb')} className="storage-breadcrumb">
+                    <button
+                      onClick={openRootDirectory}
+                      onDragOver={onDirectoryDragOver}
+                      onDrop={(event) => onDirectoryDrop(event, null)}
+                      type="button"
+                    >
+                      {t('storage.directory.root')}
+                    </button>
+                    {breadcrumbs.map((directory) => (
                       <button
-                        onClick={handleContextDeleteDirectory}
-                        role="menuitem"
+                        key={directory.id}
+                        onClick={() => openDirectory(directory)}
+                        onDragOver={onDirectoryDragOver}
+                        onDrop={(event) => onDirectoryDrop(event, directory.id)}
                         type="button"
                       >
-                        <ActionIconLabel
-                          iconUrl={trashIconUrl}
-                          label={t('storage.context.deleteDirectory')}
-                        />
+                        {directory.name}
                       </button>
-                    )}
-                </>
-              )}
-              {contextMenu.object !== null && (
-                <>
-                  <button onClick={handleContextDownload} role="menuitem" type="button">
-                    <ActionIconLabel
-                      iconUrl={downloadIconUrl}
-                      label={t('storage.context.download')}
+                    ))}
+                  </nav>
+                </section>
+              <section className="storage-search-tools" aria-label={t('storage.search.region')}>
+                <div aria-label={t('storage.search.region')} role="search">
+                  <label>
+                    <span>{t('storage.search.label')}</span>
+                    <input
+                      aria-label={t('storage.search.label')}
+                      onChange={(event) => setSearchQuery(event.target.value)}
+                      placeholder={t('storage.search.placeholder')}
+                      type="search"
+                      value={searchQuery}
                     />
+                  </label>
+                </div>
+                <label className="storage-sort-control">
+                  <span>{t('storage.sort.label')}</span>
+                  <select
+                    aria-label={t('storage.sort.aria')}
+                    onChange={(event) =>
+                      setSortMode(event.target.value as 'created_desc' | 'created_asc' | 'name')
+                    }
+                    value={sortMode}
+                  >
+                    <option value="created_desc">{t('storage.sort.createdDesc')}</option>
+                    <option value="created_asc">{t('storage.sort.createdAsc')}</option>
+                    <option value="name">{t('storage.sort.name')}</option>
+                  </select>
+                </label>
+                <div className="storage-extension-filters" aria-label={t('storage.extension.label')}>
+                  <button
+                    aria-pressed={extensionFilter === null}
+                    onClick={() => setExtensionFilter(null)}
+                    type="button"
+                  >
+                    {t('common.all')}
                   </button>
-                  <button onClick={handleContextLlmInputToggle} role="menuitem" type="button">
-                    {contextMenu.object.llm_input_allowed
-                      ? t('storage.llmInput.disallow')
-                      : t('storage.llmInput.allow')}
-                  </button>
-                  <button onClick={handleContextDelete} role="menuitem" type="button">
-                    <ActionIconLabel
-                      iconUrl={trashIconUrl}
-                      label={t('storage.context.delete')}
-                    />
-                  </button>
-                </>
-              )}
-            </div>
-          )}
-        </section>
+                  {availableExtensions.map((extension) => (
+                    <button
+                      aria-pressed={extensionFilter === extension}
+                      key={extension}
+                      onClick={() =>
+                        setExtensionFilter((current) => (current === extension ? null : extension))
+                      }
+                      type="button"
+                    >
+                      .{extension}
+                    </button>
+                  ))}
+                </div>
+              </section>
+              </div>
+            )
+          }}
+          rootDirectoryId={null}
+          rootLabel={t('storage.directory.root')}
+          searchQuery={searchQuery}
+          showBreadcrumb={false}
+          sortMode={sortMode}
+        />
       </div>
     </main>
   )
+}
+
+function StorageListView() {
+  return <StorageListBrowserView />
 }
 
 export default function StorageView({ storageObjectId }: { storageObjectId?: string } = {}) {

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import defaultContactAvatarUrl from './assets/default-contact-avatar.svg'
 import settingsGearIconUrl from './assets/settings-gear.svg'
 import { t } from './i18n'
-import { AppLink } from './navigation'
+import { TopNav } from './navigation'
 import { listContacts } from './phase3Api'
 import type { Contact } from './phase3Api'
 import { getProfile, updateProfile } from './profileApi'
@@ -510,9 +510,10 @@ export default function ProfileView() {
             <p>{t('app.name')}</p>
             <h1>{t('profile.heading')}</h1>
           </div>
-          <nav aria-label={t('profile.navigation')} className="maintenance-nav">
-            <AppLink href="/">{t('top.heading')}</AppLink>
-          </nav>
+          <TopNav
+            ariaLabelKey="profile.navigation"
+            items={[{ href: '/', labelKey: 'top.heading' }]}
+          />
         </header>
 
         <section className="profile-card">

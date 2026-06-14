@@ -10,7 +10,7 @@ import {
 import type { MailDateSummary, MailDayStats, MailListFilters, MailListItem } from './phase4Api'
 import { t } from './i18n'
 import type { MessageKey } from './i18n'
-import { AppLink, navigateTo } from './navigation'
+import { AppLink, TopNav, navigateTo } from './navigation'
 import defaultContactAvatarUrl from './assets/default-contact-avatar.svg'
 import defaultMailingListAvatarUrl from './assets/default-mailing-list-avatar.svg'
 import defaultSpamAvatarUrl from './assets/default-spam-avatar.webp'
@@ -726,9 +726,10 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
               </span>
             </div>
           </div>
-          <nav aria-label={t('mail.navigation')} className="maintenance-nav">
-            <AppLink href="/">{t('top.heading')}</AppLink>
-          </nav>
+          <TopNav
+            ariaLabelKey="mail.navigation"
+            items={[{ href: '/', labelKey: 'top.heading' }]}
+          />
         </header>
 
         {(error !== null || notice !== null || lastAutoImportError !== null) && (

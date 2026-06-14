@@ -325,6 +325,26 @@ def build_task_prefill_provider() -> LlmProvider:
     )
 
 
+def build_handover_task_batch_provider() -> LlmProvider:
+    profile = load_llm_model_profile(FUNCTION_TYPE_HANDOVER_TASK_BATCH_GENERATION)
+    if profile is None:
+        profile = load_llm_model_profile(FUNCTION_TYPE_TASK_PREFILL_GENERATION)
+    if profile is None or profile.provider == "mock":
+        return MockHandoverTaskBatchProvider()
+
+    if profile.provider != "openai":
+        raise OpenAIProviderError(
+            f"Unsupported provider for {FUNCTION_TYPE_HANDOVER_TASK_BATCH_GENERATION}: "
+            f"{profile.provider}"
+        )
+
+    return OpenAIHandoverTaskBatchProvider(
+        api_key_env=profile.api_key_env,
+        model_name=profile.model,
+        timeout_seconds=profile.timeout_seconds,
+    )
+
+
 def build_calendar_event_prefill_provider() -> LlmProvider:
     profile = load_llm_model_profile(FUNCTION_TYPE_CALENDAR_EVENT_PREFILL_GENERATION)
     if profile is None or profile.provider == "mock":
@@ -371,6 +391,7 @@ FUNCTION_TYPE_CONTACT_AI_MEMO_UPDATE = "contact_ai_memo_update"
 FUNCTION_TYPE_REPLY_DRAFT_GENERATION = "reply_draft_generation"
 FUNCTION_TYPE_NEW_MAIL_DRAFT_GENERATION = "new_mail_draft_generation"
 FUNCTION_TYPE_TASK_PREFILL_GENERATION = "mail_task_suggestion"
+FUNCTION_TYPE_HANDOVER_TASK_BATCH_GENERATION = "preparation_task_suggestion"
 FUNCTION_TYPE_CALENDAR_EVENT_PREFILL_GENERATION = "calendar_candidate_extraction"
 
 
@@ -492,6 +513,11 @@ def llm_model_profile_data(profile: LlmModelProfile) -> dict[str, object]:
 
 
 def llm_function_label(function_type: str) -> str:
+    labels = {
+        FUNCTION_TYPE_HANDOVER_TASK_BATCH_GENERATION: "handover task generation",
+    }
+    if function_type in labels:
+        return labels[function_type]
     return function_type.replace("_", " ")
 
 
@@ -1036,6 +1062,55 @@ class MockTaskPrefillProvider:
         )
 
 
+class MockHandoverTaskBatchProvider:
+    provider_name = "mock"
+    model_name = "deterministic-handover-task-batch-v1"
+
+    def complete_json(
+        self,
+        *,
+        function_type: str,
+        input_payload: dict[str, object],
+    ) -> LlmProviderResponse:
+        if function_type != FUNCTION_TYPE_HANDOVER_TASK_BATCH_GENERATION:
+            raise ValueError(f"Unsupported mock function type: {function_type}")
+
+        files_payload = input_payload.get("files")
+        files = files_payload if isinstance(files_payload, list) else []
+        suggestions: list[dict[str, object]] = []
+        for index, item in enumerate(files[:5], start=1):
+            file_data = item if isinstance(item, dict) else {}
+            filename = compact_text(str(file_data.get("filename") or f"File {index}"), 80)
+            excerpt = compact_text(str(file_data.get("source_text") or ""), 120)
+            suggestions.append(
+                {
+                    "title": f"{filename}を確認する",
+                    "description": excerpt or f"{filename}の内容を確認して必要な対応を整理する。",
+                    "done_when_text": "必要な対応が整理され、実施すべき内容が確認されている。",
+                    "priority": "middle",
+                    "due_at": None,
+                    "estimate_minutes": None,
+                    "reasoning_summary": "Mock handover task generated from selected file metadata.",
+                    "warnings": [],
+                }
+            )
+        output = {
+            "schema_version": "1.0",
+            "summary": f"{len(suggestions)} task suggestions generated.",
+            "suggestions": suggestions,
+            "reasoning_summary": "Mock handover task batch generated from selected files.",
+            "warnings": [],
+        }
+        return LlmProviderResponse(
+            output=output,
+            output_preview=str(output["summary"]),
+            prompt_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+            estimated_cost=0.0,
+        )
+
+
 class MockCalendarEventPrefillProvider:
     provider_name = "mock"
     model_name = "deterministic-calendar-event-prefill-v1"
@@ -1419,6 +1494,46 @@ class OpenAITaskPrefillProvider:
         )
 
 
+class OpenAIHandoverTaskBatchProvider:
+    provider_name = "openai"
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        api_key_env: str | None = None,
+        model_name: str,
+        timeout_seconds: float,
+    ) -> None:
+        self.api_key = api_key or read_api_key(api_key_env)
+        if self.api_key is None or self.api_key.strip() == "":
+            raise OpenAIProviderError("OpenAI API key is not configured.")
+        self.model_name = model_name
+        self.timeout_seconds = timeout_seconds
+
+    def complete_json(
+        self,
+        *,
+        function_type: str,
+        input_payload: dict[str, object],
+    ) -> LlmProviderResponse:
+        if function_type != FUNCTION_TYPE_HANDOVER_TASK_BATCH_GENERATION:
+            raise ValueError(f"Unsupported OpenAI function type: {function_type}")
+
+        payload = {
+            "model": self.model_name,
+            "instructions": handover_task_batch_instructions(),
+            "input": handover_task_batch_input_text(input_payload),
+            "max_output_tokens": 2400,
+            "text": {"format": handover_task_batch_response_format()},
+        }
+        return openai_structured_response(
+            payload,
+            api_key=self.api_key,
+            timeout_seconds=self.timeout_seconds,
+        )
+
+
 class OpenAICalendarEventPrefillProvider:
     provider_name = "openai"
 
@@ -1736,6 +1851,57 @@ def task_prefill_response_format() -> dict[str, object]:
                 "priority",
                 "due_at",
                 "estimate_minutes",
+                "reasoning_summary",
+                "warnings",
+            ],
+        },
+    }
+
+
+def handover_task_batch_response_format() -> dict[str, object]:
+    string_array = {"type": "array", "items": {"type": "string"}}
+    task_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "title": {"type": "string"},
+            "description": {"type": "string"},
+            "done_when_text": {"type": "string"},
+            "priority": {"type": "string", "enum": ["high", "middle", "low"]},
+            "due_at": {"type": ["string", "null"]},
+            "estimate_minutes": {"type": ["integer", "null"]},
+            "reasoning_summary": {"type": "string"},
+            "warnings": string_array,
+        },
+        "required": [
+            "title",
+            "description",
+            "done_when_text",
+            "priority",
+            "due_at",
+            "estimate_minutes",
+            "reasoning_summary",
+            "warnings",
+        ],
+    }
+    return {
+        "type": "json_schema",
+        "name": "handover_task_batch_generation",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "schema_version": {"type": "string"},
+                "summary": {"type": "string"},
+                "suggestions": {"type": "array", "items": task_schema},
+                "reasoning_summary": {"type": "string"},
+                "warnings": string_array,
+            },
+            "required": [
+                "schema_version",
+                "summary",
+                "suggestions",
                 "reasoning_summary",
                 "warnings",
             ],
@@ -2097,6 +2263,23 @@ def task_prefill_instructions() -> str:
     )
 
 
+def handover_task_batch_instructions() -> str:
+    return (
+        "You help a university faculty user turn handover materials into concrete Task "
+        "candidates in a work-support app. Extract only Tasks that are useful for future "
+        "operation, preparation, confirmation, or follow-up. Do not create a Task for "
+        "every sentence; merge related small actions into one practical Task. Do not "
+        "invent facts that are not in the selected files or explicit user prompt. "
+        "Always write all user-facing generated Task text in Japanese, regardless of "
+        "the language of source files. Keep titles concise and directly editable. "
+        "done_when_text should describe the completion condition. Use priority "
+        "high/middle/low. due_at must be YYYY-MM-DD only when a clear due date exists; "
+        "otherwise null. estimate_minutes must be a practical integer or null. "
+        "Return zero suggestions only when the materials contain no actionable work. "
+        "Return only JSON matching the schema."
+    )
+
+
 def calendar_event_prefill_instructions() -> str:
     return (
         "You help a university faculty user draft a Google Calendar event from one "
@@ -2310,6 +2493,27 @@ def task_prefill_input_text(input_payload: dict[str, object]) -> str:
             json.dumps(current_fields, ensure_ascii=False, indent=2),
             "",
             "Fill sensible Task fields. The app will only apply fields that are blank in the UI.",
+        ]
+    )
+
+
+def handover_task_batch_input_text(input_payload: dict[str, object]) -> str:
+    case_payload = input_payload.get("case")
+    case_data = case_payload if isinstance(case_payload, dict) else {}
+    return "\n".join(
+        [
+            f"Additional user prompt: {input_payload.get('prompt') or ''}",
+            "",
+            "Case context:",
+            f"- Name: {case_data.get('name') or ''}",
+            f"- Overview: {case_data.get('description') or ''}",
+            f"- Open when: {case_data.get('open_when_date') or ''}",
+            f"- Closed when: {case_data.get('closed_when_text') or ''}",
+            "",
+            "Selected handover files JSON:",
+            truncated_text(json_text(input_payload.get("files") or []), 60000),
+            "",
+            "Extract practical Task candidates from the selected handover files.",
         ]
     )
 

@@ -23,6 +23,7 @@ from caseclosed.db.models import MailAutoState
 from caseclosed.db.models import MailSummary
 from caseclosed.db.models import MailThreadSummary
 from caseclosed.db.models import StorageDirectory
+from caseclosed.db.models import StorageObject
 from caseclosed.db.models import Task
 from caseclosed.db.models import TaskLink
 from caseclosed.db.models import TaskProgressEntry
@@ -31,7 +32,9 @@ from caseclosed.db.runtime import get_session
 from caseclosed.db.runtime import jst_iso
 from caseclosed.db.runtime import jst_now
 from caseclosed.services.llm_provider import FUNCTION_TYPE_TASK_PREFILL_GENERATION
+from caseclosed.services.llm_provider import FUNCTION_TYPE_HANDOVER_TASK_BATCH_GENERATION
 from caseclosed.services.llm_provider import OpenAIProviderError
+from caseclosed.services.llm_provider import build_handover_task_batch_provider
 from caseclosed.services.llm_provider import build_task_prefill_provider
 from caseclosed.services.mail_thread_summary import split_quoted_reply_sections
 
@@ -108,6 +111,12 @@ class TaskFromMailPayload(BaseModel):
     message_id: str = Field(min_length=1)
     case_id: str | None = None
     prompt: str | None = None
+
+
+class HandoverTaskBatchPayload(BaseModel):
+    case_id: str = Field(min_length=1)
+    storage_object_ids: list[str] = Field(min_length=1)
+    additional_prompt: str | None = None
 
 
 class TaskProgressEntryCreate(BaseModel):
@@ -699,6 +708,104 @@ def run_task_prefill(
     return normalize_task_prefill_output(output), llm_run.id
 
 
+def truncate_text(value: object, limit: int) -> str:
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n...[truncated]"
+
+
+def normalize_handover_task_suggestions(output: dict[str, object]) -> list[dict[str, object]]:
+    suggestions_payload = output.get("suggestions")
+    if not isinstance(suggestions_payload, list):
+        return []
+    suggestions: list[dict[str, object]] = []
+    for item in suggestions_payload[:30]:
+        if not isinstance(item, dict):
+            continue
+        title = normalize_optional_text(str(item.get("title") or ""))
+        if title is None:
+            continue
+        priority = str(item.get("priority") or "middle")
+        if priority not in TASK_PRIORITIES:
+            priority = "middle"
+        estimate_minutes = item.get("estimate_minutes")
+        warnings_payload = item.get("warnings")
+        warnings = [
+            str(warning)
+            for warning in warnings_payload
+            if isinstance(warning, str)
+        ] if isinstance(warnings_payload, list) else []
+        suggestions.append(
+            {
+                "title": title,
+                "description": normalize_optional_text(str(item.get("description") or "")),
+                "done_when_text": normalize_optional_text(str(item.get("done_when_text") or "")),
+                "priority": priority,
+                "due_at": normalize_optional_text(str(item.get("due_at") or "")),
+                "estimate_minutes": estimate_minutes if isinstance(estimate_minutes, int) else None,
+                "reasoning_summary": normalize_optional_text(
+                    str(item.get("reasoning_summary") or "")
+                ),
+                "warnings": warnings,
+            }
+        )
+    return suggestions
+
+
+def run_handover_task_batch_generation(
+    session: DatabaseSession,
+    input_payload: dict[str, object],
+) -> tuple[list[dict[str, object]], str]:
+    provider = build_handover_task_batch_provider()
+    now = jst_iso()
+    try:
+        provider_response = provider.complete_json(
+            function_type=FUNCTION_TYPE_HANDOVER_TASK_BATCH_GENERATION,
+            input_payload=input_payload,
+        )
+        status = "succeeded"
+        error_type = None
+        error_message = None
+        output = provider_response.output
+    except OpenAIProviderError as exc:
+        provider_response = None
+        status = "failed"
+        error_type = exc.__class__.__name__
+        error_message = str(exc)
+        output = {}
+    llm_run = LlmRun(
+        id=new_id("llm_run"),
+        function_type=FUNCTION_TYPE_HANDOVER_TASK_BATCH_GENERATION,
+        provider_name=provider.provider_name,
+        model_name=provider.model_name,
+        prompt_version_id=None,
+        input_hash=None,
+        input_source_json=json.dumps(input_payload, ensure_ascii=False),
+        input_diagnostic_json=None,
+        applied_instruction_rule_ids_json=None,
+        output_json=json.dumps(output, ensure_ascii=False) if output else None,
+        output_text_preview=provider_response.output_preview if provider_response else None,
+        status=status,
+        error_type=error_type,
+        error_message=error_message,
+        retry_count=0,
+        max_retry_count=0,
+        prompt_tokens=provider_response.prompt_tokens if provider_response else None,
+        completion_tokens=provider_response.completion_tokens if provider_response else None,
+        total_tokens=provider_response.total_tokens if provider_response else None,
+        estimated_cost=provider_response.estimated_cost if provider_response else None,
+        started_at=now,
+        finished_at=now,
+        created_at=now,
+    )
+    session.add(llm_run)
+    session.flush()
+    if status != "succeeded":
+        raise json_error(502, "LLM_PREFILL_FAILED", error_message or "Task batch generation failed.")
+    return normalize_handover_task_suggestions(output), llm_run.id
+
+
 def default_task_case(session: DatabaseSession) -> Case:
     case = session.scalar(select(Case).where(Case.system_case_key == "inbox"))
     if case is None:
@@ -935,6 +1042,73 @@ def prefill_task(
         "ok": True,
         "data": {
             "prefill": prefill,
+            "llm_run_id": llm_run_id,
+        },
+    }
+
+
+@router.post("/handover-prefill")
+def prefill_tasks_from_handover(
+    payload: HandoverTaskBatchPayload,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    case = ensure_case_exists(session, payload.case_id)
+    from caseclosed.storage import storage_summary_source
+
+    files: list[dict[str, object]] = []
+    seen_object_ids: set[str] = set()
+    for storage_object_id in payload.storage_object_ids:
+        object_id = storage_object_id.strip()
+        if object_id == "" or object_id in seen_object_ids:
+            continue
+        seen_object_ids.add(object_id)
+        storage_object = session.get(StorageObject, object_id)
+        if (
+            storage_object is None
+            or storage_object.status != "active"
+            or storage_object.scope != "managed"
+        ):
+            raise json_error(404, "NOT_FOUND", "Storage object not found.")
+        if not bool(storage_object.llm_input_allowed):
+            raise json_error(
+                403,
+                "LLM_INPUT_NOT_ALLOWED",
+                "Selected file is not allowed as LLM input.",
+            )
+        source = storage_summary_source(storage_object, None, session)
+        files.append(
+            {
+                "storage_object_id": storage_object.id,
+                "filename": storage_object.original_filename,
+                "content_type": storage_object.content_type,
+                "byte_size": storage_object.byte_size,
+                "source_kind": source.get("source_kind"),
+                "read_scope": source.get("read_scope"),
+                "truncated": source.get("truncated"),
+                "limitations": source.get("limitations"),
+                "source_text": truncate_text(source.get("source_text"), 16000),
+            }
+        )
+    if not files:
+        raise json_error(400, "NO_FILES", "No usable handover files were selected.")
+
+    input_payload: dict[str, object] = {
+        "prompt": normalize_optional_text(payload.additional_prompt) or "",
+        "case": {
+            "id": case.id,
+            "name": case.name,
+            "description": case.description,
+            "open_when_date": case.open_when_date,
+            "closed_when_text": case.closed_when_text,
+        },
+        "files": files,
+    }
+    suggestions, llm_run_id = run_handover_task_batch_generation(session, input_payload)
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "suggestions": suggestions,
             "llm_run_id": llm_run_id,
         },
     }

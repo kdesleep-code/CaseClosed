@@ -639,16 +639,34 @@ def display_sender_contact_for_message(
     message: GmailMessage,
     from_contact: Contact | None,
 ) -> Contact | None:
+    return display_sender_contact_for_addresses(
+        session,
+        from_address=message.from_address,
+        reply_to_address=message.reply_to_address,
+        from_contact=from_contact,
+    )
+
+
+def display_sender_contact_for_addresses(
+    session: DatabaseSession,
+    *,
+    from_address: str,
+    reply_to_address: str | None,
+    from_contact: Contact | None = None,
+) -> Contact | None:
+    resolved_from_contact = (
+        from_contact if from_contact is not None else contact_for_address(session, from_address)
+    )
     if (
-        from_contact is not None
-        and from_contact.kind == "mailing_list"
-        and from_contact.sender_resolution_mode == "reply_to"
-        and message.reply_to_address is not None
-        and message.reply_to_address.strip() != ""
+        resolved_from_contact is not None
+        and resolved_from_contact.kind == "mailing_list"
+        and resolved_from_contact.sender_resolution_mode == "reply_to"
+        and reply_to_address is not None
+        and reply_to_address.strip() != ""
     ):
-        reply_to_contact = contact_for_address(session, message.reply_to_address)
+        reply_to_contact = contact_for_address(session, reply_to_address)
         return reply_to_contact
-    return from_contact
+    return resolved_from_contact
 
 
 def recipient_contact_memos(

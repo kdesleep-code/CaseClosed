@@ -6,6 +6,7 @@ import loginDoorTanuki from './assets/login-door-tanuki.png'
 import CalendarView from './CalendarView'
 import CalendarEventDetailView from './CalendarEventDetailView'
 import CalendarNewEventView from './CalendarNewEventView'
+import CaseTaskBatchGenerateView from './CaseTaskBatchGenerateView'
 import CaseView from './CaseView'
 import ComposeMailView from './ComposeMailView'
 import ContactsView from './ContactsView'
@@ -23,7 +24,7 @@ import TaskNewView from './TaskNewView'
 import TaskView from './TaskView'
 import { t } from './i18n'
 import type { MessageKey } from './i18n'
-import { AppLink } from './navigation'
+import { AppLink, TopNav } from './navigation'
 import {
   listExternalOperations,
   listJobs,
@@ -635,10 +636,13 @@ function CaseToolIconsView() {
             <p>{t('app.name')}</p>
             <h1>{t('cases.toolIcons.heading')}</h1>
           </div>
-          <nav aria-label={t('cases.navigation')} className="maintenance-nav">
-            <AppLink href="/cases">{t('cases.heading')}</AppLink>
-            <AppLink href="/">{t('top.heading')}</AppLink>
-          </nav>
+          <TopNav
+            ariaLabelKey="cases.navigation"
+            items={[
+              { href: '/cases', labelKey: 'cases.heading' },
+              { href: '/', labelKey: 'top.heading' },
+            ]}
+          />
         </header>
         <section className="file-icons-panel">
           {error !== null && <p className="contact-error" role="alert">{error}</p>}
@@ -871,11 +875,14 @@ function FileIconsView() {
             <p>{t('app.name')}</p>
             <h1>{t('storage.fileIcons.heading')}</h1>
           </div>
-          <nav aria-label={t('storage.navigation')} className="maintenance-nav">
-            <AppLink href="/files">{t('nav.files')}</AppLink>
-            <AppLink href="/cases">{t('cases.heading')}</AppLink>
-            <AppLink href="/">{t('top.heading')}</AppLink>
-          </nav>
+          <TopNav
+            ariaLabelKey="storage.navigation"
+            items={[
+              { href: '/files', labelKey: 'nav.files' },
+              { href: '/cases', labelKey: 'cases.heading' },
+              { href: '/', labelKey: 'top.heading' },
+            ]}
+          />
           </header>
           <section className="file-icons-panel">
             {error !== null && <p className="contact-error" role="alert">{error}</p>}
@@ -1348,6 +1355,16 @@ function App() {
           {pendingContactNoticeElement}
           {navigationError !== null && <p className="route-error">{navigationError}</p>}
           <CaseView caseId={decodeURIComponent(caseId)} mode="mail-list" />
+        </>
+      )
+    }
+    if (path.startsWith('/cases/') && path.endsWith('/task-batch-generate')) {
+      const caseId = path.slice('/cases/'.length, -'/task-batch-generate'.length)
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <CaseTaskBatchGenerateView caseId={decodeURIComponent(caseId)} />
         </>
       )
     }

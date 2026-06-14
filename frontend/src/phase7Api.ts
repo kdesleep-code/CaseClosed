@@ -20,6 +20,7 @@ export type CaseItem = {
   overdue_task_count: number
   file_count: number
   storage_directory_id: string
+  handover_storage_directory_id: string
   next_task: CaseTaskSummary | null
   next_calendar_event: {
     id: string

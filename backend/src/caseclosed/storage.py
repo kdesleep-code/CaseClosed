@@ -2,15 +2,22 @@ from __future__ import annotations
 
 import base64
 import binascii
+import csv
 import difflib
+from email import policy
+from email.message import EmailMessage
+from email.parser import BytesParser
+from email.utils import getaddresses
 import json
 import re
 import zlib
 import zipfile
 from dataclasses import dataclass
 from io import BytesIO
+from io import StringIO
 from hashlib import sha256
 from pathlib import Path
+import xml.etree.ElementTree as ET
 from uuid import uuid4
 
 from fastapi import APIRouter
@@ -63,6 +70,7 @@ MAX_CONTACT_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_CONTACT_IMAGE_SIDE = 256
 MAX_TMP_OBJECT_BYTES = 1024 * 1024 * 1024
 MAX_ARCHIVE_TREE_ENTRIES = 1000
+MAX_EML_PREVIEW_BYTES = 25 * 1024 * 1024
 MAX_FILE_SUMMARY_INPUT_BYTES = 900 * 1024
 MAX_FILE_SUMMARY_INPUT_CHARS = 60000
 CONTACT_IMAGE_CONTENT_TYPES = {
@@ -1513,6 +1521,112 @@ def archive_tree_text(object_path: Path) -> dict[str, object]:
     }
 
 
+def message_header_text(message: EmailMessage, name: str) -> str | None:
+    value = message.get(name)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def message_part_text(part: EmailMessage) -> str | None:
+    try:
+        content = part.get_content()
+    except Exception:
+        return None
+    if isinstance(content, str):
+        text = content.replace("\r\n", "\n").replace("\r", "\n").strip()
+        return text or None
+    return None
+
+
+def first_header_address(header_value: str | None) -> str | None:
+    if header_value is None or header_value.strip() == "":
+        return None
+    for _display_name, address in getaddresses([header_value]):
+        if address.strip() == "":
+            continue
+        return address
+    return None
+
+
+def eml_preview_data(object_path: Path, *, session: DatabaseSession) -> dict[str, object]:
+    if object_path.stat().st_size > MAX_EML_PREVIEW_BYTES:
+        raise json_error(413, "PAYLOAD_TOO_LARGE", "EML file is too large to preview.")
+    try:
+        message = BytesParser(policy=policy.default).parsebytes(object_path.read_bytes())
+    except Exception as error:
+        raise json_error(422, "VALIDATION_ERROR", "Could not parse EML file.") from error
+
+    body_plain: str | None = None
+    body_html: str | None = None
+    attachments: list[dict[str, object]] = []
+    if message.is_multipart():
+        preferred_plain = message.get_body(preferencelist=("plain",))
+        preferred_html = message.get_body(preferencelist=("html",))
+        if preferred_plain is not None:
+            body_plain = message_part_text(preferred_plain)
+        if preferred_html is not None:
+            body_html = message_part_text(preferred_html)
+        for part in message.walk():
+            if part.is_multipart():
+                continue
+            disposition = (part.get_content_disposition() or "").lower()
+            filename = part.get_filename()
+            if disposition == "attachment" or filename:
+                payload = part.get_payload(decode=True) or b""
+                attachments.append(
+                    {
+                        "filename": filename or "(unnamed attachment)",
+                        "content_type": part.get_content_type(),
+                        "byte_size": len(payload),
+                    }
+                )
+    elif message.get_content_type().lower() == "text/html":
+        body_html = message_part_text(message)
+    else:
+        body_plain = message_part_text(message)
+
+    if body_plain is None and body_html is None:
+        fallback_body = message.get_body(preferencelist=("plain", "html"))
+        if fallback_body is not None and fallback_body.get_content_type().lower() == "text/html":
+            body_html = message_part_text(fallback_body)
+        elif fallback_body is not None:
+            body_plain = message_part_text(fallback_body)
+
+    from_header = message_header_text(message, "from")
+    reply_to_header = message_header_text(message, "reply-to")
+    from_address = first_header_address(from_header)
+    reply_to_address = first_header_address(reply_to_header)
+    from caseclosed.mails import contact_summary
+    from caseclosed.mails import display_sender_contact_for_addresses
+
+    sender_contact = (
+        display_sender_contact_for_addresses(
+            session,
+            from_address=from_address,
+            reply_to_address=reply_to_address,
+        )
+        if from_address is not None
+        else None
+    )
+    return {
+        "subject": message_header_text(message, "subject"),
+        "from": from_header,
+        "to": message_header_text(message, "to"),
+        "cc": message_header_text(message, "cc"),
+        "date": message_header_text(message, "date"),
+        "reply_to": reply_to_header,
+        "message_id": message_header_text(message, "message-id"),
+        "body_text": body_plain,
+        "body_html": body_html,
+        "attachments": attachments,
+        "sender_contact": (
+            contact_summary(sender_contact, session=session) if sender_contact is not None else None
+        ),
+    }
+
+
 def is_textual_storage_file(content_type: str | None, filename: str | None) -> bool:
     normalized_content_type = (content_type or "").split(";", 1)[0].strip().lower()
     if normalized_content_type.startswith("text/"):
@@ -1565,6 +1679,20 @@ def is_docx_storage_file(content_type: str | None, filename: str | None) -> bool
         == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         or normalized_file_extension(filename) == ".docx"
     )
+
+
+def is_xlsx_storage_file(content_type: str | None, filename: str | None) -> bool:
+    normalized_content_type = (content_type or "").split(";", 1)[0].strip().lower()
+    return (
+        normalized_content_type
+        == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        or normalized_file_extension(filename) in {".xlsx", ".xmlx"}
+    )
+
+
+def is_eml_storage_file(content_type: str | None, filename: str | None) -> bool:
+    normalized_content_type = (content_type or "").split(";", 1)[0].strip().lower()
+    return normalized_content_type == "message/rfc822" or normalized_file_extension(filename) == ".eml"
 
 
 def best_effort_decode_text(data: bytes) -> str:
@@ -1734,12 +1862,188 @@ def extract_docx_for_summary(path: Path) -> FileTextExtraction:
             limitations=["DOCX text extraction requires python-docx."],
         )
     document = Document(str(path))
-    text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+    parts: list[str] = []
+    paragraph_text = "\n".join(
+        paragraph.text.strip()
+        for paragraph in document.paragraphs
+        if paragraph.text.strip() != ""
+    )
+    if paragraph_text != "":
+        parts.append(paragraph_text)
+    for table_index, table in enumerate(document.tables, start=1):
+        rows: list[str] = []
+        for row in table.rows:
+            cells = [cell.text.replace("\r\n", "\n").replace("\r", "\n").strip() for cell in row.cells]
+            if any(cell != "" for cell in cells):
+                rows.append(" | ".join(cells))
+        if rows:
+            parts.append(f"[Table {table_index}]\n" + "\n".join(rows))
+    text = "\n\n".join(parts)
     limitations: list[str] = []
     text, truncated = limited_text(text, limitations)
     return FileTextExtraction(
         source_kind="docx_text" if text.strip() else "docx_no_text",
-        read_scope="docx_paragraph_text",
+        read_scope="docx_paragraph_and_table_text",
+        source_text=text,
+        truncated=truncated,
+        limitations=limitations,
+    )
+
+
+def xml_text(element: ET.Element) -> str:
+    return "".join(element.itertext()).strip()
+
+
+def xlsx_shared_strings(archive: zipfile.ZipFile) -> list[str]:
+    try:
+        raw_data = archive.read("xl/sharedStrings.xml")
+    except KeyError:
+        return []
+    try:
+        root = ET.fromstring(raw_data)
+    except ET.ParseError:
+        return []
+    strings: list[str] = []
+    for item in root.iter():
+        if item.tag.endswith("}si") or item.tag == "si":
+            strings.append(xml_text(item))
+    return strings
+
+
+def xlsx_cell_text(cell: ET.Element, shared_strings: list[str]) -> str:
+    cell_type = cell.attrib.get("t")
+    if cell_type == "inlineStr":
+        for child in cell:
+            if child.tag.endswith("}is") or child.tag == "is":
+                return xml_text(child)
+        return xml_text(cell)
+    value_element: ET.Element | None = None
+    for child in cell:
+        if child.tag.endswith("}v") or child.tag == "v":
+            value_element = child
+            break
+    value = (value_element.text or "").strip() if value_element is not None else ""
+    if cell_type == "s":
+        try:
+            return shared_strings[int(value)]
+        except (ValueError, IndexError):
+            return value
+    return value
+
+
+def extract_xlsx_for_summary(path: Path) -> FileTextExtraction:
+    limitations: list[str] = []
+    try:
+        archive = zipfile.ZipFile(path)
+    except zipfile.BadZipFile:
+        return FileTextExtraction(
+            source_kind="xlsx_no_text",
+            read_scope="xlsx_csv_extraction:invalid_zip",
+            source_text="",
+            truncated=False,
+            limitations=["XLSX file is not a valid ZIP package."],
+        )
+    with archive:
+        shared_strings = xlsx_shared_strings(archive)
+        sheet_names = sorted(
+            name
+            for name in archive.namelist()
+            if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", name)
+        )
+        parts: list[str] = []
+        for sheet_index, sheet_name in enumerate(sheet_names, start=1):
+            try:
+                root = ET.fromstring(archive.read(sheet_name))
+            except (KeyError, ET.ParseError):
+                limitations.append(f"Could not parse {sheet_name}.")
+                continue
+            output = StringIO()
+            writer = csv.writer(output, lineterminator="\n")
+            for row in root.iter():
+                if not (row.tag.endswith("}row") or row.tag == "row"):
+                    continue
+                values = [
+                    xlsx_cell_text(cell, shared_strings)
+                    for cell in row
+                    if cell.tag.endswith("}c") or cell.tag == "c"
+                ]
+                if any(value != "" for value in values):
+                    writer.writerow(values)
+            csv_text = output.getvalue().strip()
+            if csv_text != "":
+                parts.append(f"[Sheet {sheet_index}: {sheet_name}]\n{csv_text}")
+        text = "\n\n".join(parts)
+    text, truncated = limited_text(text, limitations)
+    if text.strip() == "":
+        limitations.append("XLSX text extraction returned no cell values.")
+    return FileTextExtraction(
+        source_kind="xlsx_csv" if text.strip() else "xlsx_no_text",
+        read_scope="xlsx_sheet_xml_to_csv",
+        source_text=text,
+        truncated=truncated,
+        limitations=limitations,
+    )
+
+
+def plain_text_from_html(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", "", value)
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</p\s*>", "\n", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    stripped = text.strip()
+    return stripped or None
+
+
+def extract_eml_for_summary(path: Path, *, session: DatabaseSession) -> FileTextExtraction:
+    limitations: list[str] = []
+    try:
+        preview = eml_preview_data(path, session=session)
+    except Exception as error:
+        return FileTextExtraction(
+            source_kind="eml_no_text",
+            read_scope="eml_parse_failed",
+            source_text="",
+            truncated=False,
+            limitations=[f"EML parsing failed: {error}"],
+        )
+    body_text = preview.get("body_text")
+    if not isinstance(body_text, str) or body_text.strip() == "":
+        body_html = preview.get("body_html")
+        body_text = plain_text_from_html(body_html if isinstance(body_html, str) else None) or ""
+        if body_text != "":
+            limitations.append("Plain text body was unavailable; converted HTML body to text.")
+    attachments_payload = preview.get("attachments")
+    attachments = attachments_payload if isinstance(attachments_payload, list) else []
+    lines = [
+        f"Subject: {preview.get('subject') or ''}",
+        f"From: {preview.get('from') or ''}",
+        f"Reply-To: {preview.get('reply_to') or ''}",
+        f"To: {preview.get('to') or ''}",
+        f"Cc: {preview.get('cc') or ''}",
+        f"Date: {preview.get('date') or ''}",
+        f"Message-ID: {preview.get('message_id') or ''}",
+        "",
+        "Body:",
+        str(body_text or ""),
+    ]
+    if attachments:
+        lines.extend(["", "Attachments:"])
+        for attachment in attachments:
+            if not isinstance(attachment, dict):
+                continue
+            lines.append(
+                "- "
+                f"{attachment.get('filename') or ''} "
+                f"({attachment.get('content_type') or 'unknown'}, "
+                f"{attachment.get('byte_size') or 0} bytes)"
+            )
+    text, truncated = limited_text("\n".join(lines), limitations)
+    return FileTextExtraction(
+        source_kind="eml_text" if text.strip() else "eml_no_text",
+        read_scope="eml_headers_body_attachments",
         source_text=text,
         truncated=truncated,
         limitations=limitations,
@@ -1751,13 +2055,26 @@ def extract_file_text_for_summary(
     *,
     content_type: str | None,
     filename: str | None,
+    session: DatabaseSession | None = None,
 ) -> FileTextExtraction:
-    if zipfile.is_zipfile(path):
-        return extract_archive_tree_for_summary(path)
     if is_pdf_storage_file(content_type, filename):
         return extract_pdf_for_summary(path)
     if is_docx_storage_file(content_type, filename):
         return extract_docx_for_summary(path)
+    if is_xlsx_storage_file(content_type, filename):
+        return extract_xlsx_for_summary(path)
+    if is_eml_storage_file(content_type, filename):
+        if session is None:
+            return FileTextExtraction(
+                source_kind="eml_no_text",
+                read_scope="eml_parse:session_unavailable",
+                source_text="",
+                truncated=False,
+                limitations=["EML text extraction requires a database session."],
+            )
+        return extract_eml_for_summary(path, session=session)
+    if zipfile.is_zipfile(path):
+        return extract_archive_tree_for_summary(path)
     if is_textual_storage_file(content_type, filename):
         return extract_plain_text_for_summary(path)
     return FileTextExtraction(
@@ -1795,6 +2112,7 @@ def storage_summary_source(
         path,
         content_type=content_type,
         filename=filename,
+        session=session,
     )
 
     return {
@@ -3633,6 +3951,23 @@ def get_storage_object_version_archive_tree(
     }
 
 
+@router.get("/objects/{storage_object_id}/versions/{version_id}/eml-preview")
+def get_storage_object_version_eml_preview(
+    storage_object_id: str,
+    version_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    storage_object, version = get_active_storage_object_version(
+        session,
+        storage_object_id,
+        version_id,
+    )
+    version_path = storage_object_version_absolute_path(storage_object, version, session)
+    if not version_path.is_file():
+        raise json_error(404, "NOT_FOUND", "Storage object version file not found.")
+    return {"ok": True, "data": eml_preview_data(version_path, session=session)}
+
+
 @router.get("/objects/{storage_object_id}/versions/{version_id}/content")
 def get_storage_object_version_content(
     storage_object_id: str,
@@ -3734,6 +4069,20 @@ def get_storage_object_archive_tree(
         "ok": True,
         "data": archive_tree_text(object_path),
     }
+
+
+@router.get("/objects/{storage_object_id}/eml-preview")
+def get_storage_object_eml_preview(
+    storage_object_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    storage_object = session.get(StorageObject, storage_object_id)
+    if storage_object is None or storage_object.status != "active":
+        raise json_error(404, "NOT_FOUND", "Storage object not found.")
+    object_path = storage_object_absolute_path(storage_object, session)
+    if not object_path.is_file():
+        raise json_error(404, "NOT_FOUND", "Storage object file not found.")
+    return {"ok": True, "data": eml_preview_data(object_path, session=session)}
 
 
 @router.get("/objects/{storage_object_id}/content")

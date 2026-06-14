@@ -2,7 +2,7 @@ import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { MouseEvent, ReactNode } from 'react'
 import { t } from './i18n'
 import type { MessageKey } from './i18n'
-import { AppLink, navigateTo } from './navigation'
+import { AppLink, TopNav, navigateTo } from './navigation'
 import defaultContactAvatarUrl from './assets/default-contact-avatar.svg'
 import defaultMailingListAvatarUrl from './assets/default-mailing-list-avatar.svg'
 import defaultServiceAvatarUrl from './assets/default-service-avatar.svg'
@@ -2251,7 +2251,14 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
               <p>{t('app.name')}</p>
               <h1>{t('mail.thread.heading')}</h1>
             </div>
-            <AppLink href="/mail">{t('mail.heading')}</AppLink>
+            <TopNav
+              ariaLabelKey="mail.thread.navLabel"
+              className="mail-thread-nav"
+              items={[
+                { href: '/mail', labelKey: 'mail.heading' },
+                { href: '/', labelKey: 'top.heading' },
+              ]}
+            />
           </header>
           {error === null ? (
             <p className="mail-empty">{t('session.checking.label')}</p>
@@ -2397,10 +2404,14 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
               </div>
             )}
           </div>
-          <nav className="mail-thread-nav" aria-label={t('mail.thread.navLabel')}>
-            <AppLink href={mailListHref}>{t('mail.heading')}</AppLink>
-            <AppLink href="/">{t('top.heading')}</AppLink>
-          </nav>
+          <TopNav
+            ariaLabelKey="mail.thread.navLabel"
+            className="mail-thread-nav"
+            items={[
+              { href: mailListHref, labelKey: 'mail.heading' },
+              { href: '/', labelKey: 'top.heading' },
+            ]}
+          />
         </header>
 
         {(error !== null || notice !== null) && (

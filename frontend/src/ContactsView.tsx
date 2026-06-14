@@ -18,7 +18,7 @@ import {
 } from './phase3Api'
 import type { Contact, ContactCustomTab, UnresolvedFromAddress } from './phase3Api'
 import { t } from './i18n'
-import { AppLink, navigateTo } from './navigation'
+import { TopNav, navigateTo } from './navigation'
 
 type ContactsMode = 'list' | 'pending'
 type ContactStatus = 'active' | 'skipped' | 'spam' | 'archived'
@@ -1205,12 +1205,16 @@ function ContactsView({
               {mode === 'pending' ? t('contacts.pendingHeading') : t('contacts.heading')}
             </h1>
           </div>
-          <nav aria-label={t('contacts.navLabel')}>
-            {mode === 'pending' ? (
-              <AppLink href="/contacts">{t('contacts.heading')}</AppLink>
-            ) : null}
-            <AppLink href="/">{t('top.heading')}</AppLink>
-          </nav>
+          <TopNav
+            ariaLabelKey="contacts.navLabel"
+            className=""
+            items={[
+              ...(mode === 'pending'
+                ? [{ href: '/contacts', labelKey: 'contacts.heading' as const }]
+                : []),
+              { href: '/', labelKey: 'top.heading' },
+            ]}
+          />
         </header>
 
         {!shouldShowContactDetailFeedback && error !== null && (

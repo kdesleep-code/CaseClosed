@@ -1,27 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { CSSProperties, DragEvent, FormEvent, MouseEvent, ReactNode } from 'react'
 import { t } from './i18n'
-import { AppLink, navigateTo } from './navigation'
-import downloadIconUrl from './assets/download-icon.svg'
+import { AppLink, TopNav, navigateTo } from './navigation'
 import defaultContactAvatarUrl from './assets/default-contact-avatar.svg'
 import defaultMailingListAvatarUrl from './assets/default-mailing-list-avatar.svg'
 import defaultServiceAvatarUrl from './assets/default-service-avatar.svg'
 import defaultSpamAvatarUrl from './assets/default-spam-avatar.webp'
 import paperclipDiagonalUrl from './assets/paperclip-diagonal.svg'
 import settingsGearIconUrl from './assets/settings-gear.svg'
-import trashIconUrl from './assets/trash-icon.svg'
-import {
-  createStorageDirectory,
-  deleteStorageDirectory,
-  deleteStorageObject,
-  listStorageDirectories,
-  listStorageObjects,
-  moveStorageDirectoryToDirectory,
-  moveStorageObjectToDirectory,
-  updateStorageObjectLlmInput,
-} from './phase3Api'
 import { listContacts } from './phase3Api'
-import type { Contact, StorageDirectory, StorageObject } from './phase3Api'
+import type { Contact } from './phase3Api'
 import {
   assignMailThreadToCase,
   importSpecialGoogleGmailThread,
@@ -33,10 +21,6 @@ import {
   caseRoleSelectorSuggestions,
   resolveContactSelectorListWithCases,
 } from './contactSelectors'
-import {
-  droppedStorageFilesFromDataTransfer,
-  uploadDroppedStorageFiles,
-} from './storageDirectoryDrop'
 import type { ContactSelectorCaseContext } from './contactSelectors'
 import SuggestInput from './SuggestInput'
 import type { SuggestInputOption } from './SuggestInput'
@@ -55,7 +39,6 @@ import {
   deleteCaseAutoAssignRule,
   getCase,
   listCaseAutoAssignRules,
-  listCaseFiles,
   listCaseMailLinks,
   listCaseStakeholders,
   listCaseToolLinks,
@@ -70,17 +53,9 @@ import {
   updateCase,
   updateCaseStakeholder,
   updateCaseGenre,
-  unlinkCaseFile,
 } from './phase7Api'
 import type { CaseAutoAssignRule, CaseCalendarSummary, CaseDetail, CaseGenre, CaseItem, CaseListStatus, CaseMailLink, CaseStakeholder, CaseToolLink } from './phase7Api'
-import {
-  ActionIconLabel,
-  downloadStorageObject,
-  StorageDirectoryCard,
-  StorageObjectCard,
-  storageDirectoryDragType,
-  storageObjectDragType,
-} from './StorageView'
+import StorageBrowser from './StorageBrowser'
 
 type CaseMailAssignSort = 'newest' | 'importance'
 
@@ -360,602 +335,21 @@ export function CaseStorageWindow({
   collapsible?: boolean
   defaultCollapsed?: boolean
 }) {
-  const [currentDirectoryId, setCurrentDirectoryId] = useState(rootDirectoryId)
-  const [isCollapsed, setIsCollapsed] = useState(defaultCollapsed)
-  const [objects, setObjects] = useState<StorageObject[]>([])
-  const [directories, setDirectories] = useState<StorageDirectory[]>([])
-  const [breadcrumbs, setBreadcrumbs] = useState<StorageDirectory[]>([])
-  const [contextMenu, setContextMenu] = useState<{
-    directory: StorageDirectory | null
-    object: StorageObject | null
-    x: number
-    y: number
-  } | null>(null)
-  const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
-  const [busy, setBusy] = useState(false)
-  const [isDragOver, setIsDragOver] = useState(false)
-  const [downloadBusyId, setDownloadBusyId] = useState<string | null>(null)
-  const [llmBusyId, setLlmBusyId] = useState<string | null>(null)
-  const [deleteBusyId, setDeleteBusyId] = useState<string | null>(null)
-  const [notice, setNotice] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    setCurrentDirectoryId(rootDirectoryId)
-  }, [rootDirectoryId])
-
-  async function refreshStorage() {
-    const [nextObjects, nextDirectories] = await Promise.all([
-      rootListMode === 'case' && currentDirectoryId === rootDirectoryId
-        ? listCaseFiles(caseId)
-        : listStorageObjects({ directory_id: currentDirectoryId, limit: 200 }),
-      listStorageDirectories(currentDirectoryId),
-    ])
-    setObjects(nextObjects)
-    setDirectories(nextDirectories.items)
-    setBreadcrumbs(nextDirectories.breadcrumbs)
-  }
-
-  useEffect(() => {
-    let isMounted = true
-    setIsLoading(true)
-    setError(null)
-    refreshStorage()
-      .catch((requestError) => {
-        if (isMounted) setError(describeError(requestError))
-      })
-      .finally(() => {
-        if (isMounted) setIsLoading(false)
-      })
-    return () => {
-      isMounted = false
-    }
-  }, [currentDirectoryId])
-
-  useEffect(() => {
-    if (contextMenu === null) return undefined
-    const closeMenu = () => setContextMenu(null)
-    const closeMenuOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') closeMenu()
-    }
-    window.addEventListener('click', closeMenu)
-    window.addEventListener('scroll', closeMenu, true)
-    window.addEventListener('keydown', closeMenuOnEscape)
-    return () => {
-      window.removeEventListener('click', closeMenu)
-      window.removeEventListener('scroll', closeMenu, true)
-      window.removeEventListener('keydown', closeMenuOnEscape)
-    }
-  }, [contextMenu])
-
-  async function uploadDroppedItems(dataTransfer: DataTransfer, directoryId: string) {
-    setBusy(true)
-    setError(null)
-    setNotice(null)
-    try {
-      const droppedFiles = await droppedStorageFilesFromDataTransfer(dataTransfer)
-      if (droppedFiles.length === 0) {
-        setError(t('storage.noFileSelected'))
-        return
-      }
-      const result = await uploadDroppedStorageFiles(droppedFiles, directoryId)
-      setNotice(
-        result.count === 1
-          ? t('storage.uploaded', { name: result.lastUploadedName })
-          : t('storage.uploadedMany', { count: String(result.count) }),
-      )
-      await refreshStorage()
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function handleMoveStorageObject(objectId: string, directoryId: string) {
-    if (objectId === '') return
-    const draggedObject = objects.find((object) => object.id === objectId)
-    if (
-      draggedObject !== undefined &&
-      (draggedObject.physical_directory_id ?? draggedObject.directory_id ?? null) === directoryId
-    ) {
-      setSelectedObjectId(objectId)
-      return
-    }
-    setBusy(true)
-    setError(null)
-    setNotice(null)
-    try {
-      const movedObject = await moveStorageObjectToDirectory(objectId, directoryId)
-      setSelectedObjectId((currentId) => (currentId === objectId ? null : currentId))
-      setNotice(t('storage.moved', { name: movedObject.original_filename ?? movedObject.id }))
-      await refreshStorage()
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function handleMoveStorageDirectory(directoryId: string, parentId: string | null) {
-    if (directoryId === '') return
-    if (directoryId === parentId) return
-    setBusy(true)
-    setError(null)
-    setNotice(null)
-    try {
-      const movedDirectory = await moveStorageDirectoryToDirectory(directoryId, parentId)
-      setSelectedObjectId(null)
-      setNotice(t('storage.directory.moved', { name: movedDirectory.name }))
-      await refreshStorage()
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  function directoryIdFromDragEvent(event: DragEvent<HTMLElement>) {
-    return event.dataTransfer.getData(storageDirectoryDragType)
-  }
-
-  function objectIdFromDragEvent(event: DragEvent<HTMLElement>) {
-    if (directoryIdFromDragEvent(event) !== '') {
-      return ''
-    }
-    return (
-      event.dataTransfer.getData(storageObjectDragType) ||
-      event.dataTransfer.getData('text/plain')
-    )
-  }
-
-  function isStorageObjectDrag(event: DragEvent<HTMLElement>) {
-    return Array.from(event.dataTransfer.types).includes(storageObjectDragType)
-  }
-
-  function isStorageDirectoryDrag(event: DragEvent<HTMLElement>) {
-    return Array.from(event.dataTransfer.types).includes(storageDirectoryDragType)
-  }
-
-  function handleDrop(event: DragEvent<HTMLDivElement>) {
-    event.preventDefault()
-    setIsDragOver(false)
-    const draggedDirectoryId = directoryIdFromDragEvent(event)
-    if (draggedDirectoryId !== '') {
-      void handleMoveStorageDirectory(draggedDirectoryId, currentDirectoryId)
-      return
-    }
-    const objectId = objectIdFromDragEvent(event)
-    if (objectId !== '') {
-      void handleMoveStorageObject(objectId, currentDirectoryId)
-      return
-    }
-    if (event.dataTransfer.files.length > 0) {
-      void uploadDroppedItems(event.dataTransfer, currentDirectoryId)
-    }
-  }
-
-  function handleDragOver(event: DragEvent<HTMLDivElement>) {
-    event.preventDefault()
-    event.dataTransfer.dropEffect =
-      isStorageDirectoryDrag(event) || isStorageObjectDrag(event)
-        ? 'move'
-        : event.dataTransfer.types.includes('Files') ? 'copy' : 'none'
-    setIsDragOver(true)
-  }
-
-  function handleDragLeave(event: DragEvent<HTMLDivElement>) {
-    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-      setIsDragOver(false)
-    }
-  }
-
-  function handleDirectoryDragOver(event: DragEvent<HTMLElement>) {
-    event.preventDefault()
-    event.stopPropagation()
-    event.dataTransfer.dropEffect = 'move'
-  }
-
-  function handleDirectoryDrop(event: DragEvent<HTMLElement>, directoryId: string) {
-    event.preventDefault()
-    event.stopPropagation()
-    const draggedDirectoryId = directoryIdFromDragEvent(event)
-    if (draggedDirectoryId !== '') {
-      void handleMoveStorageDirectory(draggedDirectoryId, directoryId)
-      return
-    }
-    const objectId = objectIdFromDragEvent(event)
-    if (objectId !== '') {
-      void handleMoveStorageObject(objectId, directoryId)
-      return
-    }
-    if (Array.from(event.dataTransfer.types).includes('Files')) {
-      void uploadDroppedItems(event.dataTransfer, directoryId)
-    }
-  }
-
-  async function handleDownload(object: StorageObject) {
-    setDownloadBusyId(object.id)
-    setError(null)
-    try {
-      await downloadStorageObject(object)
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setDownloadBusyId(null)
-    }
-  }
-
-  async function handleUpdateLlmInput(object: StorageObject, allowed: boolean) {
-    setLlmBusyId(object.id)
-    setError(null)
-    try {
-      const updatedObject = await updateStorageObjectLlmInput(object.id, allowed)
-      setObjects((currentObjects) =>
-        currentObjects.map((currentObject) =>
-          currentObject.id === updatedObject.id ? updatedObject : currentObject,
-        ),
-      )
-      if (contextMenu?.object?.id === updatedObject.id) {
-        setContextMenu({ ...contextMenu, object: updatedObject })
-      }
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setLlmBusyId(null)
-    }
-  }
-
-  async function handleDelete(object: StorageObject) {
-    if (deleteMode === 'physical' || object.display_source !== 'link') {
-      if (
-        !window.confirm(
-          t('storage.delete.confirm', { name: object.original_filename ?? object.id }),
-        )
-      ) {
-        return
-      }
-      setDeleteBusyId(object.id)
-      setError(null)
-      setNotice(null)
-      try {
-        await deleteStorageObject(object.id)
-        setObjects((currentObjects) =>
-          currentObjects.filter((currentObject) => currentObject.id !== object.id),
-        )
-        setSelectedObjectId((currentId) => (currentId === object.id ? null : currentId))
-        setNotice(t('storage.deleted', { name: object.original_filename ?? object.id }))
-      } catch (requestError) {
-        setError(describeError(requestError))
-      } finally {
-        setDeleteBusyId(null)
-      }
-      return
-    }
-    const choice = window.prompt(
-      t('cases.storage.deleteChoice', { name: object.original_filename ?? object.id }),
-      'exclude',
-    )
-    const normalizedChoice = choice?.trim().toLowerCase() ?? ''
-    if (normalizedChoice === '') {
-      return
-    }
-    if (!['exclude', 'delete'].includes(normalizedChoice)) {
-      setError(t('cases.storage.deleteChoiceInvalid'))
-      return
-    }
-    setDeleteBusyId(object.id)
-    setError(null)
-    setNotice(null)
-    try {
-      if (normalizedChoice === 'exclude') {
-        await unlinkCaseFile(caseId, object.id)
-      } else {
-        if (
-          !window.confirm(
-            t('storage.delete.confirm', { name: object.original_filename ?? object.id }),
-          )
-        ) {
-          return
-        }
-        await deleteStorageObject(object.id)
-      }
-      setObjects((currentObjects) =>
-        currentObjects.filter((currentObject) => currentObject.id !== object.id),
-      )
-      setSelectedObjectId((currentId) => (currentId === object.id ? null : currentId))
-      setNotice(
-        normalizedChoice === 'exclude'
-          ? t('cases.storage.unlinked', { name: object.original_filename ?? object.id })
-          : t('storage.deleted', { name: object.original_filename ?? object.id }),
-      )
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setDeleteBusyId(null)
-    }
-  }
-
-  function handleOpenStorageObject(object: StorageObject) {
-    setSelectedObjectId(object.id)
-    setContextMenu(null)
-    navigateTo(`/files/${encodeURIComponent(object.id)}`)
-  }
-
-  function handleOpenDirectory(directory: StorageDirectory) {
-    setSelectedObjectId(null)
-    setContextMenu(null)
-    setCurrentDirectoryId(directory.id)
-  }
-
-  async function createDirectoryByPrompt() {
-    const name = window.prompt(t('storage.directory.namePrompt'))?.trim() ?? ''
-    if (name === '') return
-    setBusy(true)
-    setError(null)
-    setNotice(null)
-    try {
-      await createStorageDirectory({ name, parent_id: currentDirectoryId })
-      await refreshStorage()
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  function handleStorageObjectContextMenu(event: MouseEvent<HTMLButtonElement>, object: StorageObject) {
-    event.preventDefault()
-    event.stopPropagation()
-    setSelectedObjectId(object.id)
-    setContextMenu({
-      directory: null,
-      object,
-      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 180)),
-      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 64)),
-    })
-  }
-
-  function handleStoragePanelContextMenu(event: MouseEvent<HTMLElement>) {
-    event.preventDefault()
-    const target = event.target instanceof Element ? event.target : null
-    if (target?.closest('.storage-object-card') !== null) {
-      return
-    }
-    setSelectedObjectId(null)
-    setContextMenu({
-      directory: null,
-      object: null,
-      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 180)),
-      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 64)),
-    })
-  }
-
-  function handleStorageDirectoryContextMenu(
-    event: MouseEvent<HTMLButtonElement>,
-    directory: StorageDirectory,
-  ) {
-    event.preventDefault()
-    event.stopPropagation()
-    if (directory.directory_kind === 'case' || directory.case_id !== null) {
-      setContextMenu(null)
-      return
-    }
-    setSelectedObjectId(null)
-    setContextMenu({
-      directory,
-      object: null,
-      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 180)),
-      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 64)),
-    })
-  }
-
-  async function handleDeleteDirectory(directory: StorageDirectory) {
-    if (!window.confirm(t('storage.directory.deleteConfirm', { name: directory.name }))) {
-      return
-    }
-    setBusy(true)
-    setError(null)
-    setNotice(null)
-    try {
-      await deleteStorageDirectory(directory.id)
-      setDirectories((currentDirectories) =>
-        currentDirectories.filter((currentDirectory) => currentDirectory.id !== directory.id),
-      )
-      setNotice(t('storage.directory.deleted', { name: directory.name }))
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  function handleContextDownload() {
-    if (contextMenu === null || contextMenu.object === null) return
-    const object = contextMenu.object
-    setContextMenu(null)
-    void handleDownload(object)
-  }
-
-  function handleContextLlmInputToggle() {
-    if (contextMenu === null || contextMenu.object === null) return
-    const object = contextMenu.object
-    setContextMenu(null)
-    void handleUpdateLlmInput(object, !object.llm_input_allowed)
-  }
-
-  function handleContextDelete() {
-    if (contextMenu === null || contextMenu.object === null) return
-    const object = contextMenu.object
-    setContextMenu(null)
-    void handleDelete(object)
-  }
-
-  function handleContextCreateDirectory() {
-    setContextMenu(null)
-    void createDirectoryByPrompt()
-  }
-
-  function handleContextDeleteDirectory() {
-    if (contextMenu === null || contextMenu.directory === null) return
-    const directory = contextMenu.directory
-    setContextMenu(null)
-    void handleDeleteDirectory(directory)
-  }
-
-  const rootIndex = breadcrumbs.findIndex((directory) => directory.id === rootDirectoryId)
-  const visibleBreadcrumbs = rootIndex >= 0 ? breadcrumbs.slice(rootIndex + 1) : breadcrumbs
-
   return (
-    <section className={`case-storage-window${isCollapsed ? ' is-collapsed' : ''}`}>
-      {collapsible && (
-        <div className="case-storage-window-header">
-          <div>
-            <h2>{heading}</h2>
-            <p>{body}</p>
-          </div>
-          <button
-            aria-expanded={!isCollapsed}
-            onClick={() => {
-              setContextMenu(null)
-              setIsCollapsed((current) => !current)
-            }}
-            type="button"
-          >
-            {isCollapsed ? t('common.expand') : t('common.collapse')}
-          </button>
-        </div>
-      )}
-      {(error !== null || notice !== null) && (
-        <div className="mail-feedback case-storage-feedback">
-          {error !== null && <p role="alert">{error}</p>}
-          {notice !== null && <p>{notice}</p>}
-        </div>
-      )}
-      {!isCollapsed && (
-        <>
-          <nav aria-label={t('storage.directory.breadcrumb')} className="storage-breadcrumb case-storage-breadcrumb">
-            <button
-              onClick={() => setCurrentDirectoryId(rootDirectoryId)}
-              onDragOver={handleDirectoryDragOver}
-              onDrop={(event) => handleDirectoryDrop(event, rootDirectoryId)}
-              type="button"
-            >
-              {rootLabel}
-            </button>
-            {visibleBreadcrumbs.map((directory) => (
-              <button
-                key={directory.id}
-                onClick={() => handleOpenDirectory(directory)}
-                onDragOver={handleDirectoryDragOver}
-                onDrop={(event) => handleDirectoryDrop(event, directory.id)}
-                type="button"
-              >
-                {directory.name}
-              </button>
-            ))}
-          </nav>
-          <div
-            className={`case-storage-drop-zone storage-drop-zone button-loading-dot${
-              busy ? ' is-loading' : ''
-            }${isDragOver ? ' is-drag-over' : ''}`}
-            onContextMenu={handleStoragePanelContextMenu}
-            onDragLeave={handleDragLeave}
-            onDragOver={handleDragOver}
-            onDrop={handleDrop}
-          >
-            <div className="section-heading case-storage-drop-heading">
-              {!collapsible && (
-                <div>
-                  <h2>{heading}</h2>
-                </div>
-              )}
-              <p>{body}</p>
-            </div>
-            <div className="storage-object-grid">
-              {directories.map((directory) => (
-                <StorageDirectoryCard
-                  directory={directory}
-                  key={directory.id}
-                  onContextMenu={handleStorageDirectoryContextMenu}
-                  onDropFiles={(dataTransfer, directoryId) =>
-                    void uploadDroppedItems(dataTransfer, directoryId)
-                  }
-                  onDropDirectory={(directoryId, parentId) =>
-                    void handleMoveStorageDirectory(directoryId, parentId)
-                  }
-                  onDropObject={(objectId, directoryId) => {
-                    if (directoryId !== null) void handleMoveStorageObject(objectId, directoryId)
-                  }}
-                  onOpen={handleOpenDirectory}
-                />
-              ))}
-              {objects.map((object) => (
-                <StorageObjectCard
-                  busy={
-                    downloadBusyId === object.id ||
-                    llmBusyId === object.id ||
-                    deleteBusyId === object.id
-                  }
-                  key={object.id}
-                  object={object}
-                  onContextMenu={handleStorageObjectContextMenu}
-                  onOpen={handleOpenStorageObject}
-                  selected={selectedObjectId === object.id}
-                />
-              ))}
-              {objects.length === 0 && directories.length === 0 && (
-                <p>{isLoading ? t('storage.loading') : t('storage.noObjects')}</p>
-              )}
-            </div>
-            {contextMenu !== null && (
-              <div
-                aria-label={t('storage.context.menuLabel')}
-                className="storage-context-menu"
-                onClick={(event) => event.stopPropagation()}
-                role="menu"
-                style={{ left: contextMenu.x, top: contextMenu.y }}
-              >
-                {contextMenu.object === null && contextMenu.directory === null && (
-                  <button onClick={handleContextCreateDirectory} role="menuitem" type="button">
-                    {t('storage.context.newDirectory')}
-                  </button>
-                )}
-                {contextMenu.directory !== null &&
-                  contextMenu.directory.directory_kind !== 'case' &&
-                  contextMenu.directory.case_id === null && (
-                    <button onClick={handleContextDeleteDirectory} role="menuitem" type="button">
-                      <ActionIconLabel
-                        iconUrl={trashIconUrl}
-                        label={t('storage.context.deleteDirectory')}
-                      />
-                    </button>
-                  )}
-                {contextMenu.object !== null && (
-                  <>
-                    <button onClick={handleContextDownload} role="menuitem" type="button">
-                      <ActionIconLabel
-                        iconUrl={downloadIconUrl}
-                        label={t('storage.context.download')}
-                      />
-                    </button>
-                    <button onClick={handleContextLlmInputToggle} role="menuitem" type="button">
-                      {contextMenu.object.llm_input_allowed
-                        ? t('storage.llmInput.disallow')
-                        : t('storage.llmInput.allow')}
-                    </button>
-                    <button onClick={handleContextDelete} role="menuitem" type="button">
-                      <ActionIconLabel iconUrl={trashIconUrl} label={t('storage.context.delete')} />
-                    </button>
-                  </>
-                )}
-              </div>
-            )}
-          </div>
-        </>
-      )}
-    </section>
+    <StorageBrowser
+      body={body}
+      caseId={caseId}
+      collapsible={collapsible}
+      defaultCollapsed={defaultCollapsed}
+      deleteMode={deleteMode}
+      heading={heading}
+      panelClassName="case-storage-drop-zone"
+      rootDirectoryId={rootDirectoryId}
+      rootLabel={rootLabel}
+      rootListMode={rootListMode}
+      breadcrumbClassName="storage-breadcrumb case-storage-breadcrumb"
+      showHeading={!collapsible}
+    />
   )
 }
 
@@ -1475,9 +869,12 @@ function CaseCalendarGadget({
         <strong>{caseItem.next_calendar_event?.title ?? t('cases.card.none')}</strong>
         <small>{formatDateTime(caseItem.next_calendar_event?.starts_at ?? null)}</small>
       </div>
-      <button className="case-gadget-action" type="button">
+      <AppLink
+        className="case-gadget-action"
+        href={`/calendar/new?case_id=${encodeURIComponent(caseItem.id)}`}
+      >
         {t('cases.calendar.add')}
-      </button>
+      </AppLink>
     </section>
   )
 }
@@ -1828,10 +1225,13 @@ function CaseListView() {
             <p>{t('app.name')}</p>
             <h1>{t('cases.heading')}</h1>
           </div>
-          <nav aria-label={t('cases.navigation')} className="maintenance-nav">
-            <AppLink href="/">{t('top.heading')}</AppLink>
-            <AppLink href="/mail">{t('mail.heading')}</AppLink>
-          </nav>
+          <TopNav
+            ariaLabelKey="cases.navigation"
+            items={[
+              { href: '/', labelKey: 'top.heading' },
+              { href: '/mail', labelKey: 'mail.heading' },
+            ]}
+          />
         </header>
 
         {error !== null && (
@@ -2360,10 +1760,13 @@ function CaseDetailView({ caseId }: { caseId: string }) {
             <p>{t('app.name')}</p>
             <h1>{item?.name ?? t('cases.detailHeading')}</h1>
           </div>
-          <nav aria-label={t('cases.navigation')} className="maintenance-nav">
-            <AppLink href="/cases">{t('cases.heading')}</AppLink>
-            <AppLink href="/">{t('top.heading')}</AppLink>
-          </nav>
+          <TopNav
+            ariaLabelKey="cases.navigation"
+            items={[
+              { href: '/cases', labelKey: 'cases.heading' },
+              { href: '/', labelKey: 'top.heading' },
+            ]}
+          />
         </header>
 
         {error !== null && (
@@ -2595,8 +1998,16 @@ function CaseDetailView({ caseId }: { caseId: string }) {
                   </div>
                 </CaseWorkbenchPanel>
                 <CaseWorkbenchPanel
-                  actionLabel={t('cases.task.new')}
-                  actionHref={`/tasks/new?case_id=${encodeURIComponent(item.id)}`}
+                  actions={
+                    <>
+                      <AppLink href={`/tasks/new?case_id=${encodeURIComponent(item.id)}`}>
+                        {t('cases.task.new')}
+                      </AppLink>
+                      <AppLink href={`/cases/${encodeURIComponent(item.id)}/task-batch-generate`}>
+                        {t('cases.taskBatch.openPage')}
+                      </AppLink>
+                    </>
+                  }
                   count={item.open_task_count}
                   eyebrow={t('cases.section.tasks')}
                   title={t('cases.task.window')}
@@ -2606,7 +2017,16 @@ function CaseDetailView({ caseId }: { caseId: string }) {
                     href={`/tasks?case_id=${encodeURIComponent(item.id)}`}
                   >
                     <div>
-                      <span>{t('cases.task.next')}</span>
+                      <span className="case-task-next-heading">
+                        {t('cases.task.next')}
+                        {item.next_task !== null && (
+                          <b className="case-task-status-badge">
+                            {item.next_task.status === 'not_started'
+                              ? t('tasks.tab.not_started')
+                              : t('tasks.tab.inbox')}
+                          </b>
+                        )}
+                      </span>
                       <strong>{item.next_task?.title ?? t('cases.card.none')}</strong>
                       <small>{formatDateTime(item.next_task?.due_at ?? null)}</small>
                     </div>
@@ -2825,10 +2245,13 @@ function CaseCreateView() {
             <p>{t('app.name')}</p>
             <h1>{t('cases.new')}</h1>
           </div>
-          <nav aria-label={t('cases.navigation')} className="maintenance-nav">
-            <AppLink href="/cases">{t('cases.heading')}</AppLink>
-            <AppLink href="/">{t('top.heading')}</AppLink>
-          </nav>
+          <TopNav
+            ariaLabelKey="cases.navigation"
+            items={[
+              { href: '/cases', labelKey: 'cases.heading' },
+              { href: '/', labelKey: 'top.heading' },
+            ]}
+          />
         </header>
 
         {error !== null && (
@@ -3342,11 +2765,18 @@ function CaseMailListView({ caseId }: { caseId: string }) {
             <h1>{t('cases.mail.assignedHeading')}</h1>
             {caseItem !== null && <span>{caseItem.name}</span>}
           </div>
-          <nav aria-label={t('cases.navigation')} className="maintenance-nav">
-            <AppLink href={`/cases/${encodeURIComponent(caseId)}`}>{t('cases.detailHeading')}</AppLink>
-            <AppLink href="/cases">{t('cases.heading')}</AppLink>
-            <AppLink href="/mail">{t('mail.heading')}</AppLink>
-          </nav>
+          <TopNav
+            ariaLabelKey="cases.navigation"
+            items={[
+              {
+                href: `/cases/${encodeURIComponent(caseId)}`,
+                labelKey: 'cases.detailHeading',
+              },
+              { href: '/cases', labelKey: 'cases.heading' },
+              { href: '/mail', labelKey: 'mail.heading' },
+              { href: '/', labelKey: 'top.heading' },
+            ]}
+          />
         </header>
 
         {error !== null && (

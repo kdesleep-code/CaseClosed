@@ -228,6 +228,21 @@ export async function prefillTask(payload: {
   })
 }
 
+export async function prefillTasksFromHandover(payload: {
+  case_id: string
+  storage_object_ids: string[]
+  additional_prompt?: string | null
+}): Promise<{ suggestions: TaskPrefill[]; llm_run_id: string }> {
+  return request<{ suggestions: TaskPrefill[]; llm_run_id: string }>(
+    '/api/v1/tasks/handover-prefill',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  )
+}
+
 export async function createTaskFromMail(payload: {
   message_id: string
   case_id?: string | null

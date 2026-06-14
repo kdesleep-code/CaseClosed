@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { AppLink } from './navigation'
+import { AppLink, TopNav } from './navigation'
 import { t } from './i18n'
 import { isCaseOpenForSuggestion, listCases } from './phase7Api'
 import type { CaseItem } from './phase7Api'
@@ -252,10 +252,13 @@ export default function TaskView() {
             <p>{t('app.name')}</p>
             <h1>{t('tasks.heading')}</h1>
           </div>
-          <nav aria-label={t('tasks.navigation')} className="maintenance-nav">
-            <AppLink href="/">{t('top.heading')}</AppLink>
-            <AppLink href="/cases">{t('cases.heading')}</AppLink>
-          </nav>
+          <TopNav
+            ariaLabelKey="tasks.navigation"
+            items={[
+              { href: '/', labelKey: 'top.heading' },
+              { href: '/cases', labelKey: 'cases.heading' },
+            ]}
+          />
         </header>
 
         {error !== null && (

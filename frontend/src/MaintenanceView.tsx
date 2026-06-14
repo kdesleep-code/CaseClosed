@@ -2,7 +2,7 @@ import { Fragment, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { t } from './i18n'
 import type { MessageKey } from './i18n'
-import { AppLink } from './navigation'
+import { TopNav } from './navigation'
 import {
   previewableImageExtensions,
   previewableTextExtensions,
@@ -806,7 +806,10 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
             <p>{t('app.name')}</p>
             <h1>{t('maintenance.heading')}</h1>
           </div>
-          <AppLink href="/">{t('top.heading')}</AppLink>
+          <TopNav
+            ariaLabelKey="maintenance.navigation"
+            items={[{ href: '/', labelKey: 'top.heading' }]}
+          />
         </header>
 
         {error !== null && (
@@ -1707,11 +1710,15 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                             ) ?? null
                           return (
                             <tr key={functionConfig.function_type}>
-                              <td>{functionConfig.function_type}</td>
+                              <td>
+                                <strong>{functionConfig.label}</strong>
+                                <br />
+                                <small>{functionConfig.function_type}</small>
+                              </td>
                               <td>
                                 <select
                                   aria-label={t('maintenance.debug.llmProfileFor', {
-                                    functionType: functionConfig.function_type,
+                                    functionType: functionConfig.label,
                                   })}
                                   disabled={isDebugBusy}
                                   onChange={(event) =>

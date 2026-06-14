@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { AppLink } from './navigation'
+import { AppLink, TopNav } from './navigation'
 import {
   createCalendarDbEventLink,
   deleteCalendarDbEventLink,
@@ -481,10 +481,21 @@ export default function CalendarEventDetailView({
                   : t('calendar.event.heading')}
             </h1>
           </div>
-          <nav aria-label={t('calendar.navigation')} className="maintenance-nav">
-            <AppLink href="/calendar">{t('nav.calendar')}</AppLink>
-            <AppLink href="/">{t('top.heading')}</AppLink>
-          </nav>
+          <TopNav
+            ariaLabelKey="calendar.navigation"
+            items={[
+              ...(mode !== 'detail'
+                ? [
+                    {
+                      href: `/calendar/events/${encodeURIComponent(eventId)}`,
+                      labelKey: 'calendar.event.heading' as const,
+                    },
+                  ]
+                : []),
+              { href: '/calendar', labelKey: 'nav.calendar' },
+              { href: '/', labelKey: 'top.heading' },
+            ]}
+          />
         </header>
 
         {isLoading && <p className="mail-empty">{t('common.loading')}</p>}

@@ -194,3 +194,18 @@ export function isPreviewableZipFile({
     fileExtension(filename) === 'zip'
   )
 }
+
+export function isPreviewableEmlFile({
+  contentType,
+  filename,
+}: {
+  contentType: string | null
+  filename: string | null
+}) {
+  const normalizedContentType = contentType?.toLowerCase().split(';', 1)[0].trim()
+  return (
+    normalizedContentType === 'message/rfc822' ||
+    normalizedContentType === 'application/eml' ||
+    fileExtension(filename) === 'eml'
+  )
+}

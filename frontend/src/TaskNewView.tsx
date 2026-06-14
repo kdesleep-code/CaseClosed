@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
-import { AppLink, navigateTo } from './navigation'
+import { AppLink, TopNav, navigateTo } from './navigation'
 import { t } from './i18n'
 import { isCaseOpenForSuggestion, listCases } from './phase7Api'
 import type { CaseItem } from './phase7Api'
 import { createTask, prefillTask } from './phase8Api'
+import type { TaskPrefill } from './phase8Api'
 import SuggestInput from './SuggestInput'
 
 const recurrenceWeekdays = [
@@ -30,8 +31,59 @@ function describeError(error: unknown) {
   return error instanceof Error ? error.message : t('tasks.requestFailed')
 }
 
+function defaultStartDateFromDue(dueDate: string | null | undefined) {
+  if (dueDate === null || dueDate === undefined || dueDate.trim() === '') {
+    return ''
+  }
+  const due = new Date(`${dueDate.slice(0, 10)}T00:00:00`)
+  if (Number.isNaN(due.getTime())) {
+    return ''
+  }
+  due.setDate(due.getDate() - 7)
+  return due.toISOString().slice(0, 10)
+}
+
+type TaskBatchQueue = {
+  case_id: string
+  case_name: string
+  llm_run_id?: string
+  source_file_ids?: string[]
+  suggestions: TaskPrefill[]
+}
+
+function readTaskBatchQueue(batchKey: string | null): TaskBatchQueue | null {
+  if (batchKey === null || batchKey.trim() === '') return null
+  try {
+    const raw = window.sessionStorage.getItem(batchKey)
+    if (raw === null) return null
+    const parsed = JSON.parse(raw) as Partial<TaskBatchQueue>
+    if (
+      typeof parsed.case_id !== 'string' ||
+      typeof parsed.case_name !== 'string' ||
+      !Array.isArray(parsed.suggestions)
+    ) {
+      return null
+    }
+    return {
+      case_id: parsed.case_id,
+      case_name: parsed.case_name,
+      llm_run_id: typeof parsed.llm_run_id === 'string' ? parsed.llm_run_id : undefined,
+      source_file_ids: Array.isArray(parsed.source_file_ids)
+        ? parsed.source_file_ids.filter((item): item is string => typeof item === 'string')
+        : [],
+      suggestions: parsed.suggestions,
+    }
+  } catch {
+    return null
+  }
+}
+
 export default function TaskNewView() {
+  const currentParams = new URLSearchParams(window.location.search)
+  const batchKey = currentParams.get('batch_key')
+  const batchIndex = Number(currentParams.get('batch_index') ?? '0')
   const [cases, setCases] = useState<CaseItem[]>([])
+  const [batchQueue, setBatchQueue] = useState<TaskBatchQueue | null>(null)
   const [caseText, setCaseText] = useState(() => {
     const params = new URLSearchParams(window.location.search)
     return params.get('case_name')?.trim() ?? ''
@@ -57,6 +109,10 @@ export default function TaskNewView() {
   const [isLoading, setIsLoading] = useState(true)
   const [isCreating, setIsCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const safeBatchIndex = Number.isFinite(batchIndex) && batchIndex >= 0 ? Math.floor(batchIndex) : 0
+  const batchSuggestion =
+    batchQueue !== null ? batchQueue.suggestions[safeBatchIndex] ?? null : null
+  const isBatchMode = batchKey !== null && batchQueue !== null && batchSuggestion !== null
 
   useEffect(() => {
     let isMounted = true
@@ -95,6 +151,49 @@ export default function TaskNewView() {
       isMounted = false
     }
   }, [])
+
+  useEffect(() => {
+    const queue = readTaskBatchQueue(batchKey)
+    setBatchQueue(queue)
+    if (batchKey === null) {
+      return
+    }
+    if (queue === null) {
+      setError(t('tasks.create.batchMissing'))
+      return
+    }
+    const suggestion = queue.suggestions[safeBatchIndex]
+    if (suggestion === undefined) {
+      setError(t('tasks.create.batchMissing'))
+      return
+    }
+    setCaseText(queue.case_name)
+    setTitle(suggestion.title ?? '')
+    setDescription(suggestion.description ?? '')
+    setDoneWhenText(suggestion.done_when_text ?? '')
+    setPriority(suggestion.priority || 'middle')
+    setStartAt(defaultStartDateFromDue(suggestion.due_at))
+    setDueAt(suggestion.due_at ?? '')
+    setEstimateMinutes(
+      suggestion.estimate_minutes === null ? '' : String(suggestion.estimate_minutes),
+    )
+    setRecurrenceRuleType('')
+    setRecurrenceMonthDay('0')
+    setRecurrenceYearMonth('1')
+    setRecurrenceMonthPattern('day')
+    setRecurrenceMonthWeek('1')
+    setRecurrenceMonthWeekday('1')
+    setRecurrenceWeekdayValues([])
+    setRecurrenceStartBeforeDays('7')
+    setLlmPrompt('')
+    setPrefillNotice(
+      t('tasks.create.batchProgress', {
+        current: safeBatchIndex + 1,
+        total: queue.suggestions.length,
+      }),
+    )
+    setError(null)
+  }, [batchKey, safeBatchIndex])
 
   function selectedCase() {
     const trimmedCaseText = caseText.trim()
@@ -138,6 +237,9 @@ export default function TaskNewView() {
       }
       if (priority === 'middle' && prefill.priority !== '') setPriority(prefill.priority)
       if (dueAt.trim() === '' && prefill.due_at !== null) setDueAt(prefill.due_at)
+      if (startAt.trim() === '' && prefill.due_at !== null) {
+        setStartAt(defaultStartDateFromDue(prefill.due_at))
+      }
       if (estimateMinutes.trim() === '' && prefill.estimate_minutes !== null) {
         setEstimateMinutes(String(prefill.estimate_minutes))
       }
@@ -246,15 +348,38 @@ export default function TaskNewView() {
           : null,
       recurrence_start_offset_days:
         recurrenceRuleType === '' ? null : -parsedRecurrenceStartBefore,
-      source_type: 'manual',
+      source_type: isBatchMode ? 'llm' : 'manual',
+      source_id: isBatchMode ? batchQueue.llm_run_id ?? null : null,
     })
       .then(() => {
-        navigateTo('/tasks')
+        navigateAfterBatchStep()
       })
       .catch((requestError) => {
         setError(describeError(requestError))
       })
       .finally(() => setIsCreating(false))
+  }
+
+  function navigateAfterBatchStep() {
+    if (!isBatchMode || batchKey === null || batchQueue === null) {
+      navigateTo('/tasks')
+      return
+    }
+    const nextIndex = safeBatchIndex + 1
+    if (nextIndex < batchQueue.suggestions.length) {
+      navigateTo(
+        `/tasks/new?case_id=${encodeURIComponent(batchQueue.case_id)}&batch_key=${encodeURIComponent(
+          batchKey,
+        )}&batch_index=${nextIndex}`,
+      )
+      return
+    }
+    window.sessionStorage.removeItem(batchKey)
+    navigateTo('/tasks')
+  }
+
+  function handleSkipBatchSuggestion() {
+    navigateAfterBatchStep()
   }
 
   return (
@@ -265,10 +390,14 @@ export default function TaskNewView() {
             <p>{t('app.name')}</p>
             <h1>{t('tasks.create.heading')}</h1>
           </div>
-          <nav aria-label={t('tasks.navigation')} className="maintenance-nav">
-            <AppLink href="/tasks">{t('tasks.heading')}</AppLink>
-            <AppLink href="/cases">{t('cases.heading')}</AppLink>
-          </nav>
+          <TopNav
+            ariaLabelKey="tasks.navigation"
+            items={[
+              { href: '/tasks', labelKey: 'tasks.heading' },
+              { href: '/cases', labelKey: 'cases.heading' },
+              { href: '/', labelKey: 'top.heading' },
+            ]}
+          />
         </header>
 
         {error !== null && (
@@ -542,6 +671,16 @@ export default function TaskNewView() {
               >
                 {isCreating ? t('tasks.create.creating') : t('tasks.create.submit')}
               </button>
+              {isBatchMode && (
+                <button
+                  className="task-gadget-secondary-action"
+                  disabled={isCreating}
+                  onClick={handleSkipBatchSuggestion}
+                  type="button"
+                >
+                  {t('tasks.create.skipSuggestion')}
+                </button>
+              )}
               <AppLink className="task-gadget-secondary-action" href="/tasks">
                 {t('tasks.create.cancel')}
               </AppLink>

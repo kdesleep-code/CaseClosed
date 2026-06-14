@@ -687,3 +687,24 @@ def test_case_detail_exposes_next_task_and_task_counts(client) -> None:
     assert detail["case"]["next_task"]["id"] == next_task["id"]
     assert detail["case"]["next_task"]["title"] == "Soon task"
     assert [item["id"] for item in detail["tasks"]] == [next_task["id"]]
+
+
+def test_case_detail_uses_not_started_task_as_next_task_fallback(client) -> None:
+    case = create_case(client, "Case Future Task Summary")
+    future_task = client.post(
+        "/api/v1/tasks",
+        json={
+            "case_id": case["id"],
+            "title": "Future task",
+            "start_at": "2099-01-01",
+            "due_at": "2099-01-08",
+        },
+    ).json()["data"]["task"]
+
+    response = client.get(f"/api/v1/cases/{case['id']}")
+
+    assert response.status_code == 200
+    detail = response.json()["data"]
+    assert detail["case"]["open_task_count"] == 0
+    assert detail["case"]["next_task"]["id"] == future_task["id"]
+    assert detail["tasks"] == []

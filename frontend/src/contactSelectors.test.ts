@@ -99,6 +99,7 @@ describe('contact selector resolution', () => {
       overdue_task_count: 0,
       file_count: 0,
       storage_directory_id: 'directory_case_annual_review',
+      handover_storage_directory_id: 'directory_case_annual_review_handover',
       next_task: null,
       next_calendar_event: null,
       created_at: '2026-06-03T10:00:00+09:00',
