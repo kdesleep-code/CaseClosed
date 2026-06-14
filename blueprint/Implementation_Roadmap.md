@@ -892,7 +892,7 @@ LLM:
 
 ## Phase 9: Calendar連携
 
-Status: Next priority
+Status: In progress / core implemented
 
 ### 目的
 
@@ -904,43 +904,60 @@ Phase 8でTask基盤を作った後、早めにCalendar連携へ進む。Case Cu
 
 DB:
 
+- calendar_events
 - calendar_event_links
-- calendar_event_candidates
+- calendar_sync_states / calendar source selection
+- calendar_event_candidates（必要に応じて後続）
 
 API:
 
-- `GET /calendar/today`
-- `GET /calendar/events`
-- `POST /mails/{id}/extract-calendar-candidates`
-- `POST /calendar/events`
-- `PATCH /calendar/events/{id}/links`
-- `POST /calendar/events/{id}/suggest-preparation-tasks`
-- `POST /tasks/{id}/work-blocks`
+- `GET /api/v1/calendar/events`
+- `GET /api/v1/calendar/events/{id}`
+- `POST /api/v1/calendar/sync`
+- `POST /api/v1/google/calendar/events`
+- `PATCH /api/v1/calendar/events/{id}`
+- `POST /api/v1/calendar/events/{id}/move`
+- `POST /api/v1/calendar/events/{id}/links`
+- `DELETE /api/v1/calendar/events/{id}/links/{link_id}`
+- `POST /api/v1/mails/{id}/calendar-prefill`
+- `POST /api/v1/tasks/{id}/work-blocks`（Task作業ブロック接続時に拡張）
 
 画面:
 
-- 今日の予定
-- Calendar画面
-- メールから予定作成画面
-- Task作業ブロック作成UI
+- Calendar週表示画面
+- Calendar右ガジェット（月ミニカレンダー / Upcoming / Calendar Source）
+- Calendar新規Event手入力画面
+- Calendar Event詳細 / 編集 / Mail添付画面
+- Mail詳細からLLMで予定作成する画面
+- Case詳細Calendarガジェット
+- Task作業ブロック作成UI（後続）
 
 LLM:
 
-- calendar_candidate_extraction
+- calendar_candidate_extraction / calendar event prefill
 - preparation_task_suggestion
+- handover_task_generation
 
 外部副作用:
 
-- Google Calendar create/update external_operation
+- Google Calendar create/update
+- Google Calendar同期ロード
+- ローカルDBを表示キャッシュとして持ち、Google Calendarを正本とする
 
 ### 完了条件
 
-- 今日の予定が表示される
+- Calendar週表示で、複数Calendar Sourceの予定を同時表示できる
+- Google Calendarから未来中心の予定をDBへ同期できる
+- DB上のCalendar Eventを高速に表示できる
 - メールから予定候補を抽出できる
 - ユーザー確認後にGoogle Calendarへ登録できる
-- 作成後にメールがprocessedになる
+- 手入力で予定を登録できる
+- 予定作成時にCase / Task / Mailをリンクできる
+- 既存予定の詳細確認・編集・日時変更・リンク編集ができる
+- Calendar上でイベントカードをドラッグ&ドロップして日時変更できる
+- Case詳細に関連予定とNext Eventが表示される
+- Case詳細Calendarガジェットで、関連イベントのある日を確認できる
 - Calendar作成unknownは自動再実行しない
-- Case詳細に関連予定が表示される
 
 ### レビュー観点
 
@@ -948,6 +965,9 @@ LLM:
 - 登録前編集がしやすいか
 - Calendar説明欄に必要情報が入るか
 - Google Calendarで開く導線があるか
+- Google Calendarのみの予定とDB拡張情報つき予定の扱いが混乱しないか
+- 複数Calendar Source表示時の色・重なり・Upcoming表示が見やすいか
+- DnD日時変更が直感的か
 
 ---
 
@@ -1389,19 +1409,25 @@ Gmail本文をDB保存できる
 Pending中はLLM自動処理が止まる
 ```
 
-現状はPhase 4を越えて、Phase 5のMail Intelligence、Phase 6のStorage基盤、Phase 7のCase連携基盤、Phase 8のTask中核、Phase 10のGmail送信機能の一部まで先行実装済みである。
+現状はPhase 4を越えて、Phase 5のMail Intelligence、Phase 6のStorage基盤、Phase 7のCase連携基盤、Phase 8のTask中核、Phase 9のCalendar連携中核、Phase 10のGmail送信機能の一部まで先行実装済みである。
 
-Phase 6のStorage基盤は、手元ファイル・メール添付・Contact画像・Storage一覧/詳細/検索/ディレクトリ・添付元メール参照・LLM input許可切替・物理削除・Storage操作履歴・ファイル更新バージョン管理・LLM Digest・Version Differenceまで実装済みである。
+Phase 6のStorage基盤は、手元ファイル・メール添付・Contact画像・Storage一覧/詳細/検索/ディレクトリ・添付元メール参照・LLM input許可切替・物理削除・Storage操作履歴・ファイル更新バージョン管理・LLM Digest・Version Differenceまで実装済みである。Storage / Case Stored Files / Task Filesは、共通Storage Explorerを用いる方針に整理済みで、Root Directoryだけを変えて同じ移動・ドロップ・右クリック操作を使う。ディレクトリの再帰ドロップ、ディレクトリ移動、Case専用ディレクトリからCase本体へ戻る導線、右クリック「別ウィンドウで開く」、`.eml`表示、Markdown表表示を含む。
 
-Phase 7のCase連携基盤はFix扱いとする。Case一覧/詳細、Case Genre、Case専用Storage Directory、file_linksによる同一Storage objectの複数Case参照、Overview / Open When / Closed When / tags、Stakeholders、Current Situation手動生成、Mail Thread手動Assign / Remove、Case詳細Assigned Mail検索、Stored Files Window、右ガジェットCalendar枠、Case Toolsアイコンランチャーまで実装済みである。Case Toolsは「アイコン + URL」の単純なリンク集合として扱い、通常表示はアイコンのみ、設定時に追加・削除・ドラッグ並べ替えを行う方針とする。
+Phase 7のCase連携基盤はFix扱いとする。Case一覧/詳細、Case Genre、Case専用Storage Directory、引継ぎ資料特殊ディレクトリ、file_linksによる同一Storage objectの複数Case参照、Overview / Open When / Closed When / Genre / tags、Stakeholders、Current Situation手動生成、Mail Thread手動Assign / Remove、Case詳細Assigned Mail検索、Stored Files Window、右ガジェットCalendar枠、Case Toolsアイコンランチャーまで実装済みである。Case Toolsは「アイコン + URL」の単純なリンク集合として扱い、通常表示はアイコンのみ、設定時に追加・削除・ドラッグ並べ替えを行う。Case Tool Iconsはfile-iconsと同系統の仕組みで、登録URLとの部分一致が最も長いアイコンを採用する。
 
-Current Situationは自動生成せず、ユーザーが「今どうなっていたか」を確認したい時にRefreshを押して生成する。入力にはCase概要、関連メールThread要約、Task情報、Calendar接続点、Case Storage内File Digestを含める。Calendarは現時点では接続点のみであり、実データ接続はPhase 9で行う。
+Current Situationは自動生成せず、ユーザーが「今どうなっていたか」を確認したい時にRefreshを押して生成する。入力にはCase概要、関連メールThread要約、Task情報、Calendar実データ、Case Storage内File Digestを含める。
 
 LLM自動Case判定はPhase 7では実装しない。まず手動Assignと明示Auto Assign Rule運用を優先し、実運用で手間が大きい場合に、候補提示またはLLM自動判定として後続追加する。
 
 Caseの繰り返し案件は、初期運用では独立したCase Series機能を急がず、手動Case作成とRecurring Taskで扱う。前年・前回Caseをテンプレートに次回Caseを作成する機能は、運用上の必要度を見て後続追加する。
 
-Phase 8のTask中核はFix扱いとする。Task DB/API、Task一覧/詳細/新規作成/編集/削除/Done、Not Started / Inbox / Done / Archived、Start DateによるIn Progress化、Case詳細のNext Task / New Task導線、メールからLLM Task生成、Task Files、Progress Memo時系列、Completed Task FilesのCompleted Tasksディレクトリ移動、Recurring Task（毎週 / 2週に1度 / 毎月 / 毎年、月末・月末前日・第N曜日・最終曜日、Repeat設定から初回Start / Due Date自動補完）まで実装済みである。
+Phase 8のTask中核はFix扱いとする。Task DB/API、Task一覧/詳細/新規作成/編集/削除/Done、Not Started / Inbox / Done / Archived、Start DateによるIn Progress化、Case詳細のNext Task / New Task導線、メールからLLM Task生成、Task Files、Progress Memo時系列、Completed Task FilesのCompleted Tasksディレクトリ移動、Recurring Task（毎週 / 2週に1度 / 毎月 / 毎年、月末・月末前日・第N曜日・最終曜日、Repeat設定から初回Start / Due Date自動補完）まで実装済みである。Case詳細のNext Taskは、Inbox相当の開始済み未完了Taskを優先し、存在しない場合だけNot Started Taskを表示する。表示時はInbox / Not Startedのバッジで区別する。
+
+Phase 9のCalendar連携は中核実装済みである。Google Calendar OAuth scope拡張、Calendar API有効化前提、Calendar Event DB、Google Calendar同期ロード、複数Calendar Source同時表示、週表示、月ミニカレンダー、Upcoming、過去/参加不要イベントの薄表示、重複イベントの横分割、終日/複数日イベント、イベント詳細/編集、Calendar上DnD日時変更、手入力新規Event作成、メールからLLMでEvent作成、Case / Task / Mailリンク編集、Case詳細Calendarガジェット、Case Next Event接続まで実装済みである。Google Calendarを正本とし、DBは表示キャッシュとCaseClosed独自メタデータの保持に使う。
+
+引継ぎ資料からのTask群生成を追加実装済みである。Case詳細のNew Task横から専用画面へ移動し、Caseの「引継ぎ資料」ディレクトリ内ファイルを選択して、追加プロンプトとともにLLMへ渡す。LLMはTask候補群を返し、ユーザーはNew Task画面に1件ずつ事前入力された状態で確認し、登録またはSkipする。入力ファイルはMarkdown / EML / DOCX / XLSXのテキスト抽出に対応し、Due Dateだけ取得できた場合はStart DateをDue Dateの1週間前で補完する。
+
+フロントエンド共通化として、上部ナビゲーションはページ側が必要な導線を宣言する形へ整理し、Suggest入力はバッジ化・直下候補表示を共通コンポーネント化する方針とした。Mail宛先、Case/Taskリンク、Stakeholder、Calendar Linkなどは順次このSuggestInputへ寄せる。
 
 Phase 6で未実装として残すもの:
 
@@ -1413,7 +1439,7 @@ Phase 6で未実装として残すもの:
 ■ file_linksによる明示的な多対多File参照
 ```
 
-次の主目標はPhase 9のCalendar連携である。Task基盤が入ったため、Calendar実データ接続、Task作業ブロック、祝日・例外日を考慮したRecurring Task調整を優先する。Case Series / Create next Case、自動Case判定、特定メール到着によるTask自動作成ルールは実用上の必要度を見ながら後続で扱う。`file_security_meta_classification` は引き続き保留し、Storage設定UI・Maintenance表示強化はPhase 9以降で扱う。
+次の主目標はCalendar連携の仕上げと、引継ぎ資料Task生成の運用確認である。Task作業ブロック、祝日・例外日を考慮したRecurring Task調整、Google Calendarとの差分同期の自動化、Gmail特殊ロード検索画面、Storage設定UI、Maintenance表示強化は後続で扱う。Case Series / Create next Case、自動Case判定、特定メール到着によるTask自動作成ルールは実用上の必要度を見ながら追加する。`file_security_meta_classification` は引き続き保留する。
 
 Phase 6開始時に特に確認する:
 
