@@ -16,7 +16,6 @@ import {
   readMaintenanceStatus,
   resolveExternalOperation,
   retryJob,
-  updateLlmCostSettings,
 } from './phase2Api'
 import { listStorageLocations } from './phase3Api'
 import type {
@@ -29,33 +28,24 @@ import type {
 import type { StorageLocation } from './phase3Api'
 import {
   applyMailLlmBlockFilter,
-  createGoogleGmailConnectUrl,
-  disconnectGoogleGmail,
-  getGoogleGmailStatus,
-  getLlmModelConfig,
-  importLatestUnloadedGoogleGmail,
   listLlmBlockFilters,
   listLlmBlockedMails,
-  updateGoogleCalendarAutoSyncSettings,
-  updateGoogleGmailAutoImportSettings,
   updateLlmBlockFilter,
-  updateLlmModelAssignment,
 } from './phase4Api'
 import type {
-  GoogleGmailStatus,
   LlmBlockFilter,
   LlmBlockedMail,
-  LlmModelConfig,
 } from './phase4Api'
-import { notifyPendingContactsIfAny } from './pendingContactRedirect'
 
 const usageMetrics = [
-  { key: 'database', labelKey: 'maintenance.metric.database' },
   { key: 'storage', labelKey: 'maintenance.metric.storage' },
   { key: 'llm-cost', labelKey: 'maintenance.metric.llmCost' },
-  { key: 'metric-4', labelKey: 'maintenance.metric.metric4' },
-  { key: 'metric-5', labelKey: 'maintenance.metric.metric5' },
-  { key: 'metric-6', labelKey: 'maintenance.metric.metric6' },
+  { key: 'llm-projected', labelKey: 'maintenance.metric.llmProjected' },
+  { key: 'mail-total', labelKey: 'maintenance.metric.mailTotal' },
+  { key: 'mail-received-7d', labelKey: 'maintenance.metric.mailReceived7d' },
+  { key: 'mail-sent-7d', labelKey: 'maintenance.metric.mailSent7d' },
+  { key: 'mail-average-30d', labelKey: 'maintenance.metric.mailAverage30d' },
+  { key: 'mail-importance', labelKey: 'maintenance.metric.mailImportance' },
   {
     key: 'running-jobs',
     labelKey: 'maintenance.metric.runningJobs',
@@ -190,9 +180,13 @@ function jobNeedsAction(job: Job) {
 }
 
 function usageMetricValue(metric: UsageMetric, status: MaintenanceStatus | null) {
+  if (status === null) return t('maintenance.notAvailable')
+  if (metric.key === 'storage') {
+    return `${formatBytes(status.storage_active_bytes ?? 0)} / ${formatNumber(status.storage_active_objects ?? 0)} files`
+  }
   if (metric.key === 'llm-cost') {
-    const used = status?.llm_cost_month_used
-    const remaining = status?.llm_cost_month_remaining
+    const used = status.llm_cost_month_used
+    const remaining = status.llm_cost_month_remaining
     if (used === undefined) {
       return t('maintenance.notAvailable')
     }
@@ -203,9 +197,27 @@ function usageMetricValue(metric: UsageMetric, status: MaintenanceStatus | null)
       remaining: formatMoney(remaining, 'usd'),
     })
   }
+  if (metric.key === 'llm-projected') {
+    return formatMoney(status.llm_cost_month_projected, 'usd')
+  }
+  if (metric.key === 'mail-total') {
+    return formatNumber(status.mail_total)
+  }
+  if (metric.key === 'mail-received-7d') {
+    return formatNumber(status.mail_received_7d)
+  }
+  if (metric.key === 'mail-sent-7d') {
+    return formatNumber(status.mail_sent_7d)
+  }
+  if (metric.key === 'mail-average-30d') {
+    return formatNumber(status.mail_daily_average_30d)
+  }
+  if (metric.key === 'mail-importance') {
+    return `H ${formatNumber(status.mail_importance_high)} / M ${formatNumber(status.mail_importance_middle)} / L ${formatNumber(status.mail_importance_low)}`
+  }
   return metric.statusKey === undefined
     ? t('maintenance.notAvailable')
-    : status?.[metric.statusKey] ?? t('common.none')
+    : status[metric.statusKey] ?? t('common.none')
 }
 
 function formatMoney(value: number | null | undefined, currency: string) {
@@ -330,23 +342,14 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
     initialData?.pendingMails ?? [],
   )
   const [llmCostHistory, setLlmCostHistory] = useState<LlmCostHistory | null>(null)
-  const [llmModelConfig, setLlmModelConfig] = useState<LlmModelConfig | null>(null)
-  const [googleGmailStatus, setGoogleGmailStatus] =
-    useState<GoogleGmailStatus | null>(null)
   const [llmBlockFilters, setLlmBlockFilters] = useState<LlmBlockFilter[] | null>(null)
   const [llmBlockedMails, setLlmBlockedMails] = useState<LlmBlockedMail[] | null>(null)
   const [debugNotice, setDebugNotice] = useState<string | null>(initialDebugNotice)
   const [llmBlockQuery, setLlmBlockQuery] = useState('password')
   const [llmBlockReason, setLlmBlockReason] = useState('May contain password.')
-  const [llmMonthlyBudget, setLlmMonthlyBudget] = useState('')
   const [storageLocations, setStorageLocations] = useState<StorageLocation[] | null>(
     null,
   )
-  const [gmailAutoImportEnabled, setGmailAutoImportEnabled] = useState(true)
-  const [gmailAutoImportInterval, setGmailAutoImportInterval] = useState('10')
-  const [gmailAutoImportMaxMessages, setGmailAutoImportMaxMessages] = useState('100')
-  const [calendarAutoSyncEnabled, setCalendarAutoSyncEnabled] = useState(true)
-  const [calendarAutoSyncInterval, setCalendarAutoSyncInterval] = useState('60')
   const [isDebugBusy, setIsDebugBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
@@ -394,16 +397,15 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
   useEffect(() => {
     if (
       activeTab !== 'debug' ||
-      (llmBlockedMails !== null && llmBlockFilters !== null && llmModelConfig !== null)
+      (llmBlockedMails !== null && llmBlockFilters !== null)
     ) {
       return
     }
 
     let isMounted = true
-    Promise.all([getLlmModelConfig(), listLlmBlockFilters(), listLlmBlockedMails()])
-      .then(([nextModelConfig, nextFilters, nextMails]) => {
+    Promise.all([listLlmBlockFilters(), listLlmBlockedMails()])
+      .then(([nextFilters, nextMails]) => {
         if (isMounted) {
-          setLlmModelConfig(nextModelConfig)
           setLlmBlockFilters(nextFilters)
           setLlmBlockedMails(nextMails)
         }
@@ -411,7 +413,6 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
       .catch((requestError) => {
         if (isMounted) {
           setError(describeError(requestError))
-          setLlmModelConfig({ profiles: [], functions: [] })
           setLlmBlockFilters([])
           setLlmBlockedMails([])
         }
@@ -420,45 +421,7 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
     return () => {
       isMounted = false
     }
-  }, [activeTab, llmBlockedMails, llmBlockFilters, llmModelConfig])
-
-  useEffect(() => {
-    if (activeTab !== 'debug' || googleGmailStatus !== null) {
-      return
-    }
-
-    let isMounted = true
-    getGoogleGmailStatus()
-      .then((nextStatus) => {
-        if (isMounted) {
-          setGoogleGmailStatus(nextStatus)
-        }
-      })
-      .catch((requestError) => {
-        if (isMounted) {
-          setError(describeError(requestError))
-        }
-      })
-
-    return () => {
-      isMounted = false
-    }
-  }, [activeTab, googleGmailStatus])
-
-  useEffect(() => {
-    if (googleGmailStatus === null) {
-      return
-    }
-    setGmailAutoImportEnabled(googleGmailStatus.auto_import.enabled)
-    setGmailAutoImportInterval(String(googleGmailStatus.auto_import.interval_minutes))
-    setGmailAutoImportMaxMessages(
-      String(googleGmailStatus.auto_import.max_messages_per_run),
-    )
-    setCalendarAutoSyncEnabled(googleGmailStatus.calendar_auto_sync.enabled)
-    setCalendarAutoSyncInterval(
-      String(googleGmailStatus.calendar_auto_sync.interval_minutes),
-    )
-  }, [googleGmailStatus])
+  }, [activeTab, llmBlockedMails, llmBlockFilters])
 
   useEffect(() => {
     if (activeTab !== 'usage' || activeUsageMetric.key !== 'llm-cost') {
@@ -471,9 +434,6 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
           return
         }
         setLlmCostHistory(history)
-        setLlmMonthlyBudget(
-          history.monthly_budget === null ? '' : String(history.monthly_budget),
-        )
       })
       .catch((requestError) => {
         if (isMounted) {
@@ -551,138 +511,8 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
   }
 
   async function refreshLlmBlockedMails() {
-    setLlmModelConfig(await getLlmModelConfig())
     setLlmBlockFilters(await listLlmBlockFilters())
     setLlmBlockedMails(await listLlmBlockedMails())
-  }
-
-  async function refreshGoogleGmailStatus() {
-    setGoogleGmailStatus(await getGoogleGmailStatus())
-  }
-
-  async function handleGoogleGmailConnect() {
-    setError(null)
-    setDebugNotice(null)
-    setIsDebugBusy(true)
-    try {
-      const result = await createGoogleGmailConnectUrl()
-      window.location.href = result.authorization_url
-    } catch (requestError) {
-      setError(describeError(requestError))
-      setIsDebugBusy(false)
-    }
-  }
-
-  async function handleGoogleGmailDisconnect() {
-    setError(null)
-    setDebugNotice(null)
-    setIsDebugBusy(true)
-    try {
-      setGoogleGmailStatus(await disconnectGoogleGmail())
-      setDebugNotice(t('maintenance.debug.googleGmailDisconnected'))
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setIsDebugBusy(false)
-    }
-  }
-
-  async function handleGoogleGmailImportLatest() {
-    setError(null)
-    setDebugNotice(null)
-    setIsDebugBusy(true)
-    try {
-      const result = await importLatestUnloadedGoogleGmail()
-      if (!result.imported || result.mail === null) {
-        setDebugNotice(t('maintenance.debug.googleGmailImportNone'))
-        return
-      }
-      setDebugNotice(
-        t('maintenance.debug.googleGmailImported', {
-          subject: result.subject ?? result.mail.gmail_message_id,
-          pending: result.mail.pending ? 'yes' : 'no',
-          jobId: result.mail.queued_job_id ?? '-',
-        }),
-      )
-      await Promise.all([
-        refreshGoogleGmailStatus(),
-        refreshLlmBlockedMails(),
-        readMaintenanceStatus().then(setStatus),
-        listJobs().then(setJobs),
-        listPendingMails().then(setPendingMails),
-      ])
-      await notifyPendingContactsIfAny()
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setIsDebugBusy(false)
-    }
-  }
-
-  async function handleGoogleGmailAutoImportSettings(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    setError(null)
-    setDebugNotice(null)
-    setIsDebugBusy(true)
-    try {
-      const intervalMinutes = Math.max(
-        1,
-        Math.min(24 * 60, Number.parseInt(gmailAutoImportInterval, 10) || 10),
-      )
-      const maxMessagesPerRun = Math.max(
-        1,
-        Math.min(100, Number.parseInt(gmailAutoImportMaxMessages, 10) || 100),
-      )
-      const settings = await updateGoogleGmailAutoImportSettings({
-        enabled: gmailAutoImportEnabled,
-        interval_minutes: intervalMinutes,
-        max_messages_per_run: maxMessagesPerRun,
-      })
-      setGoogleGmailStatus((current) =>
-        current === null
-          ? current
-          : {
-              ...current,
-              mail_loading_enabled: settings.enabled,
-              auto_import: settings,
-            },
-      )
-      setDebugNotice(t('maintenance.debug.googleGmailAutoImportSaved'))
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setIsDebugBusy(false)
-    }
-  }
-
-  async function handleGoogleCalendarAutoSyncSettings(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    setError(null)
-    setDebugNotice(null)
-    setIsDebugBusy(true)
-    try {
-      const intervalMinutes = Math.max(
-        5,
-        Math.min(24 * 60, Number.parseInt(calendarAutoSyncInterval, 10) || 60),
-      )
-      const settings = await updateGoogleCalendarAutoSyncSettings({
-        enabled: calendarAutoSyncEnabled,
-        interval_minutes: intervalMinutes,
-      })
-      setGoogleGmailStatus((current) =>
-        current === null
-          ? current
-          : {
-              ...current,
-              calendar_auto_sync: settings,
-            },
-      )
-      setDebugNotice(t('maintenance.debug.googleCalendarAutoSyncSaved'))
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setIsDebugBusy(false)
-    }
   }
 
   async function handleApplyLlmBlockFilter(event: FormEvent<HTMLFormElement>) {
@@ -734,38 +564,6 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
     }
   }
 
-  async function handleLlmModelAssignment(functionType: string, profileId: string) {
-    setError(null)
-    setIsDebugBusy(true)
-    try {
-      setLlmModelConfig(await updateLlmModelAssignment(functionType, profileId))
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setIsDebugBusy(false)
-    }
-  }
-
-  async function handleLlmCostSettings(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    setError(null)
-    setBusyId('llm-cost-settings')
-    try {
-      const trimmedBudget = llmMonthlyBudget.trim()
-      const monthlyBudget =
-        trimmedBudget === '' ? null : Math.max(0, Number.parseFloat(trimmedBudget))
-      const history = await updateLlmCostSettings(monthlyBudget)
-      setLlmCostHistory(history)
-      setLlmMonthlyBudget(
-        history.monthly_budget === null ? '' : String(history.monthly_budget),
-      )
-      setStatus(await readMaintenanceStatus())
-    } catch (requestError) {
-      setError(describeError(requestError))
-    } finally {
-      setBusyId(null)
-    }
-  }
 
   return (
     <main className="app-shell">
@@ -941,33 +739,6 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                               </strong>
                             </div>
                           </div>
-                          <form
-                            className="llm-cost-budget-form"
-                            onSubmit={handleLlmCostSettings}
-                          >
-                            <label>
-                              <span>{t('maintenance.llmCost.monthlyBudget')}</span>
-                              <input
-                                min={0}
-                                onChange={(event) =>
-                                  setLlmMonthlyBudget(event.target.value)
-                                }
-                                placeholder={t('maintenance.llmCost.noBudget')}
-                                step="0.01"
-                                type="number"
-                                value={llmMonthlyBudget}
-                              />
-                            </label>
-                            <button
-                              className={`button-loading-dot${
-                                busyId === 'llm-cost-settings' ? ' is-loading' : ''
-                              }`}
-                              disabled={busyId === 'llm-cost-settings'}
-                              type="submit"
-                            >
-                              {t('common.save')}
-                            </button>
-                          </form>
                           <p>{t('maintenance.llmCost.sourceLocal')}</p>
                           <div className="maintenance-table-wrap llm-cost-table-wrap">
                             <table>
@@ -1421,430 +1192,6 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                         ))}
                       </div>
                     </div>
-                  </div>
-                </section>
-
-                <section
-                  aria-labelledby="maintenance-google-gmail-heading"
-                  className="maintenance-section"
-                >
-                  <div className="section-heading">
-                    <h3 id="maintenance-google-gmail-heading">
-                      {t('maintenance.debug.googleGmail')}
-                    </h3>
-                    <button
-                      className={`button-loading-dot${isDebugBusy ? ' is-loading' : ''}`}
-                      disabled={isDebugBusy}
-                      onClick={() => {
-                        void refreshGoogleGmailStatus()
-                      }}
-                      type="button"
-                    >
-                      {t('mail.refresh')}
-                    </button>
-                  </div>
-
-                  <div className="google-gmail-panel">
-                    {googleGmailStatus === null ? (
-                      <p>{t('maintenance.debug.loading')}</p>
-                    ) : (
-                      <>
-                        <dl>
-                          <div>
-                            <dt>{t('common.status')}</dt>
-                            <dd>
-                              <span
-                                data-status={
-                                  googleGmailStatus.connected
-                                    ? 'succeeded'
-                                    : googleGmailStatus.configured
-                                      ? 'pending'
-                                      : 'failed'
-                                }
-                              >
-                                {googleGmailStatus.connected
-                                  ? t('maintenance.debug.googleGmailConnected')
-                                  : googleGmailStatus.configured
-                                    ? t('maintenance.debug.googleGmailReady')
-                                    : t('maintenance.debug.googleGmailNotConfigured')}
-                              </span>
-                            </dd>
-                          </div>
-                          <div>
-                            <dt>{t('maintenance.debug.googleGmailMailLoad')}</dt>
-                            <dd>{t('maintenance.debug.googleGmailMailLoadOff')}</dd>
-                          </div>
-                          <div>
-                            <dt>{t('maintenance.debug.googleCalendarRead')}</dt>
-                            <dd>
-                              {googleGmailStatus.calendar_read_enabled
-                                ? t('common.enabled')
-                                : t('common.disabled')}
-                            </dd>
-                          </div>
-                          <div>
-                            <dt>{t('maintenance.debug.googleCalendarWrite')}</dt>
-                            <dd>
-                              {googleGmailStatus.calendar_write_enabled
-                                ? t('common.enabled')
-                                : t('common.disabled')}
-                            </dd>
-                          </div>
-                          <div>
-                            <dt>{t('maintenance.debug.googleGmailConnectedAt')}</dt>
-                            <dd>{googleGmailStatus.connected_at ?? t('common.none')}</dd>
-                          </div>
-                          <div>
-                            <dt>{t('maintenance.debug.googleGmailScopes')}</dt>
-                            <dd>{googleGmailStatus.scopes.join(', ')}</dd>
-                          </div>
-                          <div>
-                            <dt>{t('maintenance.debug.googleGmailRedirectUri')}</dt>
-                            <dd>{googleGmailStatus.redirect_uri}</dd>
-                          </div>
-                        </dl>
-                        {googleGmailStatus.last_error !== null && (
-                          <p role="alert">{googleGmailStatus.last_error}</p>
-                        )}
-                        <div className="mail-actions mail-debug-actions">
-                          <button
-                            className={`button-loading-dot${isDebugBusy ? ' is-loading' : ''}`}
-                            disabled={isDebugBusy || !googleGmailStatus.configured}
-                            onClick={handleGoogleGmailConnect}
-                            type="button"
-                          >
-                            {t('maintenance.debug.googleGmailConnect')}
-                          </button>
-                          <button
-                            className={`button-loading-dot${isDebugBusy ? ' is-loading' : ''}`}
-                            disabled={isDebugBusy || !googleGmailStatus.connected}
-                            onClick={handleGoogleGmailDisconnect}
-                            type="button"
-                          >
-                            {t('maintenance.debug.googleGmailDisconnect')}
-                          </button>
-                          <button
-                            className={`button-loading-dot${isDebugBusy ? ' is-loading' : ''}`}
-                            disabled={isDebugBusy || !googleGmailStatus.connected}
-                            onClick={handleGoogleGmailImportLatest}
-                            type="button"
-                          >
-                            {t('maintenance.debug.googleGmailImportLatest')}
-                          </button>
-                        </div>
-                        <form
-                          className="mail-mock-form gmail-auto-import-form"
-                          onSubmit={handleGoogleGmailAutoImportSettings}
-                        >
-                          <label className="checkbox-label">
-                            <input
-                              checked={gmailAutoImportEnabled}
-                              onChange={(event) =>
-                                setGmailAutoImportEnabled(event.target.checked)
-                              }
-                              type="checkbox"
-                            />
-                            <span>{t('maintenance.debug.googleGmailAutoImport')}</span>
-                          </label>
-                          <label>
-                            <span>
-                              {t('maintenance.debug.googleGmailAutoImportInterval')}
-                            </span>
-                            <input
-                              min={1}
-                              onChange={(event) =>
-                                setGmailAutoImportInterval(event.target.value)
-                              }
-                              type="number"
-                              value={gmailAutoImportInterval}
-                            />
-                          </label>
-                          <label>
-                            <span>
-                              {t('maintenance.debug.googleGmailAutoImportMaxMessages')}
-                            </span>
-                            <input
-                              min={1}
-                              max={100}
-                              onChange={(event) =>
-                                setGmailAutoImportMaxMessages(event.target.value)
-                              }
-                              type="number"
-                              value={gmailAutoImportMaxMessages}
-                            />
-                          </label>
-                          <button
-                            className={`button-loading-dot${
-                              isDebugBusy ? ' is-loading' : ''
-                            }`}
-                            disabled={isDebugBusy}
-                            type="submit"
-                          >
-                            {t('common.save')}
-                          </button>
-                        </form>
-                        <dl className="gmail-auto-import-status">
-                          <div>
-                            <dt>{t('maintenance.debug.googleGmailAutoImportLastRun')}</dt>
-                            <dd>
-                              {googleGmailStatus.auto_import.last_run_at ??
-                                t('common.none')}
-                            </dd>
-                          </div>
-                          <div>
-                            <dt>
-                              {t('maintenance.debug.googleGmailAutoImportLastImported')}
-                            </dt>
-                            <dd>{googleGmailStatus.auto_import.last_imported_count}</dd>
-                          </div>
-                          <div>
-                            <dt>
-                              {t('maintenance.debug.googleGmailAutoImportLastChecked')}
-                            </dt>
-                            <dd>{googleGmailStatus.auto_import.last_checked_count}</dd>
-                          </div>
-                          <div>
-                            <dt>
-                              {t('maintenance.debug.googleGmailAutoImportStopReason')}
-                            </dt>
-                            <dd>
-                              {googleGmailStatus.auto_import.last_stop_reason ??
-                                t('common.none')}
-                            </dd>
-                          </div>
-                          <div>
-                            <dt>
-                              {t('maintenance.debug.googleGmailAutoImportStoppedMail')}
-                            </dt>
-                            <dd>
-                              {googleGmailStatus.auto_import
-                                .last_stopped_gmail_message_id === null
-                                ? t('common.none')
-                                : `${googleGmailStatus.auto_import.last_stopped_received_at ?? '-'} / ${googleGmailStatus.auto_import.last_stopped_gmail_message_id}`}
-                            </dd>
-                          </div>
-                          <div>
-                            <dt>{t('maintenance.debug.googleGmailAutoImportLastError')}</dt>
-                            <dd>
-                              {googleGmailStatus.auto_import.last_error ??
-                                t('common.none')}
-                            </dd>
-                          </div>
-                        </dl>
-                        <form
-                          className="mail-mock-form gmail-auto-import-form"
-                          onSubmit={handleGoogleCalendarAutoSyncSettings}
-                        >
-                          <label className="checkbox-label">
-                            <input
-                              checked={calendarAutoSyncEnabled}
-                              onChange={(event) =>
-                                setCalendarAutoSyncEnabled(event.target.checked)
-                              }
-                              type="checkbox"
-                            />
-                            <span>{t('maintenance.debug.googleCalendarAutoSync')}</span>
-                          </label>
-                          <label>
-                            <span>
-                              {t('maintenance.debug.googleCalendarAutoSyncInterval')}
-                            </span>
-                            <input
-                              min={5}
-                              onChange={(event) =>
-                                setCalendarAutoSyncInterval(event.target.value)
-                              }
-                              type="number"
-                              value={calendarAutoSyncInterval}
-                            />
-                          </label>
-                          <button
-                            className={`button-loading-dot${
-                              isDebugBusy ? ' is-loading' : ''
-                            }`}
-                            disabled={isDebugBusy}
-                            type="submit"
-                          >
-                            {t('common.save')}
-                          </button>
-                        </form>
-                        <dl className="gmail-auto-import-status">
-                          <div>
-                            <dt>{t('maintenance.debug.googleCalendarAutoSyncCalendars')}</dt>
-                            <dd>
-                              {googleGmailStatus.calendar_auto_sync.calendar_ids.join(
-                                ', ',
-                              )}
-                            </dd>
-                          </div>
-                          <div>
-                            <dt>{t('maintenance.debug.googleCalendarAutoSyncLastRun')}</dt>
-                            <dd>
-                              {googleGmailStatus.calendar_auto_sync.last_run_at ??
-                                t('common.none')}
-                            </dd>
-                          </div>
-                          <div>
-                            <dt>
-                              {t('maintenance.debug.googleCalendarAutoSyncLastSuccess')}
-                            </dt>
-                            <dd>
-                              {googleGmailStatus.calendar_auto_sync.last_success_at ??
-                                t('common.none')}
-                            </dd>
-                          </div>
-                          <div>
-                            <dt>
-                              {t('maintenance.debug.googleCalendarAutoSyncLastImported')}
-                            </dt>
-                            <dd>
-                              {googleGmailStatus.calendar_auto_sync.last_imported_count}
-                            </dd>
-                          </div>
-                          <div>
-                            <dt>
-                              {t('maintenance.debug.googleCalendarAutoSyncLastUpdated')}
-                            </dt>
-                            <dd>
-                              {googleGmailStatus.calendar_auto_sync.last_updated_count}
-                            </dd>
-                          </div>
-                          <div>
-                            <dt>
-                              {t('maintenance.debug.googleCalendarAutoSyncLastCancelled')}
-                            </dt>
-                            <dd>
-                              {googleGmailStatus.calendar_auto_sync.last_cancelled_count}
-                            </dd>
-                          </div>
-                          <div>
-                            <dt>
-                              {t('maintenance.debug.googleCalendarAutoSyncLastMissing')}
-                            </dt>
-                            <dd>
-                              {googleGmailStatus.calendar_auto_sync.last_missing_count}
-                            </dd>
-                          </div>
-                          <div>
-                            <dt>{t('maintenance.debug.googleCalendarAutoSyncRange')}</dt>
-                            <dd>
-                              {googleGmailStatus.calendar_auto_sync.last_time_min === null
-                                ? t('common.none')
-                                : `${googleGmailStatus.calendar_auto_sync.last_time_min} - ${googleGmailStatus.calendar_auto_sync.last_time_max ?? '-'}`}
-                            </dd>
-                          </div>
-                          <div>
-                            <dt>
-                              {t('maintenance.debug.googleCalendarAutoSyncStopReason')}
-                            </dt>
-                            <dd>
-                              {googleGmailStatus.calendar_auto_sync.last_stop_reason ??
-                                t('common.none')}
-                            </dd>
-                          </div>
-                          <div>
-                            <dt>{t('maintenance.debug.googleCalendarAutoSyncLastError')}</dt>
-                            <dd>
-                              {googleGmailStatus.calendar_auto_sync.last_error ??
-                                t('common.none')}
-                            </dd>
-                          </div>
-                        </dl>
-                      </>
-                    )}
-                  </div>
-                </section>
-
-                <section
-                  aria-labelledby="maintenance-llm-model-heading"
-                  className="maintenance-section"
-                >
-                  <div className="section-heading">
-                    <h3 id="maintenance-llm-model-heading">
-                      {t('maintenance.debug.llmModels')}
-                    </h3>
-                    <button
-                      className={`button-loading-dot${isDebugBusy ? ' is-loading' : ''}`}
-                      disabled={isDebugBusy}
-                      onClick={() => {
-                        void getLlmModelConfig().then(setLlmModelConfig)
-                      }}
-                      type="button"
-                    >
-                      {t('mail.refresh')}
-                    </button>
-                  </div>
-
-                  <div className="maintenance-table-wrap">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th scope="col">{t('maintenance.debug.llmFunction')}</th>
-                          <th scope="col">{t('maintenance.debug.llmProfile')}</th>
-                          <th scope="col">{t('maintenance.debug.llmModel')}</th>
-                          <th scope="col">{t('maintenance.debug.llmApiKeyEnv')}</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {llmModelConfig === null && (
-                          <tr>
-                            <td colSpan={4}>{t('maintenance.debug.loading')}</td>
-                          </tr>
-                        )}
-                        {llmModelConfig?.functions.map((functionConfig) => {
-                          const selectedProfile =
-                            llmModelConfig.profiles.find(
-                              (profile) => profile.id === functionConfig.profile_id,
-                            ) ?? null
-                          return (
-                            <tr key={functionConfig.function_type}>
-                              <td>
-                                <strong>{functionConfig.label}</strong>
-                                <br />
-                                <small>{functionConfig.function_type}</small>
-                              </td>
-                              <td>
-                                <select
-                                  aria-label={t('maintenance.debug.llmProfileFor', {
-                                    functionType: functionConfig.label,
-                                  })}
-                                  disabled={isDebugBusy}
-                                  onChange={(event) =>
-                                    handleLlmModelAssignment(
-                                      functionConfig.function_type,
-                                      event.target.value,
-                                    )
-                                  }
-                                  value={functionConfig.profile_id}
-                                >
-                                  <option value="mock">mock</option>
-                                  {llmModelConfig.profiles.map((profile) => (
-                                    <option key={profile.id} value={profile.id}>
-                                      {profile.id}
-                                    </option>
-                                  ))}
-                                </select>
-                              </td>
-                              <td>
-                                {selectedProfile === null
-                                  ? t('common.none')
-                                  : `${selectedProfile.provider} / ${selectedProfile.model}`}
-                              </td>
-                              <td>
-                                {selectedProfile?.api_key_env ??
-                                  selectedProfile?.endpoint_env ??
-                                  t('common.none')}
-                              </td>
-                            </tr>
-                          )
-                        })}
-                        {llmModelConfig?.functions.length === 0 && (
-                          <tr>
-                            <td colSpan={4}>{t('maintenance.debug.empty')}</td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
                   </div>
                 </section>
 

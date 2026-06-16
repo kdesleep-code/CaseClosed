@@ -66,7 +66,7 @@ def test_task_can_be_created_listed_updated_and_restored(
     assert task["done_when_text"] == "Review notes are ready to submit."
     assert task["progress_memo"] == "Initial memo."
     assert task["priority"] == "high"
-    assert task["status"] == "not_started"
+    assert task["status"] == "in_progress"
     assert task["deleted_at"] is None
 
     list_response = client.get(f"/api/v1/tasks?case_id={case['id']}")
@@ -159,7 +159,7 @@ def test_task_progress_entries_are_appended_as_timeline(client) -> None:
         "/api/v1/tasks",
         json={"case_id": case["id"], "title": "Write progress"},
     ).json()["data"]["task"]
-    assert task["status"] == "not_started"
+    assert task["status"] == "in_progress"
 
     first_response = client.post(
         f"/api/v1/tasks/{task['id']}/progress-entries",
@@ -314,6 +314,37 @@ def test_task_start_date_arrival_moves_not_started_to_in_progress(client) -> Non
     listed = {item["id"]: item for item in list_response.json()["data"]["items"]}
     assert listed[task["id"]]["status"] == "in_progress"
     assert listed[future_task["id"]]["status"] == "not_started"
+
+
+def test_task_start_date_patch_recomputes_open_status(client) -> None:
+    case = create_case(client, "Start Date Patch Case")
+    task = client.post(
+        "/api/v1/tasks",
+        json={
+            "case_id": case["id"],
+            "title": "Patch start date",
+            "start_at": "2999-01-01",
+        },
+    ).json()["data"]["task"]
+    assert task["status"] == "not_started"
+
+    clear_start_response = client.patch(
+        f"/api/v1/tasks/{task['id']}",
+        json={"base_version": task["version"], "start_at": None},
+    )
+    assert clear_start_response.status_code == 200
+    cleared_task = clear_start_response.json()["data"]["task"]
+    assert cleared_task["status"] == "in_progress"
+    assert cleared_task["start_at"] is None
+
+    future_start_response = client.patch(
+        f"/api/v1/tasks/{task['id']}",
+        json={"base_version": cleared_task["version"], "start_at": "2999-01-01"},
+    )
+    assert future_start_response.status_code == 200
+    future_task = future_start_response.json()["data"]["task"]
+    assert future_task["status"] == "not_started"
+    assert future_task["start_at"] == "2999-01-01"
 
 
 def test_task_in_not_started_case_does_not_auto_start(client) -> None:

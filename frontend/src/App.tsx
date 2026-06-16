@@ -20,10 +20,19 @@ import MailThreadView from './MailThreadView'
 import MaintenanceView from './MaintenanceView'
 import type { MaintenanceInitialData } from './MaintenanceView'
 import ProfileView from './ProfileView'
+import SettingsView from './SettingsView'
 import StorageView from './StorageView'
 import TaskDetailView from './TaskDetailView'
 import TaskNewView from './TaskNewView'
 import TaskView from './TaskView'
+import {
+  createExternalTool,
+  deleteExternalTool,
+  listExternalTools,
+  reorderExternalTools,
+  updateExternalTool,
+} from './externalToolsApi'
+import type { ExternalToolLink } from './externalToolsApi'
 import { t } from './i18n'
 import type { MessageKey } from './i18n'
 import { AppLink, TopNav } from './navigation'
@@ -70,13 +79,19 @@ const pageLinks: LinkItem[] = [
   { labelKey: 'nav.calendar', href: '/calendar' },
   { labelKey: 'nav.contacts', href: '/contacts' },
   { labelKey: 'nav.files', href: '/files' },
+  { labelKey: 'nav.externalTools', href: '/external-tools' },
+]
+
+const mainPageSlots: PageSlot[] = [
+  ...pageLinks,
+  { blank: true, key: 'main-reserved-1' },
+  { blank: true, key: 'main-reserved-2' },
+]
+
+const utilityPageSlots: PageSlot[] = [
   { labelKey: 'nav.logs', href: '/logs' },
   { labelKey: 'nav.settings', href: '/settings' },
   { labelKey: 'nav.maintenance', href: '/maintenance' },
-]
-
-const pageSlots: PageSlot[] = [
-  ...pageLinks,
   { labelKey: 'nav.profile', href: '/profile' },
   { blank: true, key: 'reserved-1' },
   { blank: true, key: 'reserved-2' },
@@ -516,7 +531,12 @@ function TopView({
           <h2 id="pages-heading">{t('top.pages.heading')}</h2>
 
           <nav aria-label={t('top.pages.navLabel')} className="hub-links">
-            {pageSlots.map((slot) => pageSlot(slot))}
+            <div className="hub-links-main">
+              {mainPageSlots.map((slot) => pageSlot(slot))}
+            </div>
+            <div className="hub-links-utility">
+              {utilityPageSlots.map((slot) => pageSlot(slot))}
+            </div>
           </nav>
         </section>
       </div>
@@ -761,6 +781,284 @@ function fileToBase64(file: File): Promise<string> {
     reader.onerror = () => reject(reader.error ?? new Error(t('app.requestFailed')))
     reader.readAsDataURL(file)
   })
+}
+
+function ExternalToolsView() {
+  const [tools, setTools] = useState<ExternalToolLink[]>([])
+  const [tagOrder, setTagOrder] = useState<string[]>([])
+  const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+  const [isFormOpen, setIsFormOpen] = useState(false)
+  const [title, setTitle] = useState('')
+  const [url, setUrl] = useState('')
+  const [tagText, setTagText] = useState('')
+  const [note, setNote] = useState('')
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [busyId, setBusyId] = useState<string | null>(null)
+
+  useEffect(() => {
+    let isMounted = true
+    listExternalTools()
+      .then((data) => {
+        if (!isMounted) return
+        setTools(data.items)
+        setTagOrder(data.tag_order)
+      })
+      .catch((requestError) => {
+        if (isMounted) {
+          setError(requestError instanceof Error ? requestError.message : t('externalTools.requestFailed'))
+        }
+      })
+      .finally(() => {
+        if (isMounted) setIsLoading(false)
+      })
+    return () => {
+      isMounted = false
+    }
+  }, [])
+
+  function parseTags(value: string) {
+    const tags: string[] = []
+    const seen = new Set<string>()
+    value
+      .split(/[,\n]/)
+      .map((tag) => tag.trim())
+      .filter(Boolean)
+      .forEach((tag) => {
+        const key = tag.toLocaleLowerCase()
+        if (!seen.has(key)) {
+          seen.add(key)
+          tags.push(tag)
+        }
+      })
+    return tags.length === 0 ? ['General'] : tags
+  }
+
+  function clearForm(close = false) {
+    setEditingId(null)
+    setTitle('')
+    setUrl('')
+    setTagText('')
+    setNote('')
+    if (close) setIsFormOpen(false)
+  }
+
+  function startEdit(tool: ExternalToolLink) {
+    setEditingId(tool.id)
+    setTitle(tool.title)
+    setUrl(tool.url)
+    setTagText(tool.tags.join(', '))
+    setNote(tool.note ?? '')
+    setIsFormOpen(true)
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setBusyId(editingId ?? 'create')
+    setError(null)
+    setNotice(null)
+    try {
+      const payload = {
+        title,
+        url,
+        tags: parseTags(tagText),
+        note: note.trim() === '' ? null : note,
+      }
+      if (editingId === null) {
+        const created = await createExternalTool(payload)
+        const next = await listExternalTools()
+        setTools(next.items)
+        setTagOrder(next.tag_order)
+        setNotice(t('externalTools.created', { title: created.title }))
+      } else {
+        const updated = await updateExternalTool(editingId, payload)
+        const next = await listExternalTools()
+        setTools(next.items)
+        setTagOrder(next.tag_order)
+        setNotice(t('externalTools.updated', { title: updated.title }))
+      }
+      clearForm(true)
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : t('externalTools.requestFailed'))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  function groupedTools() {
+    const groups = new Map<string, ExternalToolLink[]>()
+    tagOrder.forEach((tag) => groups.set(tag, []))
+    tools.forEach((tool) => {
+      const tags = tool.tags.length === 0 ? ['General'] : tool.tags
+      tags.forEach((tag) => {
+        if (!groups.has(tag)) groups.set(tag, [])
+        groups.get(tag)?.push(tool)
+      })
+    })
+    return [...groups.entries()].filter(([, items]) => items.length > 0)
+  }
+
+  async function moveTag(tag: string, direction: -1 | 1) {
+    const index = tagOrder.indexOf(tag)
+    const nextIndex = index + direction
+    if (index < 0 || nextIndex < 0 || nextIndex >= tagOrder.length) return
+    const nextOrder = [...tagOrder]
+    const [item] = nextOrder.splice(index, 1)
+    nextOrder.splice(nextIndex, 0, item)
+    setTagOrder(nextOrder)
+    const next = await reorderExternalTools({ tag_order: nextOrder })
+    setTools(next.items)
+    setTagOrder(next.tag_order)
+  }
+
+  async function moveTool(toolId: string, direction: -1 | 1) {
+    const orderedIds = tools
+      .slice()
+      .sort((left, right) => left.sort_order - right.sort_order || left.title.localeCompare(right.title))
+      .map((tool) => tool.id)
+    const index = orderedIds.indexOf(toolId)
+    const nextIndex = index + direction
+    if (index < 0 || nextIndex < 0 || nextIndex >= orderedIds.length) return
+    const [item] = orderedIds.splice(index, 1)
+    orderedIds.splice(nextIndex, 0, item)
+    const next = await reorderExternalTools({ tool_ids: orderedIds })
+    setTools(next.items)
+    setTagOrder(next.tag_order)
+  }
+
+  async function handleDelete(tool: ExternalToolLink) {
+    if (!window.confirm(t('externalTools.deleteConfirm', { title: tool.title }))) return
+    setBusyId(`delete-${tool.id}`)
+    setError(null)
+    try {
+      await deleteExternalTool(tool.id)
+      setTools((current) => current.filter((item) => item.id !== tool.id))
+      setNotice(t('externalTools.deleted', { title: tool.title }))
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : t('externalTools.requestFailed'))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  return (
+    <main className="app-shell">
+      <div className="maintenance-shell external-tools-shell">
+        <header className="maintenance-header">
+          <div>
+            <p>{t('app.name')}</p>
+            <h1>{t('externalTools.heading')}</h1>
+          </div>
+          <TopNav
+            ariaLabelKey="externalTools.navigation"
+            items={[{ href: '/', labelKey: 'top.heading' }]}
+          />
+        </header>
+
+        {error !== null && <p className="maintenance-error" role="alert">{error}</p>}
+        {notice !== null && <div className="mail-feedback"><p>{notice}</p></div>}
+
+        <section className="maintenance-panel-surface external-tools-panel">
+          <div className="maintenance-panel maintenance-section external-tools-main">
+            <div className="section-heading">
+              <h2>{t('externalTools.heading')}</h2>
+              <div className="external-tools-actions">
+                <button
+                  onClick={() => {
+                    clearForm()
+                    setIsFormOpen(true)
+                  }}
+                  type="button"
+                >
+                  {t('common.add')}
+                </button>
+                <AppLink href="/case-tool-icons">{t('externalTools.openIconSettings')}</AppLink>
+                <button
+                  aria-pressed={isSettingsOpen}
+                  onClick={() => setIsSettingsOpen((current) => !current)}
+                  type="button"
+                >
+                  {t('externalTools.settings')}
+                </button>
+              </div>
+            </div>
+
+            {isFormOpen && (
+              <form className="external-tools-form" onSubmit={handleSubmit}>
+                <label>
+                  <span>{t('externalTools.title')}</span>
+                  <input onChange={(event) => setTitle(event.target.value)} required value={title} />
+                </label>
+                <label>
+                  <span>{t('externalTools.url')}</span>
+                  <input onChange={(event) => setUrl(event.target.value)} required type="url" value={url} />
+                </label>
+                <label>
+                  <span>{t('externalTools.tags')}</span>
+                  <input onChange={(event) => setTagText(event.target.value)} placeholder={t('externalTools.tagsPlaceholder')} value={tagText} />
+                </label>
+                <label>
+                  <span>{t('externalTools.note')}</span>
+                  <input onChange={(event) => setNote(event.target.value)} value={note} />
+                </label>
+                <div className="external-tools-form-actions">
+                  <button onClick={() => clearForm(true)} type="button">{t('common.cancel')}</button>
+                  <button className={`button-loading-dot${busyId === (editingId ?? 'create') ? ' is-loading' : ''}`} disabled={busyId !== null} type="submit">
+                    {editingId === null ? t('externalTools.register') : t('common.update')}
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {isLoading ? (
+              <p>{t('common.loading')}</p>
+            ) : groupedTools().length === 0 ? (
+              <p className="mail-empty">{t('externalTools.empty')}</p>
+            ) : (
+              <div className="external-tool-groups">
+                {groupedTools().map(([tag, items]) => (
+                  <section className="external-tool-group" key={tag}>
+                    <div className="external-tool-group-heading">
+                      <h3>{tag}</h3>
+                      {isSettingsOpen && (
+                        <div className="external-tool-order-actions">
+                          <button onClick={() => { void moveTag(tag, -1) }} type="button">{t('common.up')}</button>
+                          <button onClick={() => { void moveTag(tag, 1) }} type="button">{t('common.down')}</button>
+                        </div>
+                      )}
+                    </div>
+                    <div className="external-tool-icon-grid">
+                      {items.map((tool) => (
+                        <article className="external-tool-card" key={`${tag}-${tool.id}`}>
+                          <a href={tool.url} rel="noreferrer" target="_blank">
+                            <span className="external-tool-icon">
+                              {tool.icon_url === null ? tool.icon_label : <img alt="" src={tool.icon_url} />}
+                            </span>
+                            <strong>{tool.title}</strong>
+                          </a>
+                          {tool.note !== null && <p>{tool.note}</p>}
+                          {isSettingsOpen && (
+                            <div className="external-tool-card-actions">
+                              <button onClick={() => startEdit(tool)} type="button">{t('common.edit')}</button>
+                              <button onClick={() => { void moveTool(tool.id, -1) }} type="button">{t('common.left')}</button>
+                              <button onClick={() => { void moveTool(tool.id, 1) }} type="button">{t('common.right')}</button>
+                              <button disabled={busyId === `delete-${tool.id}`} onClick={() => { void handleDelete(tool) }} type="button">{t('common.delete')}</button>
+                            </div>
+                          )}
+                        </article>
+                      ))}
+                    </div>
+                  </section>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
+      </div>
+    </main>
+  )
 }
 
 function FileIconsView() {
@@ -1115,6 +1413,24 @@ function App() {
   }, [])
 
   useEffect(() => {
+    function syncDocumentTitle() {
+      const heading = document.querySelector('h1')?.textContent?.trim()
+      document.title = heading === undefined || heading === '' ? t('app.name') : heading
+    }
+
+    syncDocumentTitle()
+    const observer = new MutationObserver(syncDocumentTitle)
+    observer.observe(document.body, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+    })
+    return () => {
+      observer.disconnect()
+    }
+  }, [path, session, isSessionChecked])
+
+  useEffect(() => {
     function handleNavigationRequest(event: Event) {
       const navigationEvent = event as NavigationRequestEvent
       const { path: nextPath, replace } = navigationEvent.detail
@@ -1234,6 +1550,24 @@ function App() {
           {pendingContactNoticeElement}
           {navigationError !== null && <p className="route-error">{navigationError}</p>}
           <LogView />
+        </>
+      )
+    }
+    if (path === '/settings') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <SettingsView />
+        </>
+      )
+    }
+    if (path === '/external-tools') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <ExternalToolsView />
         </>
       )
     }

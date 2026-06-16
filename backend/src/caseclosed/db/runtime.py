@@ -405,6 +405,25 @@ def ensure_runtime_schema() -> None:
                     """
                 )
             )
+    if "external_tool_links" not in table_names:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE external_tool_links (
+                        id TEXT PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        url TEXT NOT NULL,
+                        tags_json TEXT NOT NULL,
+                        note TEXT,
+                        sort_order INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+            )
     if "calendar_events" not in inspect(engine).get_table_names():
         with engine.begin() as connection:
             connection.execute(

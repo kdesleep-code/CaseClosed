@@ -13,8 +13,12 @@ from sqlalchemy.orm import Session as DatabaseSession
 
 from caseclosed.db.models import AppSetting
 from caseclosed.db.models import ExternalOperation
+from caseclosed.db.models import GmailMessage
 from caseclosed.db.models import Job
 from caseclosed.db.models import LlmRun
+from caseclosed.db.models import MailAutoState
+from caseclosed.db.models import MailSendRequest
+from caseclosed.db.models import StorageObject
 from caseclosed.db.models import StorageOperationHistory
 from caseclosed.db.models import WriteRequest
 from caseclosed.db.runtime import get_session
@@ -35,6 +39,7 @@ def maintenance_status(
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
     llm_cost = llm_cost_summary(session)
+    dashboard = maintenance_dashboard_summary(session, llm_cost)
     return {
         "ok": True,
         "data": {
@@ -58,6 +63,7 @@ def maintenance_status(
             "llm_cost_month_used": llm_cost["month_used"],
             "llm_cost_month_remaining": llm_cost["month_remaining"],
             "backup_status": "not_configured",
+            **dashboard,
         },
     }
 
@@ -181,6 +187,72 @@ def llm_cost_summary(session: DatabaseSession) -> dict[str, object]:
         "month_used": round(month_used, 6),
         "monthly_budget": monthly_budget,
         "month_remaining": None if month_remaining is None else round(month_remaining, 6),
+    }
+
+
+def maintenance_dashboard_summary(
+    session: DatabaseSession,
+    llm_cost: dict[str, object],
+) -> dict[str, object]:
+    now = jst_now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    seven_days_ago = today_start - timedelta(days=7)
+    thirty_days_ago = today_start - timedelta(days=30)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    elapsed_days = max(1.0, (now - month_start).total_seconds() / 86400)
+    month_used = float(llm_cost.get("month_used") or 0.0)
+    month_projected = month_used / elapsed_days * 31
+
+    importance_counts = {
+        str(row[0] or "unclassified"): int(row[1] or 0)
+        for row in session.execute(
+            select(MailAutoState.effective_importance, func.count())
+            .group_by(MailAutoState.effective_importance)
+        ).all()
+    }
+    received_30d = count_rows(
+        session,
+        GmailMessage,
+        GmailMessage.received_at >= jst_iso(thirty_days_ago),
+    )
+    return {
+        "storage_active_bytes": int(
+            session.scalar(
+                select(func.coalesce(func.sum(StorageObject.byte_size), 0)).where(
+                    StorageObject.status == "active",
+                    StorageObject.scope == "managed",
+                )
+            )
+            or 0
+        ),
+        "storage_active_objects": count_rows(
+            session,
+            StorageObject,
+            (StorageObject.status == "active") & (StorageObject.scope == "managed"),
+        ),
+        "mail_total": count_rows(session, GmailMessage, GmailMessage.id.is_not(None)),
+        "mail_received_7d": count_rows(
+            session,
+            GmailMessage,
+            GmailMessage.received_at >= jst_iso(seven_days_ago),
+        ),
+        "mail_sent_7d": count_rows(
+            session,
+            MailSendRequest,
+            (MailSendRequest.updated_at >= jst_iso(seven_days_ago))
+            & (
+                (MailSendRequest.status == "sent")
+                | (MailSendRequest.status == "sent_mock")
+                | MailSendRequest.sent_message_id.is_not(None)
+            ),
+        ),
+        "mail_daily_average_30d": round(received_30d / 30, 2),
+        "mail_importance_high": importance_counts.get("high", 0),
+        "mail_importance_middle": importance_counts.get("middle", 0),
+        "mail_importance_low": importance_counts.get("low", 0),
+        "mail_importance_sent": importance_counts.get("sent", 0),
+        "mail_importance_unclassified": importance_counts.get("unclassified", 0),
+        "llm_cost_month_projected": round(month_projected, 6),
     }
 
 

@@ -572,8 +572,7 @@ def create_next_recurring_task(
         updated_at=now,
         version=1,
     )
-    if task_start_has_arrived(session, next_task):
-        next_task.status = "in_progress"
+    sync_open_task_status_from_start(session, next_task)
     ensure_task_storage_directory(session, next_task, now=now)
     session.add(next_task)
     return next_task
@@ -989,12 +988,21 @@ def case_has_opened(case: Case | None) -> bool:
     return case.open_when_date[:10] <= jst_now().date().isoformat()
 
 
-def task_start_has_arrived(session: DatabaseSession, task: Task) -> bool:
+def task_is_waiting_to_start(session: DatabaseSession, task: Task) -> bool:
     if not case_has_opened(session.get(Case, task.case_id)):
-        return False
+        return True
     if task.start_at is None:
         return False
-    return task.start_at[:10] <= jst_now().date().isoformat()
+    return task.start_at[:10] > jst_now().date().isoformat()
+
+
+def sync_open_task_status_from_start(session: DatabaseSession, task: Task) -> None:
+    if task.status not in OPEN_TASK_STATUSES:
+        return
+    task.status = "not_started" if task_is_waiting_to_start(session, task) else "in_progress"
+    task.completed_at = None
+    task.canceled_at = None
+    task.canceled_reason = None
 
 
 def activate_started_tasks(session: DatabaseSession) -> None:
@@ -1002,11 +1010,10 @@ def activate_started_tasks(session: DatabaseSession) -> None:
         select(Task)
         .where(Task.deleted_at.is_(None))
         .where(Task.status == "not_started")
-        .where(Task.start_at.is_not(None))
     ).all()
     now: str | None = None
     for task in tasks:
-        if not task_start_has_arrived(session, task):
+        if task_is_waiting_to_start(session, task):
             continue
         if now is None:
             now = jst_iso()
@@ -1185,8 +1192,7 @@ def create_task_from_mail(
         version=1,
     )
     fill_missing_recurrence_dates(task)
-    if task_start_has_arrived(session, task):
-        task.status = "in_progress"
+    sync_open_task_status_from_start(session, task)
     ensure_task_storage_directory(session, task, now=now)
     case.updated_at = now
     case.version += 1
@@ -1337,8 +1343,7 @@ def create_task(
         version=1,
     )
     fill_missing_recurrence_dates(task)
-    if task_start_has_arrived(session, task):
-        task.status = "in_progress"
+    sync_open_task_status_from_start(session, task)
     ensure_task_storage_directory(session, task, now=now)
     case.updated_at = now
     case.version += 1
@@ -1558,13 +1563,13 @@ def update_task(
         task.canceled_reason = None
     if payload.priority is not None:
         task.priority = payload.priority
+    should_sync_status_from_start = (
+        "start_at" in payload.model_fields_set
+        or "case_id" in payload.model_fields_set
+        or payload.status is not None
+    )
     if "start_at" in payload.model_fields_set:
         task.start_at = normalize_optional_text(payload.start_at)
-        if task.status == "not_started" and task_start_has_arrived(session, task):
-            task.status = "in_progress"
-            task.completed_at = None
-            task.canceled_at = None
-            task.canceled_reason = None
     if "due_at" in payload.model_fields_set:
         task.due_at = normalize_optional_text(payload.due_at)
     if "estimate_minutes" in payload.model_fields_set:
@@ -1586,11 +1591,8 @@ def update_task(
             task.recurrence_series_id = None
             task.recurrence_sequence = 0
     fill_missing_recurrence_dates(task)
-    if task.status == "not_started" and task_start_has_arrived(session, task):
-        task.status = "in_progress"
-        task.completed_at = None
-        task.canceled_at = None
-        task.canceled_reason = None
+    if should_sync_status_from_start:
+        sync_open_task_status_from_start(session, task)
     if payload.scheduled_minutes is not None:
         task.scheduled_minutes = payload.scheduled_minutes
     if payload.worked_minutes is not None:

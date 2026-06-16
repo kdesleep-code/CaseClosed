@@ -18,6 +18,7 @@ from caseclosed.contacts import router as contacts_router
 from caseclosed.db.runtime import bootstrap_database
 from caseclosed.db.runtime import rebuild_runtime_database
 from caseclosed.external_operations import router as external_operations_router
+from caseclosed.external_tools import router as external_tools_router
 from caseclosed.google_integration import router as google_integration_router
 from caseclosed.jobs import router as jobs_router
 from caseclosed.logs import router as logs_router
@@ -67,6 +68,7 @@ app.include_router(cases_router)
 app.include_router(contacts_router)
 app.include_router(jobs_router)
 app.include_router(external_operations_router)
+app.include_router(external_tools_router)
 app.include_router(google_integration_router)
 app.include_router(maintenance_router)
 app.include_router(logs_router)

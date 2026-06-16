@@ -11,6 +11,23 @@ from conftest import insert_phase_2_external_operation
 from conftest import insert_phase_2_job
 
 
+def expected_empty_dashboard() -> dict[str, object]:
+    return {
+        "llm_cost_month_projected": 0.0,
+        "storage_active_bytes": 0,
+        "storage_active_objects": 0,
+        "mail_total": 0,
+        "mail_received_7d": 0,
+        "mail_sent_7d": 0,
+        "mail_daily_average_30d": 0.0,
+        "mail_importance_high": 0,
+        "mail_importance_middle": 0,
+        "mail_importance_low": 0,
+        "mail_importance_sent": 0,
+        "mail_importance_unclassified": 0,
+    }
+
+
 def test_maintenance_status_reports_phase_1_defaults(client) -> None:
     response = client.get("/api/v1/maintenance/status")
 
@@ -26,6 +43,7 @@ def test_maintenance_status_reports_phase_1_defaults(client) -> None:
             "llm_cost_month_used": 0.0,
             "llm_cost_month_remaining": None,
             "backup_status": "not_configured",
+            **expected_empty_dashboard(),
         },
     }
 
@@ -125,6 +143,7 @@ def test_maintenance_status_counts_phase_2_work(
         "llm_cost_month_used": 0.0,
         "llm_cost_month_remaining": None,
         "backup_status": "not_configured",
+        **expected_empty_dashboard(),
     }
 
 

@@ -6,6 +6,18 @@ export type MaintenanceStatus = {
   external_unknown_count: number
   llm_cost_month_used?: number
   llm_cost_month_remaining?: number | null
+  llm_cost_month_projected?: number
+  storage_active_bytes?: number
+  storage_active_objects?: number
+  mail_total?: number
+  mail_received_7d?: number
+  mail_sent_7d?: number
+  mail_daily_average_30d?: number
+  mail_importance_high?: number
+  mail_importance_middle?: number
+  mail_importance_low?: number
+  mail_importance_sent?: number
+  mail_importance_unclassified?: number
   backup_status: string
 }
 

@@ -308,6 +308,20 @@ class CaseToolIconSetting(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
 
+class ExternalToolLink(Base):
+    __tablename__ = "external_tool_links"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    tags_json: Mapped[str] = mapped_column(Text, nullable=False)
+    note: Mapped[str | None] = mapped_column(Text)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
 class Task(Base):
     __tablename__ = "tasks"
 
