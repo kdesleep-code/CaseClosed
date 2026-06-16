@@ -68,6 +68,10 @@ PHASE_6_TABLES = {
 }
 
 PHASE_9_TABLES = {
+    "academic_calendar_days",
+    "academic_periods",
+    "academic_semesters",
+    "academic_years",
     "calendar_event_links",
     "calendar_events",
 }

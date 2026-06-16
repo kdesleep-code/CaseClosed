@@ -109,7 +109,11 @@ export default function SuggestInput({
             type="button"
           >
             <span>{option?.badgeLabel ?? token}</span>
-            <strong aria-hidden="true">x</strong>
+            <strong aria-hidden="true">
+              <svg focusable="false" viewBox="0 0 12 12">
+                <path d="M3 3l6 6M9 3L3 9" />
+              </svg>
+            </strong>
           </button>
         )
       })}

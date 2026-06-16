@@ -80,8 +80,9 @@ function topNavRank(href: string) {
   if (pathname === '/calendar' || pathname === '/calendar/new') return 50
   if (pathname === '/files' || pathname === '/file-icons') return 60
   if (pathname === '/profile') return 70
-  if (pathname === '/maintenance') return 80
-  return 90
+  if (pathname === '/logs') return 80
+  if (pathname === '/maintenance') return 90
+  return 100
 }
 
 export function TopNav({

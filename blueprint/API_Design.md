@@ -36,7 +36,7 @@ Version: 0.3
 5. 外部副作用は `external_operations` 経由で実行する。
 6. 単純な属性編集は `PATCH` を使う。
 7. 業務上意味を持つ操作は `POST action` を使う。
-8. 物理削除は通常APIからは提供しない。
+8. 物理削除は通常APIからは提供しない。ただし、誤作成Case削除のように明示確認付きの例外操作は許可する。
 9. 軽量な操作は `optimistic_state` を返してUIに即時反映させる。
 10. 競合時はユーザー値を守る。
 11. LLM/System由来のAPI・Jobは `user_*` を上書きしてはならない。
@@ -143,6 +143,20 @@ Accept: application/json
 ```
 
 Timestamp fields use ISO-8601 JST with the `+09:00` offset.
+
+Canonical datetime representation:
+
+```text
+YYYY-MM-DDTHH:mm:ss+09:00
+```
+
+Calendar command APIs SHOULD send `start` / `end` in this canonical form. For
+compatibility with browser `datetime-local` controls, the API MAY accept
+offset-less `YYYY-MM-DDTHH:mm` or `YYYY-MM-DDTHH:mm:ss` and interpret it as the
+request `time_zone` local time. When an offset is present, the API treats the
+value as an absolute instant and normalizes it to the requested `time_zone`
+before sending it to Google Calendar. Date-only all-day values remain
+`YYYY-MM-DD`.
 
 ファイルアップロードのみ `multipart/form-data` を許可する。
 
@@ -610,6 +624,28 @@ POST /api/v1/cases/{case_id}/archive
 ```http
 POST /api/v1/cases/{case_id}/unarchive
 ```
+
+## 6.8.1 Caseを削除する
+
+```http
+DELETE /api/v1/cases/{case_id}
+```
+
+用途:
+
+- 誤って作成したCase
+- 案件として扱う必要がなくなった未完了Case
+- Archiveではなく通常画面から完全に消したいノイズCase
+
+仕様:
+
+- 通常の完了処理には使わない。完了したCaseはClosed後にArchiveする。
+- System Caseは削除不可。
+- UI導線は目立たせず、確認を必須にする。
+- 関連Taskは `deleted_at` による論理削除にする。
+- 関連メールリンク、Stakeholder、Tool Link、File Linkは解除または削除済み扱いにする。
+- Case専用Storage Directoryは通常ディレクトリへ戻すなど、保存済みファイルを失わない扱いにする。
+- 監査ログそのものは削除しない。
 
 ## 6.9 Case関連メール一覧
 
@@ -1649,6 +1685,23 @@ case_id=...
 
 - Google Calendarから直接取得するか、同期済みキャッシュから返すかは実装時に選択する。
 - 予定の正本はGoogle Calendar。
+
+## 11.1.1 Calendar時刻表現
+
+Calendar予定作成・変更系APIの `start` / `end` は、原則として以下の
+offset付きISO-8601文字列を用いる。
+
+```text
+2026-06-10T10:00:00+09:00
+```
+
+互換入力として、ブラウザの `datetime-local` 由来の
+`2026-06-10T10:00` / `2026-06-10T10:00:00` も受け付ける。この場合は
+`time_zone` のローカル時刻として扱う。
+
+Google Calendarへ送る時は、`dateTime` をoffset付きISO文字列へ正規化し、
+同時に `timeZone` を設定する。これによりアプリ内部・APIテスト・外部API
+送信の表現を揃える。
 
 ## 11.2 作業ブロック候補取得
 
@@ -2747,7 +2800,7 @@ API実装時に迷った場合は、以下を優先する。
 8. Address単独Skipは存在させない。
 9. Caseは関連メール集合を持つ。
 10. Taskは物理削除せず論理削除する。
-11. Caseは削除しない。
+11. Caseは原則削除しない。完了CaseはArchiveし、誤作成などの例外のみ明示Deleteを許可する。
 12. Caseの完了はClosed、Taskの完了はCompletedと呼ぶ。
 13. PinnedはGmailスターと無関係に扱う。
 14. Lowは自動要約・LLM自動Case判定しない。明示Auto Assign Ruleはユーザー設定として別扱い。

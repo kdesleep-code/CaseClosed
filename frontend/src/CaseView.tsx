@@ -285,6 +285,18 @@ function CaseRow({
         <div className="case-row-title">
           <h2>{item.name}</h2>
         </div>
+        <div aria-label={t('cases.tags')} className="case-row-tags">
+          {item.tags.length === 0 ? (
+            <span>{t('cases.tags.empty')}</span>
+          ) : (
+            <>
+              {tagDisplay.visible.map((tag) => <span key={tag}>{tag}</span>)}
+              {tagDisplay.hiddenCount > 0 && (
+                <span className="case-row-tags-more">{t('cases.tags.more', { count: String(tagDisplay.hiddenCount) })}</span>
+              )}
+            </>
+          )}
+        </div>
       </div>
       <dl className="case-row-meta">
         <div>
@@ -298,18 +310,6 @@ function CaseRow({
           <small>{formatDateTime(item.next_calendar_event?.starts_at ?? null)}</small>
         </div>
       </dl>
-      <div aria-label={t('cases.tags')} className="case-row-tags">
-        {item.tags.length === 0 ? (
-          <span>{t('cases.tags.empty')}</span>
-        ) : (
-          <>
-            {tagDisplay.visible.map((tag) => <span key={tag}>{tag}</span>)}
-            {tagDisplay.hiddenCount > 0 && (
-              <span className="case-row-tags-more">{t('cases.tags.more', { count: String(tagDisplay.hiddenCount) })}</span>
-            )}
-          </>
-        )}
-      </div>
     </AppLink>
   )
 }

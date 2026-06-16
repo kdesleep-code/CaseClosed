@@ -127,6 +127,7 @@ class CalendarEvent(Base):
     all_day: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     time_zone: Mapped[str | None] = mapped_column(Text)
     recurring_event_id: Mapped[str | None] = mapped_column(Text)
+    academic_series_id: Mapped[str | None] = mapped_column(Text)
     attendance_requirement: Mapped[str] = mapped_column(
         Text,
         nullable=False,
@@ -162,6 +163,92 @@ class CalendarEventLink(Base):
     linked_type: Mapped[str] = mapped_column(Text, nullable=False)
     linked_id: Mapped[str] = mapped_column(Text, nullable=False)
     role: Mapped[str] = mapped_column(Text, nullable=False, default="related")
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class AcademicYear(Base):
+    __tablename__ = "academic_years"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    year_label: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    starts_on: Mapped[str] = mapped_column(Text, nullable=False)
+    ends_on: Mapped[str] = mapped_column(Text, nullable=False)
+    note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class AcademicSemester(Base):
+    __tablename__ = "academic_semesters"
+    __table_args__ = (
+        UniqueConstraint(
+            "academic_year_id",
+            "label",
+            name="uq_academic_semesters_year_label",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    academic_year_id: Mapped[str] = mapped_column(
+        ForeignKey("academic_years.id"),
+        nullable=False,
+    )
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    starts_on: Mapped[str] = mapped_column(Text, nullable=False)
+    ends_on: Mapped[str] = mapped_column(Text, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class AcademicPeriod(Base):
+    __tablename__ = "academic_periods"
+    __table_args__ = (
+        UniqueConstraint(
+            "period_no",
+            name="uq_academic_periods_period_no",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    period_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    starts_at: Mapped[str] = mapped_column(Text, nullable=False)
+    ends_at: Mapped[str] = mapped_column(Text, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class AcademicCalendarDay(Base):
+    __tablename__ = "academic_calendar_days"
+    __table_args__ = (
+        UniqueConstraint(
+            "academic_year_id",
+            "date",
+            name="uq_academic_calendar_days_year_date",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    academic_year_id: Mapped[str] = mapped_column(
+        ForeignKey("academic_years.id"),
+        nullable=False,
+    )
+    date: Mapped[str] = mapped_column(Text, nullable=False)
+    day_type: Mapped[str] = mapped_column(Text, nullable=False, default="normal")
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    is_teaching_day: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    effective_weekday: Mapped[int | None] = mapped_column(Integer)
+    source: Mapped[str] = mapped_column(Text, nullable=False, default="manual")
+    note: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)

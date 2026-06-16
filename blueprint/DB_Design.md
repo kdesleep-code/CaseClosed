@@ -104,10 +104,12 @@ effective_importance =
 - rules
 - generated documents
 
-Caseは削除しない。  
-Caseは `closed_at` と `archived_at` で状態を表現する。
+Caseは原則として削除しない。  
+Caseの通常完了は `closed_at`、通常一覧からの除外は `archived_at` で表現する。
 
-物理削除は、保守・運用画面から明示的に実行する場合のみ許可する。ただし、audit/event等から参照されるデータは原則として物理削除不可とする。
+例外として、誤作成など未完了のまま通常運用から完全に消したいCaseは削除できる。この削除は通常の完了処理ではなく、目立たない明示操作として扱う。
+
+物理削除は、保守・運用画面または誤作成Case削除のような明示操作に限る。ただし、audit/event等から参照されるデータは原則として物理削除不可とする。
 
 ---
 
@@ -137,6 +139,16 @@ Integer     INTEGER
 Float       REAL
 Hash        TEXT
 ```
+
+Datetimeの標準表現は以下とする。
+
+```text
+YYYY-MM-DDTHH:mm:ss+09:00
+```
+
+Calendar APIの入力でもこの表現を標準とする。ブラウザUIの都合で
+offsetなしの `datetime-local` 値を受け取る場合は、API境界でJSTまたは
+指定 `time_zone` に正規化してから保存・外部送信する。
 
 ## 2.3 共通カラム
 
@@ -349,7 +361,7 @@ external_operation_status:
 
 案件本体を表す。
 
-Caseは削除しない。完了は `closed_at`、通常一覧からの除外は `archived_at` で表現する。
+Caseは原則として削除しない。完了は `closed_at`、通常一覧からの除外は `archived_at` で表現する。誤作成などの例外ではCase削除を許可する。
 
 ### 主なカラム
 
@@ -390,6 +402,8 @@ Inbox / なんでも箱
 - `is_system_case = 1` のCaseは削除不可。
 - `system_case_key = inbox` はClosed不可・Archive不可。
 - `system_case_key = system_maintenance` は原則Archive不可。ただし将来変更可。
+- Closed済みCaseは削除ではなくArchiveを通常導線とする。
+- 誤作成Case削除では、関連Taskを論理削除し、関連リンク・専用Storage Directoryを参照破綻しない形で整理する。
 
 ### Case期限について
 
@@ -2407,7 +2421,7 @@ handover_log_generation
 
 # 20. 実装時に特に守るべきDBルール
 
-1. Caseは削除しない。
+1. Caseは原則削除しない。完了CaseはArchiveし、誤作成などの例外のみ明示Deleteを許可する。
 2. Caseの完了は `closed_at` で表現する。
 3. Taskの完了は `completed`、Taskの削除は `deleted_at` で表現する。
 4. Taskは物理削除しない。

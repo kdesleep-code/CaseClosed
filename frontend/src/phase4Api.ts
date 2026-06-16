@@ -361,6 +361,7 @@ export type GoogleGmailStatus = {
   token_expires_at: string | null
   mail_loading_enabled: boolean
   auto_import: GoogleGmailAutoImportSettings
+  calendar_auto_sync: GoogleCalendarAutoSyncSettings
 }
 
 export type GoogleGmailAutoImportSettings = {
@@ -377,6 +378,24 @@ export type GoogleGmailAutoImportSettings = {
   last_stopped_received_at: string | null
   last_reached_loaded_message: boolean
   unloaded_dates: string[]
+  updated_at: string | null
+}
+
+export type GoogleCalendarAutoSyncSettings = {
+  enabled: boolean
+  interval_minutes: number
+  calendar_ids: string[]
+  month_count: number
+  last_run_at: string | null
+  last_success_at: string | null
+  last_error: string | null
+  last_imported_count: number
+  last_updated_count: number
+  last_cancelled_count: number
+  last_missing_count: number
+  last_time_min: string | null
+  last_time_max: string | null
+  last_stop_reason: string | null
   updated_at: string | null
 }
 
@@ -437,6 +456,8 @@ export type GoogleCalendarEvent = {
   created: string | null
   updated: string | null
   sync_status?: string | null
+  recurring_event_id?: string | null
+  academic_series_id?: string | null
   attendance_requirement?: string | null
   tags_json?: string | null
   metadata_json?: string | null
@@ -512,6 +533,18 @@ export type GoogleCalendarEventCreatePayload = {
   time_zone?: string
   linked_mail_message_id?: string | null
   linked_case_id?: string | null
+  academic_series_id?: string | null
+}
+
+export function toJstIsoDateTime(value: string): string {
+  const trimmed = value.trim()
+  if (/[zZ]|[+-]\d{2}:?\d{2}$/.test(trimmed)) {
+    return trimmed.endsWith('Z') ? `${trimmed.slice(0, -1)}+00:00` : trimmed
+  }
+  const match = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/.exec(trimmed)
+  if (match === null) return trimmed
+  const [, date, hour, minute, second] = match
+  return `${date}T${hour}:${minute}:${second ?? '00'}+09:00`
 }
 
 export type CalendarEventFromMailPrefill = {
@@ -908,6 +941,19 @@ export function updateGoogleGmailAutoImportSettings(payload: {
   })
 }
 
+export function updateGoogleCalendarAutoSyncSettings(payload: {
+  enabled: boolean
+  interval_minutes: number
+  calendar_ids?: string[]
+  month_count?: number
+}): Promise<GoogleCalendarAutoSyncSettings> {
+  return request('/api/v1/google/gmail/calendar/auto-sync-settings', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
 export function listGoogleCalendarEvents(params: {
   calendar_id?: string
   time_min?: string
@@ -981,6 +1027,16 @@ export function updateCalendarDbEvent(
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
+  })
+}
+
+export function deleteCalendarDbEvent(
+  eventId: string,
+  scope: 'event' | 'series' = 'event',
+): Promise<{ deleted: boolean; deleted_count: number; scope: string; event: GoogleCalendarEvent }> {
+  const query = new URLSearchParams({ scope })
+  return request(`/api/v1/google/gmail/calendar/db-events/${encodeURIComponent(eventId)}?${query}`, {
+    method: 'DELETE',
   })
 }
 

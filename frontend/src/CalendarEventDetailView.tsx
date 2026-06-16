@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { AppLink, TopNav } from './navigation'
+import { AppLink, TopNav, navigateTo } from './navigation'
 import {
   createCalendarDbEventLink,
+  deleteCalendarDbEvent,
   deleteCalendarDbEventLink,
   getCalendarDbEvent,
   listGoogleCalendars,
   moveCalendarDbEvent,
+  toJstIsoDateTime,
   updateCalendarDbEvent,
 } from './phase4Api'
 import { listMailPage } from './phase4Api'
@@ -25,6 +27,8 @@ import gmailIconUrl from './assets/gmail-icon-2020.svg'
 import paperclipDiagonalUrl from './assets/paperclip-diagonal.svg'
 import settingsGearIconUrl from './assets/settings-gear.svg'
 
+type CalendarDeleteScope = 'event' | 'series'
+
 function eventDateTimeValue(event: GoogleCalendarEvent, key: 'start' | 'end') {
   const value = event[key]
   if (typeof value.dateTime === 'string') return value.dateTime
@@ -35,6 +39,11 @@ function eventDateTimeValue(event: GoogleCalendarEvent, key: 'start' | 'end') {
 function eventDateTimeInputValue(event: GoogleCalendarEvent, key: 'start' | 'end') {
   const value = eventDateTimeValue(event, key)
   return value.length > 16 ? value.slice(0, 16) : value
+}
+
+function calendarHrefForEvent(event: GoogleCalendarEvent | null) {
+  const date = event === null ? '' : eventDateTimeValue(event, 'start').slice(0, 10)
+  return /^\d{4}-\d{2}-\d{2}$/.test(date) ? `/calendar?date=${encodeURIComponent(date)}` : '/calendar'
 }
 
 function formatEventTimeRange(event: GoogleCalendarEvent) {
@@ -197,6 +206,9 @@ export default function CalendarEventDetailView({
   const [isSavingLink, setIsSavingLink] = useState(false)
   const [isSavingEvent, setIsSavingEvent] = useState(false)
   const [isSavingTime, setIsSavingTime] = useState(false)
+  const [isDeletingEvent, setIsDeletingEvent] = useState(false)
+  const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false)
+  const [deleteScope, setDeleteScope] = useState<CalendarDeleteScope>('event')
   const [isSearchingMails, setIsSearchingMails] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [linkError, setLinkError] = useState<string | null>(null)
@@ -291,7 +303,21 @@ export default function CalendarEventDetailView({
   }, [mailPageSize, mailSearchQuery, mailSearchRefreshTick, mode])
 
   const event = detail?.event ?? null
+  const calendarHref = calendarHrefForEvent(event)
   const eventLocationHref = locationHref(event?.location)
+  const canDeleteSeries =
+    (event?.recurring_event_id !== undefined &&
+      event.recurring_event_id !== null &&
+      event.recurring_event_id.trim() !== '') ||
+    (event?.academic_series_id !== undefined &&
+      event.academic_series_id !== null &&
+      event.academic_series_id.trim() !== '')
+  const deleteSeriesKind =
+    event?.academic_series_id !== undefined &&
+    event.academic_series_id !== null &&
+    event.academic_series_id.trim() !== ''
+      ? 'academic'
+      : 'recurring'
   const caseLinks = detail?.links.filter((link) => link.linked_type === 'case') ?? []
   const taskLinks = detail?.links.filter((link) => link.linked_type === 'task') ?? []
   const mailLinks =
@@ -335,6 +361,12 @@ export default function CalendarEventDetailView({
     setEndDraft(eventDateTimeInputValue(event, 'end'))
   }, [event?.id, mode])
 
+  useEffect(() => {
+    if (!canDeleteSeries) {
+      setDeleteScope('event')
+    }
+  }, [canDeleteSeries])
+
   async function saveEventBasics() {
     if (summaryDraft.trim() === '') {
       setLinkError(t('calendar.event.titleRequired'))
@@ -368,8 +400,8 @@ export default function CalendarEventDetailView({
     setLinkError(null)
     try {
       await moveCalendarDbEvent(eventId, {
-        start: startDraft,
-        end: endDraft,
+        start: toJstIsoDateTime(startDraft),
+        end: toJstIsoDateTime(endDraft),
         time_zone: 'Asia/Tokyo',
       })
       setDetail(await getCalendarDbEvent(eventId))
@@ -433,6 +465,19 @@ export default function CalendarEventDetailView({
     }
   }
 
+  async function deleteEvent() {
+    setIsDeletingEvent(true)
+    setLinkError(null)
+    try {
+      await deleteCalendarDbEvent(eventId, deleteScope)
+      navigateTo(calendarHref, true)
+    } catch (requestError) {
+      setLinkError(requestError instanceof Error ? requestError.message : t('app.requestFailed'))
+      setIsDeleteConfirmOpen(false)
+      setIsDeletingEvent(false)
+    }
+  }
+
   function selectMail(mail: MailListItem) {
     setSelectedMails({ [mailThreadKey(mail)]: mail })
   }
@@ -492,7 +537,7 @@ export default function CalendarEventDetailView({
                     },
                   ]
                 : []),
-              { href: '/calendar', labelKey: 'nav.calendar' },
+              { href: calendarHref, labelKey: 'nav.calendar' },
               { href: '/', labelKey: 'top.heading' },
             ]}
           />
@@ -562,6 +607,12 @@ export default function CalendarEventDetailView({
                 <span>{attendanceLabel(event.attendance_requirement)}</span>
                 <span>{syncLabel(event.sync_status)}</span>
               </div>
+
+              {linkError !== null && mode !== 'edit' && (
+                <div className="mail-feedback">
+                  <p role="alert">{linkError}</p>
+                </div>
+              )}
 
               {mode === 'edit' ? (
                 <div className="calendar-event-edit-placeholder">
@@ -700,6 +751,63 @@ export default function CalendarEventDetailView({
                     <span>{t('calendar.event.localNote')}</span>
                     <textarea readOnly value={event.local_note ?? ''} />
                   </label>
+                  <section className="calendar-event-delete-zone">
+                    {!isDeleteConfirmOpen ? (
+                      <button
+                        className="calendar-event-delete-button"
+                        onClick={() => setIsDeleteConfirmOpen(true)}
+                        type="button"
+                      >
+                        {t('calendar.event.delete')}
+                      </button>
+                    ) : (
+                      <div className="calendar-event-delete-confirm">
+                        <p>{t('calendar.event.deleteConfirm')}</p>
+                        {canDeleteSeries && (
+                          <fieldset className="calendar-event-delete-scope">
+                            <legend>{t('calendar.event.deleteScope')}</legend>
+                            <label>
+                              <input
+                                checked={deleteScope === 'event'}
+                                disabled={isDeletingEvent}
+                                onChange={() => setDeleteScope('event')}
+                                type="radio"
+                              />
+                              <span>{t('calendar.event.deleteScopeEvent')}</span>
+                            </label>
+                            <label>
+                              <input
+                                checked={deleteScope === 'series'}
+                                disabled={isDeletingEvent}
+                                onChange={() => setDeleteScope('series')}
+                                type="radio"
+                              />
+                              <span>
+                                {deleteSeriesKind === 'academic'
+                                  ? t('calendar.event.deleteScopeAcademicSeries')
+                                  : t('calendar.event.deleteScopeRecurringSeries')}
+                              </span>
+                            </label>
+                          </fieldset>
+                        )}
+                        <button
+                          className={`button-loading-dot${isDeletingEvent ? ' is-loading' : ''}`}
+                          disabled={isDeletingEvent}
+                          onClick={() => void deleteEvent()}
+                          type="button"
+                        >
+                          {t('calendar.event.deleteConfirmAction')}
+                        </button>
+                        <button
+                          disabled={isDeletingEvent}
+                          onClick={() => setIsDeleteConfirmOpen(false)}
+                          type="button"
+                        >
+                          {t('common.cancel')}
+                        </button>
+                      </div>
+                    )}
+                  </section>
                   <p>{t('calendar.event.editPlaceholder')}</p>
                 </div>
               ) : mode === 'attach-mail' ? (

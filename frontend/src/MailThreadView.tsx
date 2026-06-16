@@ -24,6 +24,7 @@ import {
   requestMailSummary,
   rescheduleMailRequest,
   sendMailRequestNow,
+  toJstIsoDateTime,
   unassignMailThreadFromCase,
   unprocessMail,
   updateMailImportance,
@@ -1853,8 +1854,8 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
     try {
       const result = await createGoogleCalendarEvent({
         summary,
-        start: `${date}T${startTime}`,
-        end: `${date}T${endTime}`,
+        start: toJstIsoDateTime(`${date}T${startTime}`),
+        end: toJstIsoDateTime(`${date}T${endTime}`),
         description: calendarDraft.description,
         location: calendarDraft.location,
         time_zone: calendarDraft.prefill.time_zone || 'Asia/Tokyo',

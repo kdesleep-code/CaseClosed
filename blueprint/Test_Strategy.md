@@ -38,7 +38,7 @@ CaseClosedの中核仕様を守るためのガードレールである。
 
 特に以下を守る。
 
-- Case削除APIを作らない
+- Case削除は通常導線に出さず、誤作成Case向けの例外Deleteだけを許可する
 - Task削除は論理削除
 - Email Address単独Skipを作らない
 - Contact未登録FromはPending
@@ -183,7 +183,8 @@ UIの細かいレイアウトは頻繁に変わるため、初期段階ではUI�
 - 24時間後にセッション失効
 - Inbox Caseが作られる
 - システムメンテナンスCaseが作られる
-- Case削除APIが存在しない
+- System Caseを削除できない
+- Case削除は通常導線に出さず、誤作成向けの例外Deleteだけを許可する
 
 ## Phase 2
 
@@ -309,7 +310,7 @@ CaseClosedの設計書群を読み、[対象Phase/機能] のテストを先に�
 特に確認する制約:
 
 ```text
-□ Case削除なし
+□ Case削除の通常導線なし / 誤作成向け例外Deleteのみ
 □ Task論理削除
 □ Email Address単独Skipなし
 □ Pending中のLLM停止

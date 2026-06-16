@@ -216,10 +216,10 @@ closed -> in_progress
 ```text
 closed -> not_started
 archived system case
-delete case
+delete system case
 ```
 
-Case削除は提供しない。
+通常の完了・終結フローでCase削除は使わない。Closed済みCaseはArchiveする。誤作成など未完了のまま消したいCaseのみ、明示確認付きDeleteを許可する。
 
 ## 2.6 Archive状態
 
@@ -1686,7 +1686,7 @@ Case Context更新
 
 ```text
 1. CaseはClosedとArchiveを分ける。
-2. Case削除は提供しない。
+2. Case削除は通常導線では提供しない。誤作成Case向けの目立たない確認付きDeleteのみ許可する。
 3. TaskはCompleted/Canceled/Deletedを分ける。
 4. Task削除は論理削除。
 5. Mail ProcessedとSkipを混同しない。

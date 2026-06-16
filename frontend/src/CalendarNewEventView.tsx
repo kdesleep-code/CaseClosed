@@ -6,12 +6,23 @@ import {
   createGoogleCalendarEvent,
   getGoogleGmailStatus,
   listGoogleCalendars,
+  toJstIsoDateTime,
 } from './phase4Api'
 import type { GoogleCalendarListItem } from './phase4Api'
 import { isCaseOpenForSuggestion, listCases } from './phase7Api'
 import type { CaseItem } from './phase7Api'
 import { listTasks } from './phase8Api'
 import type { TaskItem } from './phase8Api'
+import {
+  listAcademicCalendarDays,
+  listAcademicPeriods,
+  listAcademicSemesters,
+  listAcademicYears,
+  type AcademicCalendarDay,
+  type AcademicPeriod,
+  type AcademicSemester,
+  type AcademicYear,
+} from './academicCalendarApi'
 import SuggestInput from './SuggestInput'
 import { t } from './i18n'
 
@@ -32,6 +43,16 @@ const recurrenceMonthWeeks = [
   { value: '4', labelKey: 'tasks.recurrence.week.fourth' },
   { value: '5', labelKey: 'tasks.recurrence.week.fifth' },
   { value: '-1', labelKey: 'tasks.recurrence.week.last' },
+] as const
+
+const academicWeekdays = [
+  { value: 0, label: 'Sun' },
+  { value: 1, label: 'Mon' },
+  { value: 2, label: 'Tue' },
+  { value: 3, label: 'Wed' },
+  { value: 4, label: 'Thu' },
+  { value: 5, label: 'Fri' },
+  { value: 6, label: 'Sat' },
 ] as const
 
 const visibleTimeOptions = Array.from({ length: 61 }, (_, index) => {
@@ -110,6 +131,18 @@ function weekdayForDate(value: string) {
   return recurrenceWeekdays[date.getUTCDay()]?.value ?? 'MO'
 }
 
+function numericWeekdayForDate(value: string) {
+  return new Date(`${value}T00:00:00Z`).getUTCDay()
+}
+
+function addDateDays(value: string, days: number) {
+  const [year, month, day] = value.split('-').map(Number)
+  const date = new Date(Date.UTC(year, month - 1, day + days))
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(
+    date.getUTCDate(),
+  ).padStart(2, '0')}`
+}
+
 function untilPart(value: string) {
   return value.trim() === '' ? '' : `;UNTIL=${value.replaceAll('-', '')}T145959Z`
 }
@@ -146,8 +179,42 @@ function visibleTimeFromMinutes(value: number) {
   return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
 }
 
+function isWeekendDate(value: string) {
+  const weekday = numericWeekdayForDate(value)
+  return weekday === 0 || weekday === 6
+}
+
+function dayIsTeachingDate(date: string, day: AcademicCalendarDay | undefined) {
+  if (day === undefined) return !isWeekendDate(date)
+  if (day.day_type === 'holiday' || day.day_type === 'no_class_day') return false
+  return day.is_teaching_day
+}
+
+function effectiveAcademicWeekday(date: string, day: AcademicCalendarDay | undefined) {
+  return day?.effective_weekday ?? numericWeekdayForDate(date)
+}
+
+function academicOccurrenceLabel(day: AcademicCalendarDay | undefined, semester: AcademicSemester) {
+  const label = day?.label.trim() ?? ''
+  if (label === '' || label === 'Normal' || label === 'Weekend') return semester.label
+  return label
+}
+
+function newAcademicSeriesId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `academic_series_${crypto.randomUUID().replaceAll('-', '')}`
+  }
+  return `academic_series_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`
+}
+
+function displayPeriodTime(value: string) {
+  return value.slice(0, 5)
+}
+
 export default function CalendarNewEventView() {
   const preselectedCaseId = new URLSearchParams(window.location.search).get('case_id')
+  const cancelHref =
+    preselectedCaseId === null ? '/calendar' : `/cases/${encodeURIComponent(preselectedCaseId)}`
   const [calendars, setCalendars] = useState<GoogleCalendarListItem[]>([])
   const [cases, setCases] = useState<CaseItem[]>([])
   const [tasks, setTasks] = useState<TaskItem[]>([])
@@ -177,16 +244,95 @@ export default function CalendarNewEventView() {
   )
   const [recurrenceWeekdayValues, setRecurrenceWeekdayValues] = useState<string[]>([])
   const [recurrenceUntil, setRecurrenceUntil] = useState('')
+  const [academicYears, setAcademicYears] = useState<AcademicYear[]>([])
+  const [academicSemesters, setAcademicSemesters] = useState<AcademicSemester[]>([])
+  const [academicDays, setAcademicDays] = useState<AcademicCalendarDay[]>([])
+  const [academicPeriods, setAcademicPeriods] = useState<AcademicPeriod[]>([])
+  const [selectedAcademicYearId, setSelectedAcademicYearId] = useState('')
+  const [selectedAcademicSemesterIds, setSelectedAcademicSemesterIds] = useState<string[]>([])
+  const [selectedAcademicWeekday, setSelectedAcademicWeekday] = useState(1)
+  const [selectedAcademicPeriodIds, setSelectedAcademicPeriodIds] = useState<string[]>([])
+  const [academicMaxOccurrences, setAcademicMaxOccurrences] = useState('5')
+  const [isAcademicLoading, setIsAcademicLoading] = useState(false)
   const [caseInput, setCaseInput] = useState('')
   const [taskInput, setTaskInput] = useState('')
   const [isLoading, setIsLoading] = useState(true)
   const [isCreating, setIsCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const isAcademicRepeat = recurrenceType === 'academic'
+  const isStandardRepeat = recurrenceType !== '' && !isAcademicRepeat
 
   const writableCalendars = useMemo(
     () => calendars.filter((calendar) => calendar.can_write),
     [calendars],
   )
+
+  const academicDayMap = useMemo(() => {
+    return new Map(academicDays.map((day) => [day.date, day]))
+  }, [academicDays])
+
+  const selectedAcademicSemesters = useMemo(() => {
+    const selectedIds = new Set(selectedAcademicSemesterIds)
+    return academicSemesters
+      .filter((semester) => selectedIds.has(semester.id))
+      .sort((left, right) => {
+        if (left.starts_on !== right.starts_on) return left.starts_on.localeCompare(right.starts_on)
+        return left.sort_order - right.sort_order
+      })
+  }, [academicSemesters, selectedAcademicSemesterIds])
+
+  const selectedAcademicPeriods = useMemo(() => {
+    const selectedIds = new Set(selectedAcademicPeriodIds)
+    return academicPeriods
+      .filter((period) => selectedIds.has(period.id))
+      .sort((left, right) => {
+        if (left.starts_at !== right.starts_at) return left.starts_at.localeCompare(right.starts_at)
+        return left.sort_order - right.sort_order
+      })
+  }, [academicPeriods, selectedAcademicPeriodIds])
+
+  const academicRepeatOccurrences = useMemo(() => {
+    if (!isAcademicRepeat || selectedAcademicSemesters.length === 0 || selectedAcademicPeriods.length === 0) {
+      return []
+    }
+    const firstPeriod = selectedAcademicPeriods[0]
+    const lastPeriod = selectedAcademicPeriods[selectedAcademicPeriods.length - 1]
+    const maxOccurrences = Number(academicMaxOccurrences)
+    const limit =
+      Number.isInteger(maxOccurrences) && maxOccurrences > 0 ? maxOccurrences : Number.POSITIVE_INFINITY
+    const occurrences: Array<{ date: string; startTime: string; endTime: string; label: string }> = []
+    const includedDates = new Set<string>()
+    for (const semester of selectedAcademicSemesters) {
+      for (
+        let date = semester.starts_on;
+        date <= semester.ends_on && occurrences.length < limit;
+        date = addDateDays(date, 1)
+      ) {
+        if (includedDates.has(date)) continue
+        const academicDay = academicDayMap.get(date)
+        if (
+          dayIsTeachingDate(date, academicDay) &&
+          effectiveAcademicWeekday(date, academicDay) === selectedAcademicWeekday
+        ) {
+          includedDates.add(date)
+          occurrences.push({
+            date,
+            startTime: displayPeriodTime(firstPeriod.starts_at),
+            endTime: displayPeriodTime(lastPeriod.ends_at),
+            label: academicOccurrenceLabel(academicDay, semester),
+          })
+        }
+      }
+    }
+    return occurrences.sort((left, right) => left.date.localeCompare(right.date)).slice(0, limit)
+  }, [
+    academicDayMap,
+    academicMaxOccurrences,
+    isAcademicRepeat,
+    selectedAcademicPeriods,
+    selectedAcademicSemesters,
+    selectedAcademicWeekday,
+  ])
 
   const recurrenceRule = useMemo(() => {
     if (recurrenceType === '') return null
@@ -242,8 +388,10 @@ export default function CalendarNewEventView() {
       listGoogleCalendars(),
       listCases('all'),
       listTasks({ limit: 200 }),
+      listAcademicYears(),
+      listAcademicPeriods(),
     ])
-      .then(([status, calendarItems, caseItems, taskItems]) => {
+      .then(([status, calendarItems, caseItems, taskItems, yearItems, periodItems]) => {
         if (!isMounted) return
         if (status.connected !== true || status.calendar_write_enabled !== true) {
           setError(t('calendar.writeDisabled'))
@@ -254,19 +402,38 @@ export default function CalendarNewEventView() {
         const writableItems = calendarItems.filter((calendar) => calendar.can_write)
         const primaryWritable = writableItems.find((calendar) => calendar.primary)
         setCalendarId(primaryWritable?.id ?? writableItems[0]?.id ?? 'primary')
-        const openCaseItems = caseItems.filter((item) => isCaseOpenForSuggestion(item))
-        setCases(openCaseItems)
+        const caseMap = new Map<string, CaseItem>()
+        caseItems
+          .filter((item) => isCaseOpenForSuggestion(item))
+          .forEach((item) => caseMap.set(item.id, item))
         if (preselectedCaseId !== null) {
-          const preselectedCase = openCaseItems.find((item) => item.id === preselectedCaseId)
+          const preselectedCase = caseItems.find((item) => item.id === preselectedCaseId)
           if (preselectedCase !== undefined) {
-            setCaseInput(preselectedCase.name)
+            caseMap.set(preselectedCase.id, preselectedCase)
+            setCaseInput((current) => current || preselectedCase.name)
           }
         }
+        setCases(Array.from(caseMap.values()))
         setTasks(
           taskItems.filter(
             (item) => item.deleted_at === null && item.status !== 'done' && item.status !== 'archived',
           ),
         )
+        const sortedYears = [...yearItems].sort((left, right) =>
+          right.starts_on.localeCompare(left.starts_on),
+        )
+        const sortedPeriods = [...periodItems].sort((left, right) => {
+          if (left.sort_order !== right.sort_order) return left.sort_order - right.sort_order
+          return left.period_no - right.period_no
+        })
+        const today = jstDateToday()
+        const currentYear =
+          sortedYears.find((item) => item.starts_on <= today && today <= item.ends_on) ??
+          sortedYears[0]
+        setAcademicYears(sortedYears)
+        setAcademicPeriods(sortedPeriods)
+        setSelectedAcademicYearId(currentYear?.id ?? '')
+        setSelectedAcademicPeriodIds(sortedPeriods[0] === undefined ? [] : [sortedPeriods[0].id])
       })
       .catch((requestError) => {
         if (isMounted) setError(describeError(requestError))
@@ -279,25 +446,70 @@ export default function CalendarNewEventView() {
     }
   }, [preselectedCaseId])
 
+  useEffect(() => {
+    if (selectedAcademicYearId === '') {
+      setAcademicSemesters([])
+      setAcademicDays([])
+      setSelectedAcademicSemesterIds([])
+      return
+    }
+    let isMounted = true
+    setIsAcademicLoading(true)
+    Promise.all([
+      listAcademicSemesters(selectedAcademicYearId),
+      listAcademicCalendarDays(selectedAcademicYearId),
+    ])
+      .then(([semesterItems, dayItems]) => {
+        if (!isMounted) return
+        const sortedSemesters = [...semesterItems].sort((left, right) => {
+          if (left.sort_order !== right.sort_order) return left.sort_order - right.sort_order
+          return left.starts_on.localeCompare(right.starts_on)
+        })
+        const today = jstDateToday()
+        const defaultSemester =
+          sortedSemesters.find((item) => item.starts_on <= today && today <= item.ends_on) ??
+          sortedSemesters[0]
+        setAcademicSemesters(sortedSemesters)
+        setAcademicDays(dayItems)
+        setSelectedAcademicSemesterIds((current) =>
+          current.some((id) => sortedSemesters.some((item) => item.id === id))
+            ? current.filter((id) => sortedSemesters.some((item) => item.id === id))
+            : defaultSemester === undefined
+              ? []
+              : [defaultSemester.id],
+        )
+      })
+      .catch((requestError) => {
+        if (isMounted) setError(describeError(requestError))
+      })
+      .finally(() => {
+        if (isMounted) setIsAcademicLoading(false)
+      })
+    return () => {
+      isMounted = false
+    }
+  }, [selectedAcademicYearId])
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const selectedCase = selectedCaseFor(caseInput, cases)
     const selectedTask = selectedTaskFor(taskInput, tasks)
     if (
       summary.trim() === '' ||
-      startDate.trim() === '' ||
-      endDate.trim() === '' ||
-      startTime.trim() === '' ||
-      endTime.trim() === ''
+      (!isAcademicRepeat &&
+        (startDate.trim() === '' ||
+          endDate.trim() === '' ||
+          startTime.trim() === '' ||
+          endTime.trim() === ''))
     ) {
       setError(t('calendar.create.required'))
       return
     }
-    if (!isVisibleCalendarTime(startTime) || !isVisibleCalendarTime(endTime)) {
+    if (!isAcademicRepeat && (!isVisibleCalendarTime(startTime) || !isVisibleCalendarTime(endTime))) {
       setError(t('calendar.create.outOfVisibleRange'))
       return
     }
-    if (`${endDate}T${endTime}` <= `${startDate}T${startTime}`) {
+    if (!isAcademicRepeat && `${endDate}T${endTime}` <= `${startDate}T${startTime}`) {
       setError(t('calendar.create.invalidDateOrder'))
       return
     }
@@ -310,11 +522,26 @@ export default function CalendarNewEventView() {
       return
     }
     if (
+      !isAcademicRepeat &&
       (recurrenceType === 'weekly' || recurrenceType === 'biweekly') &&
       recurrenceWeekdayValues.length === 0
     ) {
       setError(t('tasks.recurrence.weekdayRequired'))
       return
+    }
+    if (isAcademicRepeat) {
+      if (
+        selectedAcademicYearId === '' ||
+        selectedAcademicSemesters.length === 0 ||
+        selectedAcademicPeriods.length === 0
+      ) {
+        setError('Academic year, semester, and period are required.')
+        return
+      }
+      if (academicRepeatOccurrences.length === 0) {
+        setError('No teaching dates match this Academic Calendar repeat setting.')
+        return
+      }
     }
     const parsedMonthDay = Number(recurrenceMonthDay)
     const parsedMonthWeek = Number(recurrenceMonthWeek)
@@ -353,11 +580,46 @@ export default function CalendarNewEventView() {
     setIsCreating(true)
     setError(null)
     try {
+      if (isAcademicRepeat) {
+        const createdEventIds: string[] = []
+        const academicSeriesId = newAcademicSeriesId()
+        for (const occurrence of academicRepeatOccurrences) {
+          const result = await createGoogleCalendarEvent({
+            calendar_id: calendarId,
+            summary: summary.trim(),
+            start: toJstIsoDateTime(`${occurrence.date}T${occurrence.startTime}`),
+            end: toJstIsoDateTime(`${occurrence.date}T${occurrence.endTime}`),
+            location: location.trim() === '' ? null : location,
+            description: description.trim() === '' ? null : description,
+            recurrence_rule: null,
+            time_zone: 'Asia/Tokyo',
+            linked_case_id: selectedCase?.id ?? null,
+            academic_series_id: academicSeriesId,
+          })
+          const eventId = result.db_event?.id ?? null
+          if (eventId !== null) {
+            createdEventIds.push(eventId)
+            if (selectedTask !== null) {
+              await createCalendarDbEventLink(eventId, {
+                linked_type: 'task',
+                linked_id: selectedTask.id,
+                role: 'related',
+              })
+            }
+          }
+        }
+        if (createdEventIds.length === 1) {
+          navigateTo(`/calendar/events/${encodeURIComponent(createdEventIds[0])}`)
+        } else {
+          navigateTo('/calendar')
+        }
+        return
+      }
       const result = await createGoogleCalendarEvent({
         calendar_id: calendarId,
         summary: summary.trim(),
-        start: `${startDate}T${startTime}`,
-        end: `${endDate}T${endTime}`,
+        start: toJstIsoDateTime(`${startDate}T${startTime}`),
+        end: toJstIsoDateTime(`${endDate}T${endTime}`),
         location: location.trim() === '' ? null : location,
         description: description.trim() === '' ? null : description,
         recurrence_rule: recurrenceRule,
@@ -439,68 +701,72 @@ export default function CalendarNewEventView() {
                     value={summary}
                   />
                 </label>
-                <div className="calendar-create-date-time-group">
-                  <span>{t('calendar.create.start')}</span>
-                  <div>
-                    <input
-                      disabled={isCreating}
-                      onChange={(event) => {
-                        setStartDate(event.target.value)
-                        if (endDate.trim() === '' || endDate < event.target.value) {
-                          setEndDate(event.target.value)
-                        }
-                      }}
-                      type="date"
-                      value={startDate}
-                    />
-                    <select
-                      disabled={isCreating}
-                      onChange={(event) => handleStartTimeChange(event.target.value)}
-                      value={startTime}
-                    >
-                      {visibleTimeOptions.map((option) => (
-                        <option key={option} value={option}>
-                          {option}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-                <div className="calendar-create-date-time-group">
-                  <span>{t('calendar.create.end')}</span>
-                  <div>
-                    <input
-                      disabled={isCreating}
-                      onChange={(event) => {
-                        const nextEndDate = event.target.value
-                        setEndDate(nextEndDate)
-                        if (
-                          nextEndDate === startDate &&
-                          timeMinutes(endTime) <= timeMinutes(startTime)
-                        ) {
-                          setEndTime(visibleTimeFromMinutes(timeMinutes(startTime) + 15))
-                        }
-                      }}
-                      type="date"
-                      value={endDate}
-                    />
-                    <select
-                      disabled={isCreating}
-                      onChange={(event) => setEndTime(event.target.value)}
-                      value={endTime}
-                    >
-                      {visibleTimeOptions.map((option) => (
-                        <option
-                          disabled={isEndTimeUnavailable(option)}
-                          key={option}
-                          value={option}
+                {recurrenceType === '' && (
+                  <>
+                    <div className="calendar-create-date-time-group">
+                      <span>{t('calendar.create.start')}</span>
+                      <div>
+                        <input
+                          disabled={isCreating}
+                          onChange={(event) => {
+                            setStartDate(event.target.value)
+                            if (endDate.trim() === '' || endDate < event.target.value) {
+                              setEndDate(event.target.value)
+                            }
+                          }}
+                          type="date"
+                          value={startDate}
+                        />
+                        <select
+                          disabled={isCreating}
+                          onChange={(event) => handleStartTimeChange(event.target.value)}
+                          value={startTime}
                         >
-                          {option}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
+                          {visibleTimeOptions.map((option) => (
+                            <option key={option} value={option}>
+                              {option}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                    <div className="calendar-create-date-time-group">
+                      <span>{t('calendar.create.end')}</span>
+                      <div>
+                        <input
+                          disabled={isCreating}
+                          onChange={(event) => {
+                            const nextEndDate = event.target.value
+                            setEndDate(nextEndDate)
+                            if (
+                              nextEndDate === startDate &&
+                              timeMinutes(endTime) <= timeMinutes(startTime)
+                            ) {
+                              setEndTime(visibleTimeFromMinutes(timeMinutes(startTime) + 15))
+                            }
+                          }}
+                          type="date"
+                          value={endDate}
+                        />
+                        <select
+                          disabled={isCreating}
+                          onChange={(event) => setEndTime(event.target.value)}
+                          value={endTime}
+                        >
+                          {visibleTimeOptions.map((option) => (
+                            <option
+                              disabled={isEndTimeUnavailable(option)}
+                              key={option}
+                              value={option}
+                            >
+                              {option}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  </>
+                )}
               </div>
               <div className="calendar-create-location-row">
                 <label>
@@ -546,6 +812,9 @@ export default function CalendarNewEventView() {
                     onChange={(event) => {
                       const nextType = event.target.value
                       setRecurrenceType(nextType)
+                      if (nextType !== '' && nextType !== 'academic') {
+                        setEndDate(startDate)
+                      }
                       if (nextType === 'monthly') {
                         setRecurrenceMonthDay(String(datePart(startDate, 1, 2)))
                         setRecurrenceMonthWeekday(weekdayForDate(startDate))
@@ -561,6 +830,11 @@ export default function CalendarNewEventView() {
                       ) {
                         setRecurrenceWeekdayValues([weekdayForDate(startDate)])
                       }
+                      if (nextType === 'academic' && selectedAcademicPeriodIds.length === 0) {
+                        setSelectedAcademicPeriodIds(
+                          academicPeriods[0] === undefined ? [] : [academicPeriods[0].id],
+                        )
+                      }
                     }}
                     value={recurrenceType}
                   >
@@ -569,6 +843,7 @@ export default function CalendarNewEventView() {
                     <option value="biweekly">{t('tasks.recurrence.biweekly')}</option>
                     <option value="monthly">{t('tasks.recurrence.monthly')}</option>
                     <option value="yearly">{t('tasks.recurrence.yearly')}</option>
+                    <option value="academic">Academic Calendar</option>
                   </select>
                 </label>
                 {(recurrenceType === 'monthly' || recurrenceType === 'yearly') && (
@@ -660,7 +935,54 @@ export default function CalendarNewEventView() {
                       </label>
                     </div>
                   )}
-                {recurrenceType !== '' ? (
+                <div aria-hidden="true" />
+              </div>
+              {isStandardRepeat && (
+                <div className="calendar-create-repeat-time-row">
+                  <label>
+                    <span>Repeat start</span>
+                    <input
+                      disabled={isCreating}
+                      onChange={(event) => {
+                        const nextStartDate = event.target.value
+                        setStartDate(nextStartDate)
+                        setEndDate(nextStartDate)
+                      }}
+                      type="date"
+                      value={startDate}
+                    />
+                  </label>
+                  <label>
+                    <span>{t('calendar.create.start')}</span>
+                    <select
+                      disabled={isCreating}
+                      onChange={(event) => handleStartTimeChange(event.target.value)}
+                      value={startTime}
+                    >
+                      {visibleTimeOptions.map((option) => (
+                        <option key={option} value={option}>
+                          {option}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    <span>{t('calendar.create.end')}</span>
+                    <select
+                      disabled={isCreating}
+                      onChange={(event) => {
+                        setEndDate(startDate)
+                        setEndTime(event.target.value)
+                      }}
+                      value={endTime}
+                    >
+                      {visibleTimeOptions.map((option) => (
+                        <option disabled={isEndTimeUnavailable(option)} key={option} value={option}>
+                          {option}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                   <label>
                     <span>{t('calendar.create.repeatUntil')}</span>
                     <input
@@ -670,10 +992,8 @@ export default function CalendarNewEventView() {
                       value={recurrenceUntil}
                     />
                   </label>
-                ) : (
-                  <div aria-hidden="true" />
-                )}
-              </div>
+                </div>
+              )}
               {(recurrenceType === 'weekly' || recurrenceType === 'biweekly') && (
                 <div className="task-recurrence-weekdays calendar-create-weekdays">
                   {recurrenceWeekdays.map((weekday) => (
@@ -693,6 +1013,141 @@ export default function CalendarNewEventView() {
                       {t(weekday.labelKey)}
                     </label>
                   ))}
+                </div>
+              )}
+              {isAcademicRepeat && (
+                <div className="calendar-create-academic-repeat">
+                  <div className="calendar-create-academic-controls">
+                    <label className="calendar-academic-year-field">
+                      <span>Academic year</span>
+                      <select
+                        disabled={isCreating || isAcademicLoading}
+                        onChange={(event) => setSelectedAcademicYearId(event.target.value)}
+                        value={selectedAcademicYearId}
+                      >
+                        {academicYears.length === 0 ? (
+                          <option value="">No academic years</option>
+                        ) : (
+                          academicYears.map((year) => (
+                            <option key={year.id} value={year.id}>
+                              {year.year_label}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                    </label>
+                    <div className="calendar-academic-option-group">
+                      <span>Semesters</span>
+                      <div className="calendar-academic-semester-options" aria-label="Academic semesters">
+                        {academicSemesters.length === 0 ? (
+                          <p>No semesters</p>
+                        ) : (
+                          academicSemesters.map((semester) => (
+                            <label key={semester.id}>
+                              <input
+                                checked={selectedAcademicSemesterIds.includes(semester.id)}
+                                disabled={isCreating || isAcademicLoading}
+                                onChange={(event) => {
+                                  setSelectedAcademicSemesterIds((current) =>
+                                    event.target.checked
+                                      ? [...current, semester.id]
+                                      : current.filter((id) => id !== semester.id),
+                                  )
+                                }}
+                                type="checkbox"
+                              />
+                              <span>
+                                {semester.label}
+                                <small>
+                                  {semester.starts_on.slice(5)}-{semester.ends_on.slice(5)}
+                                </small>
+                              </span>
+                            </label>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                    <div className="calendar-academic-inline-fields">
+                      <label>
+                        <span>Academic weekday</span>
+                        <select
+                          disabled={isCreating}
+                          onChange={(event) => setSelectedAcademicWeekday(Number(event.target.value))}
+                          value={selectedAcademicWeekday}
+                        >
+                          {academicWeekdays.map((weekday) => (
+                            <option key={weekday.value} value={weekday.value}>
+                              {weekday.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        <span>Max events</span>
+                        <input
+                          disabled={isCreating}
+                          min="1"
+                          onChange={(event) => setAcademicMaxOccurrences(event.target.value)}
+                          type="number"
+                          value={academicMaxOccurrences}
+                        />
+                      </label>
+                    </div>
+                    <div className="calendar-academic-option-group">
+                      <span>Periods</span>
+                      <div className="calendar-academic-period-options" aria-label="Academic periods">
+                        {academicPeriods.length === 0 ? (
+                          <p>No periods are configured.</p>
+                        ) : (
+                          academicPeriods.map((period) => (
+                            <label key={period.id}>
+                              <input
+                                checked={selectedAcademicPeriodIds.includes(period.id)}
+                                disabled={isCreating}
+                                onChange={(event) => {
+                                  setSelectedAcademicPeriodIds((current) =>
+                                    event.target.checked
+                                      ? [...current, period.id]
+                                      : current.filter((id) => id !== period.id),
+                                  )
+                                }}
+                                type="checkbox"
+                              />
+                              <span>
+                                {period.label || `${period.period_no}`}
+                                <small>
+                                  {displayPeriodTime(period.starts_at)}-
+                                  {displayPeriodTime(period.ends_at)}
+                                </small>
+                              </span>
+                            </label>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="calendar-academic-preview">
+                    <strong>
+                      {academicRepeatOccurrences.length} event
+                      {academicRepeatOccurrences.length === 1 ? '' : 's'}
+                    </strong>
+                    {selectedAcademicSemesters.length > 0 && (
+                      <span>
+                        {selectedAcademicSemesters.map((semester) => semester.label).join(', ')}
+                      </span>
+                    )}
+                    <ol>
+                      {academicRepeatOccurrences.map((occurrence) => (
+                        <li key={occurrence.date}>
+                          <span>{occurrence.date}</span>
+                          <span>
+                            {occurrence.startTime}-{occurrence.endTime}
+                          </span>
+                          <span>{occurrence.label}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
                 </div>
               )}
               <div className="calendar-create-link-row">
@@ -739,7 +1194,7 @@ export default function CalendarNewEventView() {
                 >
                   {t('calendar.create.submit')}
                 </button>
-                <AppLink className="calendar-create-cancel" href="/calendar">
+                <AppLink className="calendar-create-cancel" href={cancelHref}>
                   {t('common.cancel')}
                 </AppLink>
               </div>

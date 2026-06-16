@@ -428,6 +428,7 @@ def ensure_runtime_schema() -> None:
                         all_day INTEGER NOT NULL DEFAULT 0,
                         time_zone TEXT,
                         recurring_event_id TEXT,
+                        academic_series_id TEXT,
                         attendance_requirement TEXT NOT NULL DEFAULT 'unknown',
                         tags_json TEXT,
                         metadata_json TEXT,
@@ -443,6 +444,14 @@ def ensure_runtime_schema() -> None:
                 )
             )
     if "calendar_events" in inspect(engine).get_table_names():
+        calendar_event_columns = {
+            column["name"] for column in inspect(engine).get_columns("calendar_events")
+        }
+        with engine.begin() as connection:
+            if "academic_series_id" not in calendar_event_columns:
+                connection.execute(
+                    text("ALTER TABLE calendar_events ADD COLUMN academic_series_id TEXT")
+                )
         with engine.begin() as connection:
             connection.execute(
                 text(
@@ -489,6 +498,188 @@ def ensure_runtime_schema() -> None:
                     """
                     CREATE INDEX IF NOT EXISTS ix_calendar_event_links_target
                     ON calendar_event_links (linked_type, linked_id)
+                    """
+                )
+            )
+    if "academic_years" not in inspect(engine).get_table_names():
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE academic_years (
+                        id TEXT PRIMARY KEY,
+                        year_label TEXT NOT NULL UNIQUE,
+                        starts_on TEXT NOT NULL,
+                        ends_on TEXT NOT NULL,
+                        note TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+            )
+    if "academic_semesters" not in inspect(engine).get_table_names():
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE academic_semesters (
+                        id TEXT PRIMARY KEY,
+                        academic_year_id TEXT NOT NULL REFERENCES academic_years(id),
+                        label TEXT NOT NULL,
+                        starts_on TEXT NOT NULL,
+                        ends_on TEXT NOT NULL,
+                        sort_order INTEGER NOT NULL DEFAULT 0,
+                        note TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        UNIQUE(academic_year_id, label)
+                    )
+                    """
+                )
+            )
+    if "academic_semesters" in inspect(engine).get_table_names():
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_academic_semesters_year_dates
+                    ON academic_semesters (academic_year_id, starts_on, ends_on)
+                    """
+                )
+            )
+    if "academic_periods" not in inspect(engine).get_table_names():
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE academic_periods (
+                        id TEXT PRIMARY KEY,
+                        period_no INTEGER NOT NULL,
+                        label TEXT NOT NULL,
+                        starts_at TEXT NOT NULL,
+                        ends_at TEXT NOT NULL,
+                        sort_order INTEGER NOT NULL DEFAULT 0,
+                        note TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        UNIQUE(period_no)
+                    )
+                    """
+                )
+            )
+    if "academic_periods" in inspect(engine).get_table_names():
+        period_columns = {
+            column["name"] for column in inspect(engine).get_columns("academic_periods")
+        }
+        if "academic_year_id" in period_columns:
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        """
+                        CREATE TABLE academic_periods_global (
+                            id TEXT PRIMARY KEY,
+                            period_no INTEGER NOT NULL,
+                            label TEXT NOT NULL,
+                            starts_at TEXT NOT NULL,
+                            ends_at TEXT NOT NULL,
+                            sort_order INTEGER NOT NULL DEFAULT 0,
+                            note TEXT,
+                            created_at TEXT NOT NULL,
+                            updated_at TEXT NOT NULL,
+                            version INTEGER NOT NULL DEFAULT 1,
+                            UNIQUE(period_no)
+                        )
+                        """
+                    )
+                )
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO academic_periods_global (
+                            id,
+                            period_no,
+                            label,
+                            starts_at,
+                            ends_at,
+                            sort_order,
+                            note,
+                            created_at,
+                            updated_at,
+                            version
+                        )
+                        SELECT
+                            id,
+                            period_no,
+                            label,
+                            starts_at,
+                            ends_at,
+                            sort_order,
+                            note,
+                            created_at,
+                            updated_at,
+                            version
+                        FROM academic_periods
+                        WHERE rowid IN (
+                            SELECT MIN(rowid)
+                            FROM academic_periods
+                            GROUP BY period_no
+                        )
+                        """
+                    )
+                )
+                connection.execute(text("DROP TABLE academic_periods"))
+                connection.execute(text("ALTER TABLE academic_periods_global RENAME TO academic_periods"))
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_academic_periods_order
+                    ON academic_periods (sort_order, period_no)
+                    """
+                )
+            )
+    if "academic_calendar_days" not in inspect(engine).get_table_names():
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE academic_calendar_days (
+                        id TEXT PRIMARY KEY,
+                        academic_year_id TEXT NOT NULL REFERENCES academic_years(id),
+                        date TEXT NOT NULL,
+                        day_type TEXT NOT NULL DEFAULT 'normal',
+                        label TEXT NOT NULL,
+                        is_teaching_day INTEGER NOT NULL DEFAULT 1,
+                        effective_weekday INTEGER,
+                        source TEXT NOT NULL DEFAULT 'manual',
+                        note TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        UNIQUE(academic_year_id, date)
+                    )
+                    """
+                )
+            )
+    if "academic_calendar_days" in inspect(engine).get_table_names():
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_academic_calendar_days_date
+                    ON academic_calendar_days (date)
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_academic_calendar_days_year_date
+                    ON academic_calendar_days (academic_year_id, date)
                     """
                 )
             )

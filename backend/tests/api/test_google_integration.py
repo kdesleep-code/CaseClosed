@@ -18,6 +18,23 @@ def test_google_gmail_status_reports_not_configured(client) -> None:
     assert data["mail_loading_enabled"] is False
 
 
+def test_calendar_event_time_accepts_canonical_and_legacy_datetime_inputs() -> None:
+    from caseclosed.google_integration import calendar_event_time
+
+    assert calendar_event_time("2026-06-10T10:00:00+09:00", "Asia/Tokyo") == {
+        "dateTime": "2026-06-10T10:00:00+09:00",
+        "timeZone": "Asia/Tokyo",
+    }
+    assert calendar_event_time("2026-06-10T10:00", "Asia/Tokyo") == {
+        "dateTime": "2026-06-10T10:00:00+09:00",
+        "timeZone": "Asia/Tokyo",
+    }
+    assert calendar_event_time("2026-06-10T01:00:00+00:00", "Asia/Tokyo") == {
+        "dateTime": "2026-06-10T10:00:00+09:00",
+        "timeZone": "Asia/Tokyo",
+    }
+
+
 def test_google_gmail_connect_url_requires_oauth_config(client) -> None:
     response = client.post("/api/v1/google/gmail/connect-url")
 
@@ -100,6 +117,383 @@ def test_google_calendar_status_reports_granted_scopes(client, database_path) ->
     assert data["connected"] is True
     assert data["calendar_read_enabled"] is True
     assert data["calendar_write_enabled"] is True
+    assert data["calendar_auto_sync"]["enabled"] is True
+    assert data["calendar_auto_sync"]["interval_minutes"] == 60
+
+
+def test_google_calendar_auto_sync_settings_can_be_updated(client) -> None:
+    response = client.patch(
+        "/api/v1/google/gmail/calendar/auto-sync-settings",
+        json={
+            "enabled": True,
+            "interval_minutes": 90,
+            "calendar_ids": ["primary", "team@example.com", "primary"],
+            "month_count": 4,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["enabled"] is True
+    assert data["interval_minutes"] == 90
+    assert data["calendar_ids"] == ["primary", "team@example.com"]
+    assert data["month_count"] == 4
+
+
+def test_google_calendar_auto_sync_once_records_sync_result(
+    client,
+    database_path,
+    monkeypatch,
+) -> None:
+    client.get("/api/v1/google/gmail/status")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings (id, key, value_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "setting_google_gmail_oauth_connection",
+                "google_gmail_oauth_connection",
+                json.dumps(
+                    {
+                        "access_token": "test-access-token",
+                        "token_expires_at": "2099-05-26T23:00:00+09:00",
+                        "connected_at": "2026-05-26T08:00:00+09:00",
+                        "scopes": [
+                            "https://www.googleapis.com/auth/calendar.readonly",
+                        ],
+                    }
+                ),
+                "2026-05-26T08:00:00+09:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO app_settings (id, key, value_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "setting_google_calendar_auto_sync_settings",
+                "google_calendar_auto_sync_settings",
+                json.dumps(
+                    {
+                        "enabled": True,
+                        "interval_minutes": 60,
+                        "calendar_ids": ["primary"],
+                        "month_count": 1,
+                    }
+                ),
+                "2026-05-26T08:00:00+09:00",
+            ),
+        )
+        connection.commit()
+
+    from caseclosed import google_integration
+    from caseclosed.db import runtime
+
+    monkeypatch.setattr(
+        google_integration,
+        "jst_now",
+        lambda: datetime(2026, 6, 14, 10, 0, 0, tzinfo=google_integration.JST),
+    )
+
+    def fake_calendar_api_get_json(path, access_token, params=None):
+        assert path == "/calendars/primary/events"
+        assert access_token == "test-access-token"
+        assert params["timeMin"] == "2026-06-01T00:00:00+09:00"
+        assert params["timeMax"] == "2026-07-01T00:00:00+09:00"
+        return {
+            "items": [
+                {
+                    "id": "auto_sync_event_1",
+                    "etag": "etag-auto-1",
+                    "status": "confirmed",
+                    "summary": "Auto synced event",
+                    "updated": "2026-06-14T09:30:00+09:00",
+                    "start": {"dateTime": "2026-06-14T10:00:00+09:00"},
+                    "end": {"dateTime": "2026-06-14T11:00:00+09:00"},
+                }
+            ]
+        }
+
+    monkeypatch.setattr(
+        google_integration,
+        "calendar_api_get_json",
+        fake_calendar_api_get_json,
+    )
+
+    with runtime.SessionLocal() as session:
+        result = google_integration.run_google_calendar_auto_sync_once(session)
+
+    assert result["synced"] is True
+    assert result["imported_count"] == 1
+    with sqlite3.connect(database_path) as connection:
+        settings_row = connection.execute(
+            "SELECT value_json FROM app_settings WHERE key = ?",
+            ("google_calendar_auto_sync_settings",),
+        ).fetchone()
+        event_row = connection.execute(
+            """
+            SELECT summary, sync_status
+            FROM calendar_events
+            WHERE external_event_id = ?
+            """,
+            ("auto_sync_event_1",),
+        ).fetchone()
+
+    assert event_row == ("Auto synced event", "synced")
+    settings = json.loads(settings_row[0])
+    assert settings["last_success_at"] is not None
+    assert settings["last_imported_count"] == 1
+    assert settings["last_stop_reason"] == "synced"
+
+
+def test_google_calendar_sync_inherits_links_for_recurring_instances(
+    client,
+    database_path,
+    monkeypatch,
+) -> None:
+    case_response = client.post(
+        "/api/v1/cases",
+        json={"name": "Recurring Case", "progress_status": "in_progress", "ball_status": "user"},
+    )
+    assert case_response.status_code == 200
+    case_id = case_response.json()["data"]["case"]["id"]
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings (id, key, value_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "setting_google_gmail_oauth_connection",
+                "google_gmail_oauth_connection",
+                json.dumps(
+                    {
+                        "access_token": "test-access-token",
+                        "token_expires_at": "2099-05-26T23:00:00+09:00",
+                        "connected_at": "2026-05-26T08:00:00+09:00",
+                        "scopes": [
+                            "https://www.googleapis.com/auth/calendar.readonly",
+                        ],
+                    }
+                ),
+                "2026-05-26T08:00:00+09:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO calendar_events (
+                id, source, external_calendar_id, external_event_id,
+                summary, start_at, end_at, all_day, sync_status,
+                attendance_requirement, created_at, updated_at, version
+            )
+            VALUES (
+                'calendar_event_recurring_master', 'google', 'primary', 'weekly_master',
+                'Weekly seminar', '2026-06-10T10:00:00+09:00',
+                '2026-06-10T11:00:00+09:00', 0, 'synced', 'unknown',
+                '2026-06-10T09:00:00+09:00', '2026-06-10T09:00:00+09:00', 1
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO calendar_event_links (
+                id, calendar_event_id, linked_type, linked_id, role,
+                created_at, updated_at, version
+            )
+            VALUES (
+                'calendar_event_link_recurring_case',
+                'calendar_event_recurring_master',
+                'case',
+                ?,
+                'related',
+                '2026-06-10T09:00:00+09:00',
+                '2026-06-10T09:00:00+09:00',
+                1
+            )
+            """,
+            (case_id,),
+        )
+        connection.commit()
+
+    from caseclosed import google_integration
+
+    def fake_calendar_api_get_json(path, access_token, params=None):
+        assert access_token == "test-access-token"
+        if path == "/calendars/primary":
+            return {"id": "primary"}
+        assert path == "/calendars/primary/events"
+        return {
+            "items": [
+                {
+                    "id": "weekly_master",
+                    "etag": "etag-master",
+                    "status": "confirmed",
+                    "summary": "Weekly seminar",
+                    "updated": "2026-06-10T09:00:00+09:00",
+                    "start": {"dateTime": "2026-06-10T10:00:00+09:00"},
+                    "end": {"dateTime": "2026-06-10T11:00:00+09:00"},
+                },
+                {
+                    "id": "weekly_instance_20260617",
+                    "etag": "etag-instance",
+                    "status": "confirmed",
+                    "summary": "Weekly seminar",
+                    "updated": "2026-06-10T09:00:00+09:00",
+                    "recurringEventId": "weekly_master",
+                    "start": {"dateTime": "2026-06-17T10:00:00+09:00"},
+                    "end": {"dateTime": "2026-06-17T11:00:00+09:00"},
+                },
+            ]
+        }
+
+    monkeypatch.setattr(
+        google_integration,
+        "calendar_api_get_json",
+        fake_calendar_api_get_json,
+    )
+
+    response = client.post(
+        "/api/v1/google/gmail/calendar/sync",
+        json={"calendar_ids": ["primary"], "base_date": "2026-06-10", "month_count": 1},
+    )
+
+    assert response.status_code == 200
+    with sqlite3.connect(database_path) as connection:
+        child_row = connection.execute(
+            """
+            SELECT id, recurring_event_id
+            FROM calendar_events
+            WHERE external_event_id = 'weekly_instance_20260617'
+            """
+        ).fetchone()
+        child_link_row = connection.execute(
+            """
+            SELECT linked_type, linked_id, role
+            FROM calendar_event_links
+            WHERE calendar_event_id = ?
+            """,
+            (child_row[0],),
+        ).fetchone()
+
+    assert child_row[1] == "weekly_master"
+    assert child_link_row == ("case", case_id, "related")
+
+
+def test_calendar_event_detail_inherits_links_for_existing_recurring_instance(
+    client,
+    database_path,
+) -> None:
+    case_response = client.post(
+        "/api/v1/cases",
+        json={"name": "Existing Recurring Case", "progress_status": "in_progress", "ball_status": "user"},
+    )
+    assert case_response.status_code == 200
+    case_id = case_response.json()["data"]["case"]["id"]
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO calendar_events (
+                id, source, external_calendar_id, external_event_id,
+                summary, start_at, end_at, all_day, sync_status,
+                attendance_requirement, created_at, updated_at, version
+            )
+            VALUES (
+                'calendar_event_existing_master', 'google', 'primary', 'existing_weekly_master',
+                'Existing weekly', '2026-06-10T10:00:00+09:00',
+                '2026-06-10T11:00:00+09:00', 0, 'missing_from_google', 'unknown',
+                '2026-06-10T09:00:00+09:00', '2026-06-10T09:00:00+09:00', 1
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO calendar_events (
+                id, source, external_calendar_id, external_event_id,
+                summary, start_at, end_at, all_day, sync_status,
+                recurring_event_id, attendance_requirement, created_at, updated_at, version
+            )
+            VALUES (
+                'calendar_event_existing_child', 'google', 'primary', 'existing_weekly_child',
+                'Existing weekly', '2026-06-17T10:00:00+09:00',
+                '2026-06-17T11:00:00+09:00', 0, 'synced',
+                'existing_weekly_master', 'unknown',
+                '2026-06-10T09:00:00+09:00', '2026-06-10T09:00:00+09:00', 1
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO calendar_event_links (
+                id, calendar_event_id, linked_type, linked_id, role,
+                created_at, updated_at, version
+            )
+            VALUES (
+                'calendar_event_link_existing_case',
+                'calendar_event_existing_master',
+                'case',
+                ?,
+                'related',
+                '2026-06-10T09:00:00+09:00',
+                '2026-06-10T09:00:00+09:00',
+                1
+            )
+            """,
+            (case_id,),
+        )
+        connection.commit()
+
+    response = client.get("/api/v1/google/gmail/calendar/db-events/calendar_event_existing_child")
+
+    assert response.status_code == 200
+    links = response.json()["data"]["links"]
+    assert [(link["linked_type"], link["linked_id"]) for link in links] == [("case", case_id)]
+
+
+def test_calendar_db_events_deduplicates_primary_alias_rows(
+    client,
+    database_path,
+) -> None:
+    with sqlite3.connect(database_path) as connection:
+        for calendar_id, event_id in (
+            ("horie@example.com", "calendar_event_real_primary"),
+            ("primary", "calendar_event_primary_alias"),
+        ):
+            connection.execute(
+                """
+                INSERT INTO calendar_events (
+                    id, source, external_calendar_id, external_event_id,
+                    summary, start_at, end_at, all_day, sync_status,
+                    attendance_requirement, created_at, updated_at, version
+                )
+                VALUES (?, 'google', ?, 'google_event_same', 'Shared event',
+                        '2026-06-14T10:00:00+09:00',
+                        '2026-06-14T11:00:00+09:00',
+                        0, 'synced',
+                        'unknown',
+                        '2026-06-14T09:00:00+09:00',
+                        '2026-06-14T09:00:00+09:00',
+                        1)
+                """,
+                (event_id, calendar_id),
+            )
+        connection.commit()
+
+    response = client.get(
+        "/api/v1/google/gmail/calendar/db-events"
+        "?calendar_id=horie%40example.com&calendar_id=primary"
+        "&time_min=2026-06-14T00:00:00%2B09:00"
+        "&time_max=2026-06-15T00:00:00%2B09:00"
+    )
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert len(items) == 1
+    assert items[0]["id"] == "calendar_event_real_primary"
 
 
 def test_google_calendar_events_lists_primary_events(
@@ -223,11 +617,13 @@ def test_google_calendar_create_event_posts_to_calendar(
             "summary": "Created from CaseClosed",
             "start": "2026-06-10T10:00:00+09:00",
             "end": "2026-06-10T11:00:00+09:00",
+            "academic_series_id": "academic_series_test",
         },
     )
 
     assert response.status_code == 200
     assert response.json()["data"]["event"]["id"] == "created_event"
+    assert response.json()["data"]["db_event"]["academic_series_id"] == "academic_series_test"
     assert posted_payloads == [
         {
             "summary": "Created from CaseClosed",
@@ -240,6 +636,312 @@ def test_google_calendar_create_event_posts_to_calendar(
                 "timeZone": "Asia/Tokyo",
             },
         }
+    ]
+    with sqlite3.connect(database_path) as connection:
+        event_row = connection.execute(
+            """
+            SELECT academic_series_id
+            FROM calendar_events
+            WHERE external_event_id = 'created_event'
+            """
+        ).fetchone()
+        operation_row = connection.execute(
+            """
+            SELECT operation_type, status, external_service, external_id, attempt_count
+            FROM external_operations
+            WHERE operation_type = 'google_calendar_event_create'
+            """
+        ).fetchone()
+
+    assert event_row == ("academic_series_test",)
+    assert operation_row == (
+        "google_calendar_event_create",
+        "succeeded",
+        "google_calendar",
+        "created_event",
+        1,
+    )
+
+
+def test_google_calendar_db_event_delete_deletes_google_event(
+    client,
+    database_path,
+    monkeypatch,
+) -> None:
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings (id, key, value_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "setting_google_gmail_oauth_connection",
+                "google_gmail_oauth_connection",
+                json.dumps(
+                    {
+                        "access_token": "test-access-token",
+                        "token_expires_at": "2099-05-26T23:00:00+09:00",
+                        "connected_at": "2026-05-26T08:00:00+09:00",
+                        "scopes": [
+                            "https://www.googleapis.com/auth/calendar.events",
+                        ],
+                    }
+                ),
+                "2026-05-26T08:00:00+09:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO calendar_events (
+                id, source, external_calendar_id, external_event_id,
+                summary, start_at, end_at, all_day, sync_status,
+                attendance_requirement, created_at, updated_at, version
+            )
+            VALUES (
+                'calendar_event_delete_me', 'google', 'primary', 'google_delete_me',
+                'Delete me', '2026-06-10T10:00:00+09:00',
+                '2026-06-10T11:00:00+09:00', 0, 'synced', 'unknown',
+                '2026-06-10T09:00:00+09:00', '2026-06-10T09:00:00+09:00', 1
+            )
+            """
+        )
+        connection.commit()
+
+    from caseclosed import google_integration
+
+    deleted_paths = []
+
+    def fake_calendar_api_delete(path, access_token):
+        deleted_paths.append((path, access_token))
+
+    monkeypatch.setattr(
+        google_integration,
+        "calendar_api_delete",
+        fake_calendar_api_delete,
+    )
+
+    response = client.delete(
+        "/api/v1/google/gmail/calendar/db-events/calendar_event_delete_me"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["deleted"] is True
+    assert deleted_paths == [
+        ("/calendars/primary/events/google_delete_me", "test-access-token")
+    ]
+    with sqlite3.connect(database_path) as connection:
+        event_row = connection.execute(
+            """
+            SELECT sync_status, google_status
+            FROM calendar_events
+            WHERE id = 'calendar_event_delete_me'
+            """
+        ).fetchone()
+        operation_row = connection.execute(
+            """
+            SELECT operation_type, status, external_service, external_id
+            FROM external_operations
+            WHERE operation_type = 'google_calendar_event_delete'
+            """
+        ).fetchone()
+
+    assert event_row == ("cancelled", "cancelled")
+    assert operation_row == (
+        "google_calendar_event_delete",
+        "succeeded",
+        "google_calendar",
+        "google_delete_me",
+    )
+
+
+def test_google_calendar_db_event_delete_academic_series_deletes_all_events(
+    client,
+    database_path,
+    monkeypatch,
+) -> None:
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings (id, key, value_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "setting_google_gmail_oauth_connection",
+                "google_gmail_oauth_connection",
+                json.dumps(
+                    {
+                        "access_token": "test-access-token",
+                        "token_expires_at": "2099-05-26T23:00:00+09:00",
+                        "connected_at": "2026-05-26T08:00:00+09:00",
+                        "scopes": [
+                            "https://www.googleapis.com/auth/calendar.events",
+                        ],
+                    }
+                ),
+                "2026-05-26T08:00:00+09:00",
+            ),
+        )
+        for index, date in enumerate(["2026-10-07", "2026-10-14"], start=1):
+            connection.execute(
+                """
+                INSERT INTO calendar_events (
+                    id, source, external_calendar_id, external_event_id,
+                    summary, start_at, end_at, all_day, sync_status,
+                    academic_series_id, attendance_requirement,
+                    created_at, updated_at, version
+                )
+                VALUES (?, 'google', 'primary', ?, 'Lecture',
+                        ?, ?, 0, 'synced', 'academic_series_test', 'unknown',
+                        '2026-06-10T09:00:00+09:00',
+                        '2026-06-10T09:00:00+09:00', 1)
+                """,
+                (
+                    f"calendar_event_academic_{index}",
+                    f"academic_google_{index}",
+                    f"{date}T15:15:00+09:00",
+                    f"{date}T18:00:00+09:00",
+                ),
+            )
+        connection.commit()
+
+    from caseclosed import google_integration
+
+    deleted_paths = []
+
+    def fake_calendar_api_delete(path, access_token):
+        deleted_paths.append((path, access_token))
+
+    monkeypatch.setattr(
+        google_integration,
+        "calendar_api_delete",
+        fake_calendar_api_delete,
+    )
+
+    response = client.delete(
+        "/api/v1/google/gmail/calendar/db-events/calendar_event_academic_1?scope=series"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["deleted_count"] == 2
+    assert response.json()["data"]["scope"] == "series"
+    assert deleted_paths == [
+        ("/calendars/primary/events/academic_google_1", "test-access-token"),
+        ("/calendars/primary/events/academic_google_2", "test-access-token"),
+    ]
+    with sqlite3.connect(database_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT id, sync_status, google_status
+            FROM calendar_events
+            WHERE academic_series_id = 'academic_series_test'
+            ORDER BY id
+            """
+        ).fetchall()
+
+    assert rows == [
+        ("calendar_event_academic_1", "cancelled", "cancelled"),
+        ("calendar_event_academic_2", "cancelled", "cancelled"),
+    ]
+
+
+def test_google_calendar_db_event_delete_recurring_series_deletes_master_once(
+    client,
+    database_path,
+    monkeypatch,
+) -> None:
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings (id, key, value_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "setting_google_gmail_oauth_connection",
+                "google_gmail_oauth_connection",
+                json.dumps(
+                    {
+                        "access_token": "test-access-token",
+                        "token_expires_at": "2099-05-26T23:00:00+09:00",
+                        "connected_at": "2026-05-26T08:00:00+09:00",
+                        "scopes": [
+                            "https://www.googleapis.com/auth/calendar.events",
+                        ],
+                    }
+                ),
+                "2026-05-26T08:00:00+09:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO calendar_events (
+                id, source, external_calendar_id, external_event_id,
+                summary, start_at, end_at, all_day, sync_status,
+                attendance_requirement, created_at, updated_at, version
+            )
+            VALUES (
+                'calendar_event_weekly_master', 'google', 'primary', 'weekly_master',
+                'Weekly master', '2026-10-07T15:15:00+09:00',
+                '2026-10-07T18:00:00+09:00', 0, 'synced', 'unknown',
+                '2026-06-10T09:00:00+09:00', '2026-06-10T09:00:00+09:00', 1
+            )
+            """
+        )
+        for index, date in enumerate(["2026-10-14", "2026-10-21"], start=1):
+            connection.execute(
+                """
+                INSERT INTO calendar_events (
+                    id, source, external_calendar_id, external_event_id,
+                    summary, start_at, end_at, all_day, recurring_event_id,
+                    sync_status, attendance_requirement, created_at, updated_at, version
+                )
+                VALUES (?, 'google', 'primary', ?, 'Weekly child',
+                        ?, ?, 0, 'weekly_master', 'synced', 'unknown',
+                        '2026-06-10T09:00:00+09:00',
+                        '2026-06-10T09:00:00+09:00', 1)
+                """,
+                (
+                    f"calendar_event_weekly_child_{index}",
+                    f"weekly_child_{index}",
+                    f"{date}T15:15:00+09:00",
+                    f"{date}T18:00:00+09:00",
+                ),
+            )
+        connection.commit()
+
+    from caseclosed import google_integration
+
+    deleted_paths = []
+
+    def fake_calendar_api_delete(path, access_token):
+        deleted_paths.append((path, access_token))
+
+    monkeypatch.setattr(
+        google_integration,
+        "calendar_api_delete",
+        fake_calendar_api_delete,
+    )
+
+    response = client.delete(
+        "/api/v1/google/gmail/calendar/db-events/calendar_event_weekly_child_1?scope=series"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["deleted_count"] == 3
+    assert deleted_paths == [("/calendars/primary/events/weekly_master", "test-access-token")]
+    with sqlite3.connect(database_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT id, sync_status, google_status
+            FROM calendar_events
+            WHERE id LIKE 'calendar_event_weekly_%'
+            ORDER BY id
+            """
+        ).fetchall()
+
+    assert rows == [
+        ("calendar_event_weekly_child_1", "cancelled", "cancelled"),
+        ("calendar_event_weekly_child_2", "cancelled", "cancelled"),
+        ("calendar_event_weekly_master", "cancelled", "cancelled"),
     ]
 
 

@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import datetime
 from datetime import timedelta
 
+from caseclosed.db import runtime
 from caseclosed.db.models import Job
 from caseclosed.services.contact_ai_memo_update import (
     handle_contact_ai_memo_update,
@@ -21,10 +22,33 @@ from caseclosed.services.mail_attachment_fetch import handle_mail_attachment_fet
 from caseclosed.services.mail_sending import handle_mail_send_mock
 from caseclosed.services.mail_summary import handle_mail_summary
 from caseclosed.services.mail_thread_summary import handle_mail_thread_summary
+from caseclosed.services.llm_provider import OpenAIProviderError
 from caseclosed.services.queue import QueueInterface
 from caseclosed.services.queue import SQLiteQueue
 
 JobHandler = Callable[[Job], dict[str, object]]
+
+TRANSIENT_OPENAI_ERROR_MARKERS = (
+    "getaddrinfo failed",
+    "temporary failure in name resolution",
+    "name resolution",
+    "timed out",
+    "timeout",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+    "network is unreachable",
+    "temporarily unavailable",
+    "HTTP 408",
+    "HTTP 409",
+    "HTTP 429",
+    "HTTP 500",
+    "HTTP 502",
+    "HTTP 503",
+    "HTTP 504",
+)
+
+MAX_TRANSIENT_RETRY_DELAY_MINUTES = 30
 
 DEFAULT_HANDLERS: dict[str, JobHandler] = {
     "contact_ai_memo_update": handle_contact_ai_memo_update,
@@ -67,11 +91,21 @@ class Orchestrator:
         try:
             result = handler(job)
         except Exception as error:
-            self.queue.fail(
-                job.id,
-                error_type=type(error).__name__,
-                error_message=str(error),
-            )
+            error_type = type(error).__name__
+            error_message = str(error)
+            if should_retry_job_error(job, error):
+                self.queue.retry_later(
+                    job.id,
+                    error_type=error_type,
+                    error_message=error_message,
+                    available_at=next_retry_available_at(job),
+                )
+            else:
+                self.queue.fail(
+                    job.id,
+                    error_type=error_type,
+                    error_message=error_message,
+                )
         else:
             self.queue.succeed(job.id, result)
         return job.id
@@ -86,3 +120,20 @@ class Orchestrator:
             now=now,
             heartbeat_timeout=heartbeat_timeout,
         )
+
+
+def should_retry_job_error(job: Job, error: Exception) -> bool:
+    if job.retry_count >= job.max_retries:
+        return False
+    if not isinstance(error, OpenAIProviderError):
+        return False
+    message = str(error).lower()
+    return any(marker.lower() in message for marker in TRANSIENT_OPENAI_ERROR_MARKERS)
+
+
+def next_retry_available_at(job: Job) -> str:
+    delay_minutes = min(
+        MAX_TRANSIENT_RETRY_DELAY_MINUTES,
+        2 ** job.retry_count * 2,
+    )
+    return runtime.jst_iso(runtime.jst_now() + timedelta(minutes=delay_minutes))

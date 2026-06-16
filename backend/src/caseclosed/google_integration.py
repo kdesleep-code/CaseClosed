@@ -4,6 +4,7 @@ import base64
 from dataclasses import dataclass
 from datetime import date
 from datetime import datetime
+import hashlib
 import json
 import re
 import secrets
@@ -19,10 +20,13 @@ from urllib.error import HTTPError
 from urllib.error import URLError
 from urllib.request import Request
 from urllib.request import urlopen
+from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfoNotFoundError
 
 from fastapi import APIRouter
 from fastapi import BackgroundTasks
 from fastapi import Depends
+from fastapi import HTTPException
 from fastapi import Query
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
@@ -35,6 +39,7 @@ from caseclosed.db.models import AppSetting
 from caseclosed.db.models import Case
 from caseclosed.db.models import CalendarEvent
 from caseclosed.db.models import CalendarEventLink
+from caseclosed.db.models import ExternalOperation
 from caseclosed.db.models import GmailMessage
 from caseclosed.db.models import CaseMailLink
 from caseclosed.db.models import LlmRun
@@ -70,6 +75,7 @@ GOOGLE_CALENDAR_API_BASE_URL = "https://www.googleapis.com/calendar/v3"
 GMAIL_CONNECTION_KEY = "google_gmail_oauth_connection"
 GMAIL_OAUTH_STATE_KEY = "google_gmail_oauth_state"
 GMAIL_AUTO_IMPORT_SETTINGS_KEY = "google_gmail_auto_import_settings"
+CALENDAR_AUTO_SYNC_SETTINGS_KEY = "google_calendar_auto_sync_settings"
 GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
 CALENDAR_READ_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
 CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events"
@@ -79,6 +85,8 @@ GMAIL_AUTO_IMPORT_MAX_MESSAGES_PER_RUN = 100
 GMAIL_AUTO_IMPORT_SCAN_MAX_MESSAGES = 300
 GMAIL_AUTO_IMPORT_LOOKBACK_DAYS = 3
 GMAIL_EXCLUDED_IMPORT_QUERY = "-in:drafts"
+CALENDAR_AUTO_SYNC_DEFAULT_INTERVAL_MINUTES = 60
+CALENDAR_AUTO_SYNC_DEFAULT_MONTH_COUNT = 3
 
 
 class GmailImportByDatePayload(BaseModel):
@@ -106,6 +114,13 @@ class GmailAutoImportSettingsPayload(BaseModel):
     max_messages_per_run: int | None = None
 
 
+class CalendarAutoSyncSettingsPayload(BaseModel):
+    enabled: bool
+    interval_minutes: int
+    calendar_ids: list[str] | None = None
+    month_count: int | None = None
+
+
 class GoogleCalendarEventCreatePayload(BaseModel):
     summary: str = Field(min_length=1)
     start: str = Field(min_length=1)
@@ -117,6 +132,7 @@ class GoogleCalendarEventCreatePayload(BaseModel):
     time_zone: str = "Asia/Tokyo"
     linked_mail_message_id: str | None = None
     linked_case_id: str | None = None
+    academic_series_id: str | None = None
 
 
 class CalendarEventMovePayload(BaseModel):
@@ -193,6 +209,7 @@ def write_setting_json(
 def google_gmail_status_data(session: DatabaseSession) -> dict[str, object]:
     connection = read_setting_json(session, GMAIL_CONNECTION_KEY) or {}
     auto_import_settings = google_gmail_auto_import_settings_data(session)
+    calendar_auto_sync_settings = google_calendar_auto_sync_settings_data(session)
     scopes = get_google_gmail_scopes()
     has_refresh_token = bool(connection.get("refresh_token"))
     connected = has_refresh_token or bool(connection.get("access_token"))
@@ -213,6 +230,7 @@ def google_gmail_status_data(session: DatabaseSession) -> dict[str, object]:
         "token_expires_at": connection.get("token_expires_at"),
         "mail_loading_enabled": connected and bool(auto_import_settings["enabled"]),
         "auto_import": auto_import_settings,
+        "calendar_auto_sync": calendar_auto_sync_settings,
     }
 
 
@@ -308,6 +326,155 @@ def write_google_gmail_auto_import_settings(
     return google_gmail_auto_import_settings_data(session)
 
 
+def google_calendar_auto_sync_settings_data(
+    session: DatabaseSession,
+) -> dict[str, object]:
+    settings = read_setting_json(session, CALENDAR_AUTO_SYNC_SETTINGS_KEY) or {}
+    return {
+        "enabled": bool(settings.get("enabled", True)),
+        "interval_minutes": normalized_calendar_auto_sync_interval_minutes(
+            settings.get("interval_minutes")
+        ),
+        "calendar_ids": normalized_calendar_ids(settings.get("calendar_ids"))
+        or ["primary"],
+        "month_count": normalized_calendar_auto_sync_month_count(
+            settings.get("month_count")
+        ),
+        "last_run_at": optional_string(settings.get("last_run_at")),
+        "last_success_at": optional_string(settings.get("last_success_at")),
+        "last_error": optional_string(settings.get("last_error")),
+        "last_imported_count": int(settings.get("last_imported_count") or 0),
+        "last_updated_count": int(settings.get("last_updated_count") or 0),
+        "last_cancelled_count": int(settings.get("last_cancelled_count") or 0),
+        "last_missing_count": int(settings.get("last_missing_count") or 0),
+        "last_time_min": optional_string(settings.get("last_time_min")),
+        "last_time_max": optional_string(settings.get("last_time_max")),
+        "last_stop_reason": optional_string(settings.get("last_stop_reason")),
+        "updated_at": optional_string(settings.get("updated_at")),
+    }
+
+
+def normalized_calendar_auto_sync_interval_minutes(value: object) -> int:
+    try:
+        interval_minutes = int(value)
+    except (TypeError, ValueError):
+        interval_minutes = CALENDAR_AUTO_SYNC_DEFAULT_INTERVAL_MINUTES
+    return max(5, min(interval_minutes, 24 * 60))
+
+
+def normalized_calendar_auto_sync_month_count(value: object) -> int:
+    try:
+        month_count = int(value)
+    except (TypeError, ValueError):
+        month_count = CALENDAR_AUTO_SYNC_DEFAULT_MONTH_COUNT
+    return max(1, min(month_count, 12))
+
+
+def write_google_calendar_auto_sync_settings(
+    session: DatabaseSession,
+    *,
+    enabled: bool,
+    interval_minutes: int,
+    calendar_ids: list[str] | None = None,
+    month_count: int | None = None,
+) -> dict[str, object]:
+    now = jst_iso()
+    current = google_calendar_auto_sync_settings_data(session)
+    next_settings = {
+        **current,
+        "enabled": enabled,
+        "interval_minutes": normalized_calendar_auto_sync_interval_minutes(
+            interval_minutes
+        ),
+        "calendar_ids": normalized_calendar_ids(calendar_ids)
+        or normalized_calendar_ids(current.get("calendar_ids"))
+        or ["primary"],
+        "month_count": normalized_calendar_auto_sync_month_count(
+            month_count if month_count is not None else current.get("month_count")
+        ),
+        "updated_at": now,
+    }
+    write_setting_json(session, CALENDAR_AUTO_SYNC_SETTINGS_KEY, next_settings, now)
+    session.commit()
+    return google_calendar_auto_sync_settings_data(session)
+
+
+def create_calendar_external_operation(
+    session: DatabaseSession,
+    *,
+    operation_type: str,
+    payload: dict[str, object],
+) -> ExternalOperation:
+    now = jst_iso()
+    payload_json = json.dumps(payload, ensure_ascii=True, sort_keys=True)
+    operation = ExternalOperation(
+        id=f"external_operation_{uuid.uuid4().hex}",
+        operation_type=operation_type,
+        status="pending",
+        idempotency_key=f"{operation_type}:{uuid.uuid4().hex}",
+        request_payload_hash=hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
+        request_payload_json=payload_json,
+        external_service="google_calendar",
+        external_id=None,
+        attempt_count=1,
+        last_attempt_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(operation)
+    session.flush()
+    return operation
+
+
+def mark_calendar_external_operation_succeeded(
+    operation: ExternalOperation,
+    *,
+    external_id: str | None,
+) -> None:
+    now = jst_iso()
+    operation.status = "succeeded"
+    operation.external_id = external_id
+    operation.succeeded_at = now
+    operation.updated_at = now
+
+
+def mark_calendar_external_operation_failed(
+    operation: ExternalOperation,
+    *,
+    error: Exception,
+) -> None:
+    now = jst_iso()
+    operation.status = "failed"
+    operation.failed_at = now
+    operation.updated_at = now
+    operation.unknown_reason = str(error)
+
+
+def mark_calendar_external_operation_unknown(
+    operation: ExternalOperation,
+    *,
+    error: Exception,
+) -> None:
+    now = jst_iso()
+    operation.status = "unknown"
+    operation.unknown_at = now
+    operation.unknown_reason = str(error)
+    operation.manual_resolution_required = 1
+    operation.updated_at = now
+
+
+def mark_calendar_external_operation_error(
+    session: DatabaseSession,
+    operation: ExternalOperation,
+    error: Exception,
+) -> None:
+    if isinstance(error, HTTPException) and error.status_code < 500:
+        mark_calendar_external_operation_failed(operation, error=error)
+    else:
+        mark_calendar_external_operation_unknown(operation, error=error)
+    session.commit()
+
+
 def connection_scopes(connection: dict[str, object]) -> list[str]:
     scopes = connection.get("scopes")
     if isinstance(scopes, list):
@@ -370,6 +537,21 @@ def update_google_gmail_auto_import_settings(
         enabled=payload.enabled,
         interval_minutes=payload.interval_minutes,
         max_messages_per_run=payload.max_messages_per_run,
+    )
+    return {"ok": True, "data": settings}
+
+
+@router.patch("/calendar/auto-sync-settings")
+def update_google_calendar_auto_sync_settings(
+    payload: CalendarAutoSyncSettingsPayload,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    settings = write_google_calendar_auto_sync_settings(
+        session,
+        enabled=payload.enabled,
+        interval_minutes=payload.interval_minutes,
+        calendar_ids=payload.calendar_ids,
+        month_count=payload.month_count,
     )
     return {"ok": True, "data": settings}
 
@@ -511,6 +693,7 @@ def google_calendar_status(
             "calendar_write_enabled": status["calendar_write_enabled"],
             "scopes": status["scopes"],
             "last_error": status["last_error"],
+            "calendar_auto_sync": status["calendar_auto_sync"],
         },
     }
 
@@ -583,6 +766,11 @@ def calendar_db_events(
     events = session.scalars(
         statement.order_by(CalendarEvent.start_at.asc(), CalendarEvent.summary.asc())
     ).all()
+    events = deduplicated_calendar_events(events)
+    now = jst_iso()
+    for event in events:
+        inherit_calendar_event_links_from_recurring_master(session, event=event, now=now)
+    session.commit()
     return {
         "ok": True,
         "data": {
@@ -590,6 +778,26 @@ def calendar_db_events(
             "calendar_ids": calendar_ids,
         },
     }
+
+
+def deduplicated_calendar_events(events: list[CalendarEvent]) -> list[CalendarEvent]:
+    selected: dict[tuple[str, str, str], CalendarEvent] = {}
+    passthrough: list[CalendarEvent] = []
+    for event in events:
+        if event.external_event_id is None:
+            passthrough.append(event)
+            continue
+        key = (event.external_event_id, event.start_at, event.end_at)
+        current = selected.get(key)
+        if current is None or calendar_event_dedup_rank(event) < calendar_event_dedup_rank(current):
+            selected[key] = event
+    combined = [*passthrough, *selected.values()]
+    return sorted(combined, key=lambda event: (event.start_at, event.summary, event.id))
+
+
+def calendar_event_dedup_rank(event: CalendarEvent) -> tuple[int, str]:
+    primary_alias_rank = 1 if event.external_calendar_id == "primary" else 0
+    return (primary_alias_rank, event.id)
 
 
 @router.get("/calendar/db-events/{event_id}")
@@ -604,6 +812,8 @@ def calendar_db_event_detail(
         or event.google_status == "cancelled"
     ):
         raise json_error(404, "CALENDAR_EVENT_NOT_FOUND", "Calendar event was not found.")
+    inherit_calendar_event_links_from_recurring_master(session, event=event, now=jst_iso())
+    session.commit()
     links = session.scalars(
         select(CalendarEventLink)
         .where(CalendarEventLink.calendar_event_id == event.id)
@@ -667,19 +877,55 @@ def update_calendar_db_event(
         google_event_id = event.external_event_id
         google_data: dict[str, object] | None = None
         if summary is not None:
-            google_data = calendar_api_patch_json(
-                encoded_calendar_path(calendar_id, f"/events/{quote(google_event_id, safe='')}"),
-                access_token,
-                {"summary": summary},
+            patch_payload = {"summary": summary}
+            operation = create_calendar_external_operation(
+                session,
+                operation_type="google_calendar_event_update",
+                payload={
+                    "calendar_id": calendar_id,
+                    "event_id": google_event_id,
+                    "payload": patch_payload,
+                },
+            )
+            try:
+                google_data = calendar_api_patch_json(
+                    encoded_calendar_path(calendar_id, f"/events/{quote(google_event_id, safe='')}"),
+                    access_token,
+                    patch_payload,
+                )
+            except Exception as error:
+                mark_calendar_external_operation_error(session, operation, error)
+                raise
+            mark_calendar_external_operation_succeeded(
+                operation,
+                external_id=google_event_id,
             )
         if target_calendar_id is not None and target_calendar_id != calendar_id:
-            google_data = calendar_api_post_json(
-                encoded_calendar_path(
-                    calendar_id,
-                    f"/events/{quote(google_event_id, safe='')}/move?destination={quote(target_calendar_id, safe='')}",
-                ),
-                access_token,
-                {},
+            move_path = encoded_calendar_path(
+                calendar_id,
+                f"/events/{quote(google_event_id, safe='')}/move?destination={quote(target_calendar_id, safe='')}",
+            )
+            operation = create_calendar_external_operation(
+                session,
+                operation_type="google_calendar_event_calendar_move",
+                payload={
+                    "calendar_id": calendar_id,
+                    "event_id": google_event_id,
+                    "target_calendar_id": target_calendar_id,
+                },
+            )
+            try:
+                google_data = calendar_api_post_json(
+                    move_path,
+                    access_token,
+                    {},
+                )
+            except Exception as error:
+                mark_calendar_external_operation_error(session, operation, error)
+                raise
+            mark_calendar_external_operation_succeeded(
+                operation,
+                external_id=google_event_id,
             )
             calendar_id = target_calendar_id
         if google_data is None:
@@ -758,16 +1004,34 @@ def move_calendar_db_event(
                 "Calendar event is not linked to a Google event.",
             )
         access_token = google_gmail_access_token(session, connection)
-        data = calendar_api_patch_json(
-            encoded_calendar_path(
-                event.external_calendar_id,
-                f"/events/{quote(event.external_event_id, safe='')}",
-            ),
-            access_token,
-            {
-                "start": calendar_event_time(payload.start, payload.time_zone),
-                "end": calendar_event_time(payload.end, payload.time_zone),
+        patch_payload = {
+            "start": calendar_event_time(payload.start, payload.time_zone),
+            "end": calendar_event_time(payload.end, payload.time_zone),
+        }
+        operation = create_calendar_external_operation(
+            session,
+            operation_type="google_calendar_event_time_move",
+            payload={
+                "calendar_id": event.external_calendar_id,
+                "event_id": event.external_event_id,
+                "payload": patch_payload,
             },
+        )
+        try:
+            data = calendar_api_patch_json(
+                encoded_calendar_path(
+                    event.external_calendar_id,
+                    f"/events/{quote(event.external_event_id, safe='')}",
+                ),
+                access_token,
+                patch_payload,
+            )
+        except Exception as error:
+            mark_calendar_external_operation_error(session, operation, error)
+            raise
+        mark_calendar_external_operation_succeeded(
+            operation,
+            external_id=event.external_event_id,
         )
         db_event = upsert_calendar_event_from_google_response(
             session,
@@ -792,6 +1056,94 @@ def move_calendar_db_event(
     event.version += 1
     session.commit()
     return {"ok": True, "data": {"event": calendar_db_event_item(event), "google_event": None}}
+
+
+@router.delete("/calendar/db-events/{event_id}")
+def delete_calendar_db_event(
+    event_id: str,
+    scope: str = Query("event"),
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    event = session.get(CalendarEvent, event_id)
+    if (
+        event is None
+        or event.sync_status in {"missing_from_google", "cancelled"}
+        or event.google_status == "cancelled"
+    ):
+        raise json_error(404, "CALENDAR_EVENT_NOT_FOUND", "Calendar event was not found.")
+    if scope not in {"event", "series"}:
+        raise json_error(422, "INVALID_DELETE_SCOPE", "Delete scope must be event or series.")
+    if scope == "series" and not calendar_event_has_series(event):
+        raise json_error(409, "CALENDAR_EVENT_SERIES_NOT_FOUND", "Calendar event has no series.")
+
+    now = jst_iso()
+    target_events = calendar_event_delete_targets(session, event=event, scope=scope)
+    google_delete_targets = calendar_event_google_delete_targets(
+        target_events,
+        requested_event=event,
+        scope=scope,
+    )
+    if google_delete_targets:
+        connection = read_setting_json(session, GMAIL_CONNECTION_KEY) or {}
+        connected, _can_read, can_write = calendar_connection_state(session)
+        if not connected:
+            raise json_error(
+                409,
+                "GOOGLE_CALENDAR_NOT_CONNECTED",
+                "Google Calendar is not connected.",
+            )
+        if not can_write:
+            raise json_error(
+                403,
+                "GOOGLE_CALENDAR_SCOPE_MISSING",
+                "Google Calendar event scope is not granted. Reconnect Google.",
+            )
+        access_token = google_gmail_access_token(session, connection)
+    else:
+        access_token = None
+    for calendar_id, external_event_id in google_delete_targets:
+        operation = create_calendar_external_operation(
+            session,
+            operation_type="google_calendar_event_delete",
+            payload={
+                "calendar_id": calendar_id,
+                "event_id": external_event_id,
+                "scope": scope,
+                "requested_event_id": event.id,
+            },
+        )
+        try:
+            calendar_api_delete(
+                encoded_calendar_path(
+                    calendar_id,
+                    f"/events/{quote(external_event_id, safe='')}",
+                ),
+                access_token or "",
+            )
+        except Exception as error:
+            mark_calendar_external_operation_error(session, operation, error)
+            raise
+        mark_calendar_external_operation_succeeded(
+            operation,
+            external_id=external_event_id,
+        )
+
+    for target_event in target_events:
+        target_event.sync_status = "cancelled"
+        target_event.google_status = "cancelled"
+        target_event.last_synced_at = now
+        target_event.updated_at = now
+        target_event.version += 1
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "deleted": True,
+            "deleted_count": len(target_events),
+            "scope": scope,
+            "event": calendar_db_event_item(event),
+        },
+    }
 
 
 @router.patch("/calendar/db-events/{event_id}/title-fit")
@@ -872,6 +1224,7 @@ def create_calendar_db_event_link(
     session.add(link)
     event.updated_at = now
     event.version += 1
+    propagate_calendar_event_links_to_recurring_instances(session, master_event=event, now=now)
     session.commit()
     return {"ok": True, "data": {"link": calendar_event_link_item(session, link)}}
 
@@ -899,6 +1252,13 @@ def sync_google_calendar_events(
     payload: GoogleCalendarSyncPayload,
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
+    return {"ok": True, "data": perform_google_calendar_sync(session, payload)}
+
+
+def perform_google_calendar_sync(
+    session: DatabaseSession,
+    payload: GoogleCalendarSyncPayload,
+) -> dict[str, object]:
     connection = read_setting_json(session, GMAIL_CONNECTION_KEY) or {}
     connected, can_read, _can_write = calendar_connection_state(session)
     if not connected:
@@ -919,7 +1279,11 @@ def sync_google_calendar_events(
     updated_count = 0
     cancelled_count = 0
     seen_keys: set[tuple[str, str]] = set()
+    storage_calendar_ids: list[str] = []
     for calendar_id in calendar_ids:
+        storage_calendar_id = storage_calendar_id_for_created_event(calendar_id, access_token)
+        if storage_calendar_id not in storage_calendar_ids:
+            storage_calendar_ids.append(storage_calendar_id)
         google_items = fetch_google_calendar_events(
             calendar_id,
             access_token,
@@ -931,12 +1295,12 @@ def sync_google_calendar_events(
             external_event_id = item.get("id") if isinstance(item.get("id"), str) else None
             if external_event_id is None or external_event_id.strip() == "":
                 continue
-            seen_keys.add((calendar_id, external_event_id))
+            seen_keys.add((storage_calendar_id, external_event_id))
             status = item.get("status") if isinstance(item.get("status"), str) else None
             existing = session.scalar(
                 select(CalendarEvent)
                 .where(CalendarEvent.source == "google")
-                .where(CalendarEvent.external_calendar_id == calendar_id)
+                .where(CalendarEvent.external_calendar_id == storage_calendar_id)
                 .where(CalendarEvent.external_event_id == external_event_id)
             )
             if status == "cancelled":
@@ -952,44 +1316,57 @@ def sync_google_calendar_events(
             if normalized_event is None:
                 continue
             if existing is None:
-                session.add(
-                    CalendarEvent(
-                        id=f"calendar_event_{uuid.uuid4().hex}",
-                        source="google",
-                        external_calendar_id=calendar_id,
-                        external_event_id=external_event_id,
-                        external_etag=normalized_event["external_etag"],
-                        external_ical_uid=normalized_event["external_ical_uid"],
-                        external_html_link=normalized_event["external_html_link"],
-                        external_updated_at=normalized_event["external_updated_at"],
-                        google_status=normalized_event["google_status"],
-                        summary=normalized_event["summary"],
-                        description=normalized_event["description"],
-                        location=normalized_event["location"],
-                        start_at=normalized_event["start_at"],
-                        end_at=normalized_event["end_at"],
-                        all_day=normalized_event["all_day"],
-                        time_zone=normalized_event["time_zone"],
-                        recurring_event_id=normalized_event["recurring_event_id"],
-                        attendance_requirement="unknown",
-                        tags_json=None,
-                        metadata_json=None,
-                        sync_status="synced",
-                        last_synced_at=now,
-                        local_note=None,
-                        created_at=now,
-                        updated_at=now,
-                        version=1,
-                    )
+                event_for_links = CalendarEvent(
+                    id=f"calendar_event_{uuid.uuid4().hex}",
+                    source="google",
+                    external_calendar_id=storage_calendar_id,
+                    external_event_id=external_event_id,
+                    external_etag=normalized_event["external_etag"],
+                    external_ical_uid=normalized_event["external_ical_uid"],
+                    external_html_link=normalized_event["external_html_link"],
+                    external_updated_at=normalized_event["external_updated_at"],
+                    google_status=normalized_event["google_status"],
+                    summary=normalized_event["summary"],
+                    description=normalized_event["description"],
+                    location=normalized_event["location"],
+                    start_at=normalized_event["start_at"],
+                    end_at=normalized_event["end_at"],
+                    all_day=normalized_event["all_day"],
+                    time_zone=normalized_event["time_zone"],
+                    recurring_event_id=normalized_event["recurring_event_id"],
+                    academic_series_id=None,
+                    attendance_requirement="unknown",
+                    tags_json=None,
+                    metadata_json=None,
+                    sync_status="synced",
+                    last_synced_at=now,
+                    local_note=None,
+                    created_at=now,
+                    updated_at=now,
+                    version=1,
                 )
+                session.add(event_for_links)
+                session.flush()
                 imported_count += 1
             else:
                 apply_google_calendar_event_update(existing, normalized_event, now)
+                event_for_links = existing
                 updated_count += 1
+            inherit_calendar_event_links_from_recurring_master(
+                session,
+                event=event_for_links,
+                now=now,
+            )
+            mark_primary_alias_calendar_event_missing(
+                session,
+                storage_calendar_id=storage_calendar_id,
+                external_event_id=external_event_id,
+                now=now,
+            )
 
     missing_count = mark_missing_calendar_events(
         session,
-        calendar_ids=calendar_ids,
+        calendar_ids=storage_calendar_ids or calendar_ids,
         seen_keys=seen_keys,
         time_min=start_at,
         time_max=end_at,
@@ -997,16 +1374,13 @@ def sync_google_calendar_events(
     )
     session.commit()
     return {
-        "ok": True,
-        "data": {
-            "calendar_ids": calendar_ids,
-            "time_min": start_at,
-            "time_max": end_at,
-            "imported_count": imported_count,
-            "updated_count": updated_count,
-            "cancelled_count": cancelled_count,
-            "missing_count": missing_count,
-        },
+        "calendar_ids": calendar_ids,
+        "time_min": start_at,
+        "time_max": end_at,
+        "imported_count": imported_count,
+        "updated_count": updated_count,
+        "cancelled_count": cancelled_count,
+        "missing_count": missing_count,
     }
 
 
@@ -1100,10 +1474,29 @@ def create_google_calendar_event(
         event_payload["location"] = payload.location.strip()
     if payload.recurrence_rule is not None and payload.recurrence_rule.strip() != "":
         event_payload["recurrence"] = [calendar_recurrence_rule(payload.recurrence_rule)]
-    data = calendar_api_post_json(
-        encoded_calendar_path(payload.calendar_id, "/events"),
-        access_token,
-        event_payload,
+    operation = create_calendar_external_operation(
+        session,
+        operation_type="google_calendar_event_create",
+        payload={
+            "calendar_id": payload.calendar_id,
+            "payload": event_payload,
+            "linked_mail_message_id": payload.linked_mail_message_id,
+            "linked_case_id": payload.linked_case_id,
+        },
+    )
+    try:
+        data = calendar_api_post_json(
+            encoded_calendar_path(payload.calendar_id, "/events"),
+            access_token,
+            event_payload,
+        )
+    except Exception as error:
+        mark_calendar_external_operation_error(session, operation, error)
+        raise
+    external_event_id = data.get("id") if isinstance(data.get("id"), str) else None
+    mark_calendar_external_operation_succeeded(
+        operation,
+        external_id=external_event_id,
     )
     now = jst_iso()
     storage_calendar_id = storage_calendar_id_for_created_event(
@@ -1116,6 +1509,10 @@ def create_google_calendar_event(
         item=data,
         now=now,
     )
+    if payload.academic_series_id is not None and payload.academic_series_id.strip() != "":
+        db_event.academic_series_id = payload.academic_series_id.strip()
+        db_event.updated_at = now
+        db_event.version += 1
     links = []
     mail_link = ensure_calendar_event_link(
         session,
@@ -1135,6 +1532,7 @@ def create_google_calendar_event(
     )
     if case_link is not None:
         links.append(case_link)
+    propagate_calendar_event_links_to_recurring_instances(session, master_event=db_event, now=now)
     session.commit()
     return {
         "ok": True,
@@ -1413,6 +1811,96 @@ def run_google_gmail_auto_import_once(
         "stopped_gmail_message_id": plan.stopped_gmail_message_id,
         "stopped_received_at": plan.stopped_received_at,
         "reached_loaded_message": plan.reached_loaded_message,
+    }
+
+
+def run_google_calendar_auto_sync_once(
+    session: DatabaseSession,
+) -> dict[str, object]:
+    settings = google_calendar_auto_sync_settings_data(session)
+    now = jst_iso()
+    if not bool(settings["enabled"]):
+        return {
+            "enabled": False,
+            "synced": False,
+            "reason": "disabled",
+        }
+
+    connected, can_read, _can_write = calendar_connection_state(session)
+    if not connected or not can_read:
+        reason = "not_connected" if not connected else "calendar_scope_missing"
+        next_settings = {
+            **settings,
+            "last_run_at": now,
+            "last_error": None,
+            "last_stop_reason": reason,
+            "last_imported_count": 0,
+            "last_updated_count": 0,
+            "last_cancelled_count": 0,
+            "last_missing_count": 0,
+        }
+        write_setting_json(session, CALENDAR_AUTO_SYNC_SETTINGS_KEY, next_settings, now)
+        session.commit()
+        return {
+            "enabled": True,
+            "synced": False,
+            "reason": reason,
+        }
+
+    try:
+        write_setting_json(
+            session,
+            CALENDAR_AUTO_SYNC_SETTINGS_KEY,
+            {
+                **settings,
+                "last_run_at": now,
+                "last_error": None,
+                "last_stop_reason": "running",
+            },
+            now,
+        )
+        session.commit()
+        result = perform_google_calendar_sync(
+            session,
+            GoogleCalendarSyncPayload(
+                calendar_ids=normalized_calendar_ids(settings.get("calendar_ids"))
+                or ["primary"],
+                month_count=normalized_calendar_auto_sync_month_count(
+                    settings.get("month_count")
+                ),
+            ),
+        )
+        latest_settings = google_calendar_auto_sync_settings_data(session)
+        next_settings = {
+            **latest_settings,
+            "last_run_at": now,
+            "last_success_at": now,
+            "last_error": None,
+            "last_imported_count": result["imported_count"],
+            "last_updated_count": result["updated_count"],
+            "last_cancelled_count": result["cancelled_count"],
+            "last_missing_count": result["missing_count"],
+            "last_time_min": result["time_min"],
+            "last_time_max": result["time_max"],
+            "last_stop_reason": "synced",
+        }
+        write_setting_json(session, CALENDAR_AUTO_SYNC_SETTINGS_KEY, next_settings, now)
+        session.commit()
+    except Exception as error:
+        next_settings = {
+            **google_calendar_auto_sync_settings_data(session),
+            "last_run_at": now,
+            "last_error": str(error),
+            "last_stop_reason": "failed",
+        }
+        write_setting_json(session, CALENDAR_AUTO_SYNC_SETTINGS_KEY, next_settings, now)
+        session.commit()
+        raise
+
+    return {
+        "enabled": True,
+        "synced": True,
+        **result,
     }
 
 
@@ -1890,6 +2378,35 @@ def calendar_api_patch_json(
     return data
 
 
+def calendar_api_delete(
+    path: str,
+    access_token: str,
+) -> None:
+    request = Request(
+        f"{GOOGLE_CALENDAR_API_BASE_URL}{path}",
+        headers={"Authorization": f"Bearer {access_token}"},
+        method="DELETE",
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            response.read()
+    except HTTPError as exc:
+        details = read_google_error_details(exc)
+        raise json_error(
+            exc.code,
+            "GOOGLE_CALENDAR_API_FORBIDDEN"
+            if exc.code == 403
+            else "GOOGLE_CALENDAR_API_ERROR",
+            details or f"Google Calendar API request failed with HTTP {exc.code}.",
+        ) from exc
+    except URLError as exc:
+        raise json_error(
+            502,
+            "GOOGLE_CALENDAR_API_ERROR",
+            f"Google Calendar API request failed: {exc.reason}",
+        ) from exc
+
+
 def encoded_calendar_path(calendar_id: str, suffix: str = "") -> str:
     return f"/calendars/{quote(calendar_id, safe='')}{suffix}"
 
@@ -1915,21 +2432,32 @@ def calendar_event_time(value: str, time_zone: str) -> dict[str, object]:
         year, month, day = date_match.groups()
         return {"date": f"{year}-{int(month):02d}-{int(day):02d}"}
 
-    date_time_match = re.fullmatch(
-        r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})[T ](\d{1,2}):(\d{2})(?::(\d{2}))?",
-        stripped,
-    )
-    if date_time_match is None:
+    try:
+        target_zone = ZoneInfo(time_zone)
+    except ZoneInfoNotFoundError as error:
+        raise json_error(
+            400,
+            "INVALID_CALENDAR_TIME_ZONE",
+            f"Invalid calendar time zone: {time_zone}",
+        ) from error
+
+    normalized_input = stripped.replace("/", "-")
+    if normalized_input.endswith("Z"):
+        normalized_input = f"{normalized_input[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized_input)
+    except ValueError as error:
         raise json_error(
             400,
             "INVALID_CALENDAR_EVENT_TIME",
             f"Invalid calendar event time: {value}",
-        )
-    year, month, day, hour, minute, second = date_time_match.groups()
-    normalized = (
-        f"{year}-{int(month):02d}-{int(day):02d}"
-        f"T{int(hour):02d}:{minute}:{second or '00'}"
-    )
+        ) from error
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=target_zone)
+    else:
+        parsed = parsed.astimezone(target_zone)
+    normalized = parsed.isoformat(timespec="seconds")
     return {"dateTime": normalized, "timeZone": time_zone}
 
 
@@ -2125,6 +2653,127 @@ def mark_missing_calendar_events(
     return missing_count
 
 
+def mark_primary_alias_calendar_event_missing(
+    session: DatabaseSession,
+    *,
+    storage_calendar_id: str,
+    external_event_id: str,
+    now: str,
+) -> None:
+    if storage_calendar_id == "primary":
+        return
+    alias = session.scalar(
+        select(CalendarEvent)
+        .where(CalendarEvent.source == "google")
+        .where(CalendarEvent.external_calendar_id == "primary")
+        .where(CalendarEvent.external_event_id == external_event_id)
+        .where(CalendarEvent.sync_status != "missing_from_google")
+    )
+    if alias is None:
+        return
+    alias.sync_status = "missing_from_google"
+    alias.last_synced_at = now
+    alias.updated_at = now
+    alias.version += 1
+
+
+def calendar_event_is_active(event: CalendarEvent) -> bool:
+    return (
+        event.sync_status not in {"missing_from_google", "cancelled"}
+        and event.google_status != "cancelled"
+    )
+
+
+def calendar_event_has_series(event: CalendarEvent) -> bool:
+    return (
+        event.academic_series_id is not None
+        and event.academic_series_id.strip() != ""
+    ) or (
+        event.recurring_event_id is not None
+        and event.recurring_event_id.strip() != ""
+    )
+
+
+def calendar_event_delete_targets(
+    session: DatabaseSession,
+    *,
+    event: CalendarEvent,
+    scope: str,
+) -> list[CalendarEvent]:
+    if scope == "event":
+        return [event]
+    if event.academic_series_id is not None and event.academic_series_id.strip() != "":
+        candidates = session.scalars(
+            select(CalendarEvent)
+            .where(CalendarEvent.academic_series_id == event.academic_series_id)
+            .order_by(CalendarEvent.start_at.asc(), CalendarEvent.id.asc())
+        ).all()
+        return unique_active_calendar_events(candidates, fallback=event)
+    if event.recurring_event_id is not None and event.recurring_event_id.strip() != "":
+        master_external_event_id = event.recurring_event_id
+        candidates = session.scalars(
+            select(CalendarEvent)
+            .where(CalendarEvent.source == event.source)
+            .where(CalendarEvent.external_calendar_id == event.external_calendar_id)
+            .where(
+                (CalendarEvent.external_event_id == master_external_event_id)
+                | (CalendarEvent.recurring_event_id == master_external_event_id)
+            )
+            .order_by(CalendarEvent.start_at.asc(), CalendarEvent.id.asc())
+        ).all()
+        return unique_active_calendar_events(candidates, fallback=event)
+    return [event]
+
+
+def calendar_event_google_delete_targets(
+    events: list[CalendarEvent],
+    *,
+    requested_event: CalendarEvent,
+    scope: str,
+) -> list[tuple[str, str]]:
+    if requested_event.source != "google":
+        return []
+    if requested_event.external_calendar_id is None:
+        raise json_error(
+            409,
+            "GOOGLE_CALENDAR_EVENT_NOT_LINKED",
+            "Calendar event is not linked to a Google event.",
+        )
+    if (
+        scope == "series"
+        and requested_event.recurring_event_id is not None
+        and requested_event.recurring_event_id.strip() != ""
+    ):
+        return [(requested_event.external_calendar_id, requested_event.recurring_event_id)]
+
+    targets: dict[tuple[str, str], tuple[str, str]] = {}
+    for event in events:
+        if event.source != "google":
+            continue
+        if event.external_calendar_id is None or event.external_event_id is None:
+            raise json_error(
+                409,
+                "GOOGLE_CALENDAR_EVENT_NOT_LINKED",
+                "Calendar event is not linked to a Google event.",
+            )
+        key = (event.external_calendar_id, event.external_event_id)
+        targets[key] = key
+    return list(targets.values())
+
+
+def unique_active_calendar_events(
+    events: list[CalendarEvent],
+    *,
+    fallback: CalendarEvent,
+) -> list[CalendarEvent]:
+    selected: dict[str, CalendarEvent] = {}
+    for event in [*events, fallback]:
+        if not calendar_event_is_active(event):
+            continue
+        selected[event.id] = event
+    return list(selected.values())
+
+
 def calendar_db_event_item(event: CalendarEvent) -> dict[str, object]:
     if event.all_day:
         start: dict[str, object] = {"date": event.start_at[:10]}
@@ -2149,6 +2798,8 @@ def calendar_db_event_item(event: CalendarEvent) -> dict[str, object]:
         "created": event.created_at,
         "updated": event.external_updated_at or event.updated_at,
         "sync_status": event.sync_status,
+        "recurring_event_id": event.recurring_event_id,
+        "academic_series_id": event.academic_series_id,
         "attendance_requirement": event.attendance_requirement,
         "tags_json": event.tags_json,
         "metadata_json": event.metadata_json,
@@ -2522,6 +3173,7 @@ def upsert_calendar_event_from_google_response(
             all_day=int(normalized_event["all_day"]),
             time_zone=normalized_event["time_zone"],  # type: ignore[arg-type]
             recurring_event_id=normalized_event["recurring_event_id"],  # type: ignore[arg-type]
+            academic_series_id=None,
             attendance_requirement="required",
             tags_json=None,
             metadata_json=None,
@@ -2573,6 +3225,60 @@ def ensure_calendar_event_link(
     session.add(link)
     session.flush()
     return link
+
+
+def inherit_calendar_event_links_from_recurring_master(
+    session: DatabaseSession,
+    *,
+    event: CalendarEvent,
+    now: str,
+) -> None:
+    if event.recurring_event_id is None or event.recurring_event_id.strip() == "":
+        return
+    if event.external_calendar_id is None:
+        return
+    master_event = session.scalar(
+        select(CalendarEvent)
+        .where(CalendarEvent.source == event.source)
+        .where(CalendarEvent.external_calendar_id == event.external_calendar_id)
+        .where(CalendarEvent.external_event_id == event.recurring_event_id)
+    )
+    if master_event is None:
+        return
+    master_links = session.scalars(
+        select(CalendarEventLink).where(CalendarEventLink.calendar_event_id == master_event.id)
+    ).all()
+    for link in master_links:
+        ensure_calendar_event_link(
+            session,
+            event=event,
+            linked_type=link.linked_type,
+            linked_id=link.linked_id,
+            role=link.role,
+            now=now,
+        )
+
+
+def propagate_calendar_event_links_to_recurring_instances(
+    session: DatabaseSession,
+    *,
+    master_event: CalendarEvent,
+    now: str,
+) -> None:
+    if master_event.external_calendar_id is None or master_event.external_event_id is None:
+        return
+    child_events = session.scalars(
+        select(CalendarEvent)
+        .where(CalendarEvent.source == master_event.source)
+        .where(CalendarEvent.external_calendar_id == master_event.external_calendar_id)
+        .where(CalendarEvent.recurring_event_id == master_event.external_event_id)
+    ).all()
+    for child_event in child_events:
+        inherit_calendar_event_links_from_recurring_master(
+            session,
+            event=child_event,
+            now=now,
+        )
 
 
 def gmail_api_send_raw_message(

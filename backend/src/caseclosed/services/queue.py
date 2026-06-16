@@ -22,6 +22,15 @@ class QueueInterface(Protocol):
 
     def fail(self, job_id: str, *, error_type: str, error_message: str) -> Job: ...
 
+    def retry_later(
+        self,
+        job_id: str,
+        *,
+        error_type: str,
+        error_message: str,
+        available_at: str,
+    ) -> Job: ...
+
     def mark_stale_jobs(
         self,
         *,
@@ -102,6 +111,31 @@ class SQLiteQueue:
             job.error_message = error_message
             job.finished_at = finished_at
             job.updated_at = finished_at
+            session.commit()
+            return job
+
+    def retry_later(
+        self,
+        job_id: str,
+        *,
+        error_type: str,
+        error_message: str,
+        available_at: str,
+    ) -> Job:
+        updated_at = runtime.jst_iso()
+        with runtime.SessionLocal() as session:
+            job = self._require_running_job(session, job_id)
+            job.status = "pending"
+            job.error_type = error_type
+            job.error_message = error_message
+            job.retry_count += 1
+            job.locked_by = None
+            job.locked_at = None
+            job.heartbeat_at = None
+            job.started_at = None
+            job.finished_at = None
+            job.available_at = available_at
+            job.updated_at = updated_at
             session.commit()
             return job
 

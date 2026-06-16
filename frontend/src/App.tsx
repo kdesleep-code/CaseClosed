@@ -2,6 +2,7 @@
 import type { FormEvent } from 'react'
 import { AuthApiError, login, readSession } from './authApi'
 import type { SessionData } from './authApi'
+import AcademicCalendarView from './AcademicCalendarView'
 import loginDoorTanuki from './assets/login-door-tanuki.png'
 import CalendarView from './CalendarView'
 import CalendarEventDetailView from './CalendarEventDetailView'
@@ -11,6 +12,7 @@ import CaseView from './CaseView'
 import ComposeMailView from './ComposeMailView'
 import ContactsView from './ContactsView'
 import type { ContactsInitialData } from './ContactsView'
+import LogView from './LogView'
 import MailView from './MailView'
 import type { MailInitialData } from './MailView'
 import type { MailTab } from './MailView'
@@ -1226,6 +1228,15 @@ function App() {
         </>
       )
     }
+    if (path === '/logs') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <LogView />
+        </>
+      )
+    }
     if (path === '/mail' || path === '/mail/action-needed') {
       return (
         <>
@@ -1318,6 +1329,15 @@ function App() {
           {pendingContactNoticeElement}
           {navigationError !== null && <p className="route-error">{navigationError}</p>}
           <CalendarView />
+        </>
+      )
+    }
+    if (path === '/academic-calendar') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <AcademicCalendarView />
         </>
       )
     }

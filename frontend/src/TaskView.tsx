@@ -99,10 +99,14 @@ function sortTasks(tasks: TaskItem[], sortMode: TaskSortMode) {
   })
 }
 
+function defaultSortForTab(tab: TaskTab): TaskSortMode {
+  return tab === 'not_started' ? 'due_asc' : 'priority'
+}
+
 function TaskCard({ task, returnTo }: { task: TaskItem; returnTo: string }) {
   return (
     <AppLink
-      className={`task-row task-row-${task.status}`}
+      className={`task-row task-row-${task.status} task-importance-row-${task.priority}`}
       href={`/tasks/${encodeURIComponent(task.id)}?return_to=${encodeURIComponent(returnTo)}`}
     >
       <div className="task-row-main">
@@ -146,9 +150,11 @@ export default function TaskView() {
   const [sortMode, setSortMode] = useState<TaskSortMode>(() => {
     const params = new URLSearchParams(window.location.search)
     const value = params.get('sort')
-    return value === 'due_asc' || value === 'due_desc' || value === 'updated_desc'
-      ? value
-      : 'priority'
+    if (value === 'due_asc' || value === 'due_desc' || value === 'updated_desc') {
+      return value
+    }
+    const tab = params.get('tab')
+    return tab === 'not_started' ? 'due_asc' : 'priority'
   })
   const [currentTab, setCurrentTab] = useState<TaskTab>(() => {
     const params = new URLSearchParams(window.location.search)
@@ -320,7 +326,10 @@ export default function TaskView() {
                   <button
                     aria-selected={currentTab === tab}
                     key={tab}
-                    onClick={() => setCurrentTab(tab)}
+                    onClick={() => {
+                      setCurrentTab(tab)
+                      setSortMode(defaultSortForTab(tab))
+                    }}
                     role="tab"
                     type="button"
                   >
@@ -333,7 +342,10 @@ export default function TaskView() {
                   <button
                     aria-selected={currentTab === tab}
                     key={tab}
-                    onClick={() => setCurrentTab(tab)}
+                    onClick={() => {
+                      setCurrentTab(tab)
+                      setSortMode(defaultSortForTab(tab))
+                    }}
                     role="tab"
                     type="button"
                   >

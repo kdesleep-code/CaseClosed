@@ -29,6 +29,10 @@ function activeSessionResponse() {
   })
 }
 
+function expectRecipientToken(address: string) {
+  expect(screen.getByRole('button', { name: `Remove ${address}` })).toBeInTheDocument()
+}
+
 afterEach(() => {
   resetLanguagePatch()
   window.history.pushState({}, '', '/')
@@ -1236,8 +1240,8 @@ describe('Phase 4 mail screen', () => {
     expect(
       await screen.findByRole('heading', { level: 1, name: 'Compose Mail' }),
     ).toBeInTheDocument()
-    expect(screen.getByLabelText('To')).toHaveValue('review.mock.sender@example.com')
-    expect(screen.getByLabelText('Cc')).toHaveValue('recipient.one@example.com')
+    expectRecipientToken('review.mock.sender@example.com')
+    expectRecipientToken('recipient.one@example.com')
     expect(screen.getByLabelText('Subject')).toHaveValue('Review mock mail')
     expect(screen.getByLabelText('Body')).toHaveValue('')
     expect(screen.getByRole('button', { name: 'Auto body' })).toHaveAttribute(
@@ -1257,8 +1261,8 @@ describe('Phase 4 mail screen', () => {
     expect(
       await screen.findByRole('heading', { level: 1, name: 'Compose Mail' }),
     ).toBeInTheDocument()
-    expect(screen.getByLabelText('To')).toHaveValue('review.mock.sender@example.com')
-    expect(screen.getByLabelText('Cc')).toHaveValue('team@example.com')
+    expectRecipientToken('review.mock.sender@example.com')
+    expectRecipientToken('team@example.com')
     expect(screen.getByLabelText('Subject')).toHaveValue('Review mock mail')
     expect(screen.getByLabelText('Body')).toHaveValue('Sent body for resend.')
     expect(screen.queryByRole('button', { name: 'Auto body' })).not.toBeInTheDocument()
@@ -1271,8 +1275,8 @@ describe('Phase 4 mail screen', () => {
     expect(
       await screen.findByRole('heading', { level: 1, name: 'Compose Mail' }),
     ).toBeInTheDocument()
-    expect(screen.getByLabelText('To')).toHaveValue('review.mock.sender@example.com')
-    expect(screen.getByLabelText('Cc')).toHaveValue('team@example.com')
+    expectRecipientToken('review.mock.sender@example.com')
+    expectRecipientToken('team@example.com')
     expect(screen.getByLabelText('Subject')).toHaveValue('Review mock mail')
     expect(screen.getByLabelText('Body')).toHaveValue('')
     await user.click(screen.getByRole('button', { name: 'Auto body' }))
@@ -2431,8 +2435,8 @@ describe('Phase 2 maintenance screen', () => {
     ).not.toBeInTheDocument()
   })
 
-  it('shows send requests in the temporary Debug tab', async () => {
-    const user = userEvent.setup()
+  it('shows send request logs in the Logs page', async () => {
+    window.history.pushState({}, '', '/logs')
     vi.stubGlobal(
       'fetch',
       vi.fn((input: string | URL | Request) => {
@@ -2440,107 +2444,59 @@ describe('Phase 2 maintenance screen', () => {
         if (path === '/api/v1/auth/session') {
           return activeSessionResponse()
         }
-        if (path === '/api/v1/maintenance/status') {
+        if (path === '/api/v1/contacts/unresolved-from-addresses') {
+          return apiResponse(200, { ok: true, data: { items: [] } })
+        }
+        if (path.startsWith('/api/v1/logs?')) {
           return apiResponse(200, {
             ok: true,
             data: {
-              job_accepting: true,
-              running_jobs: 0,
-              pending_write_requests: 0,
-              external_unknown_count: 0,
-              backup_status: 'not_configured',
-            },
-          })
-        }
-        if (path === '/api/v1/jobs') {
-          return apiResponse(200, { ok: true, data: { items: [] } })
-        }
-        if (path === '/api/v1/external-operations') {
-          return apiResponse(200, { ok: true, data: { items: [] } })
-        }
-        if (path === '/api/v1/mails?tab=pending&limit=50') {
-          return apiResponse(200, { ok: true, data: { items: [] } })
-        }
-        if (path === '/api/v1/mails/send-requests') {
-          return apiResponse(200, {
-            ok: true,
-            data: {
+              page: 1,
+              page_size: 100,
+              total: 2,
+              total_pages: 1,
+              types: [
+                { type: 'audit', count: 0 },
+                { type: 'system', count: 0 },
+                { type: 'auth', count: 0 },
+                { type: 'job', count: 0 },
+                { type: 'write', count: 0 },
+                { type: 'external', count: 0 },
+                { type: 'storage', count: 0 },
+                { type: 'llm', count: 0 },
+                { type: 'mail_send', count: 1 },
+              ],
               items: [
                 {
                   id: 'mail_send_review',
+                  source_type: 'mail_send',
+                  occurred_at: '2026-05-25T02:30:00+09:00',
+                  level: 'warning',
+                  category: 'mail_send_request',
+                  summary: 'Review send request scheduled_mock',
+                  detail: 'Hello.',
                   status: 'scheduled_mock',
-                  to_addresses: ['review@example.com'],
-                  cc_addresses: ['team@example.com'],
-                  bcc_addresses: [],
-                  subject: 'Review send request',
-                  body_text: 'Hello.',
-                  attachment_names: ['note.txt'],
-                  reply_to_message_id: 'mail_reply_source',
-                  sent_message_id: null,
-                  scheduled_at: '2026-05-25T02:31:00+09:00',
-                  created_at: '2026-05-25T02:30:00+09:00',
+                  target_type: 'mail_send_request',
+                  target_id: 'mail_send_review',
+                  metadata: {
+                    to: ['review@example.com'],
+                    cc: ['team@example.com'],
+                    reply_to_message_id: 'mail_reply_source',
+                  },
+                },
+                {
+                  id: 'llm_review',
+                  source_type: 'llm',
                   updated_at: '2026-05-25T02:30:00+09:00',
-                  version: 1,
-                },
-              ],
-            },
-          })
-        }
-        if (path === '/api/v1/mails/llm-blocked') {
-          return apiResponse(200, {
-            ok: true,
-            data: {
-              items: [
-                {
-                  id: 'mail_blocked_review',
-                  received_at: '2026-05-25T02:20:00+09:00',
-                  subject: 'Password notice',
-                  from_address: 'secret@example.com',
-                  llm_block_reason: 'May contain password.',
-                  llm_blocked_at: '2026-05-25T02:21:00+09:00',
-                },
-              ],
-            },
-          })
-        }
-        if (path === '/api/v1/mails/llm-model-config') {
-          return apiResponse(200, {
-            ok: true,
-            data: {
-              profiles: [
-                {
-                  id: 'openai_gpt_5_2',
-                  provider: 'openai',
-                  model: 'gpt-5.2',
-                  api_key_env: 'CASECLOSED_OPENAI_API_KEY',
-                  endpoint_env: null,
-                  timeout_seconds: 30,
-                },
-              ],
-              functions: [
-                {
-                  function_type: 'mail_importance_classification',
-                  label: 'mail importance classification',
-                  profile_id: 'openai_gpt_5_2',
-                  env_key: 'CASECLOSED_LLM_PROFILE_MAIL_IMPORTANCE_CLASSIFICATION',
-                },
-              ],
-            },
-          })
-        }
-        if (path === '/api/v1/mails/llm-block-filters') {
-          return apiResponse(200, {
-            ok: true,
-            data: {
-              items: [
-                {
-                  id: 'mail_llm_block_filter_review',
-                  query_text: 'password',
-                  reason: 'May contain password.',
-                  is_enabled: true,
-                  created_at: '2026-05-25T02:19:00+09:00',
-                  updated_at: '2026-05-25T02:19:00+09:00',
-                  version: 1,
+                  occurred_at: '2026-05-25T02:29:00+09:00',
+                  level: 'info',
+                  category: 'mail_summary',
+                  summary: 'mail_summary mock succeeded',
+                  detail: null,
+                  status: 'succeeded',
+                  target_type: 'llm_run',
+                  target_id: 'llm_review',
+                  metadata: null,
                 },
               ],
             },
@@ -2551,29 +2507,20 @@ describe('Phase 2 maintenance screen', () => {
     )
 
     render(<App />)
-    await user.click(await screen.findByRole('tab', { name: 'Debug' }))
 
-    expect(screen.getByRole('heading', { name: 'Debug' })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Debug tools' })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'LLM block filter' })).toBeInTheDocument()
-    expect(
-      screen.queryByRole('button', { name: 'Ingest mock mail' }),
-    ).not.toBeInTheDocument()
-    expect(
-      screen.queryByRole('button', { name: 'Run next job' }),
-    ).not.toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Logs' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Filters' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Export CSV' })).toHaveAttribute(
+      'href',
+      expect.stringContaining('/api/v1/logs/export'),
+    )
     expect(await screen.findByRole('row', { name: /mail_send_review/ })).toHaveTextContent(
       'Review send request',
     )
     expect(screen.getByRole('row', { name: /mail_send_review/ })).toHaveTextContent(
       'scheduled_mock',
     )
-    expect(
-      screen.getByText('Cc: team@example.com / Bcc: - / Reply target: mail_reply_source'),
-    ).toBeInTheDocument()
-    expect(screen.getByRole('row', { name: /mail_blocked_review/ })).toHaveTextContent(
-      'Password notice',
-    )
+    expect(screen.getByText('Page 1 / 1, 2 log(s)')).toBeInTheDocument()
   })
 
   it('caps the Jobs and Operations action badge at 9+', async () => {

@@ -302,3 +302,92 @@ def test_phase_9_migrations_add_calendar_event_tables(
         "updated_at",
         "version",
     } <= link_columns
+
+
+def test_phase_9_migrations_add_academic_calendar_tables(
+    migrated_database,
+) -> None:
+    table_names = sqlite_table_names(migrated_database)
+
+    assert {
+        "academic_years",
+        "academic_semesters",
+        "academic_periods",
+        "academic_calendar_days",
+    } <= table_names
+
+    with sqlite3.connect(migrated_database) as connection:
+        year_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(academic_years)"
+            ).fetchall()
+        }
+        semester_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(academic_semesters)"
+            ).fetchall()
+        }
+        period_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(academic_periods)"
+            ).fetchall()
+        }
+        day_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(academic_calendar_days)"
+            ).fetchall()
+        }
+
+    assert {
+        "id",
+        "year_label",
+        "starts_on",
+        "ends_on",
+        "note",
+        "created_at",
+        "updated_at",
+        "version",
+    } <= year_columns
+    assert {
+        "id",
+        "academic_year_id",
+        "label",
+        "starts_on",
+        "ends_on",
+        "sort_order",
+        "note",
+        "created_at",
+        "updated_at",
+        "version",
+    } <= semester_columns
+    assert {
+        "id",
+        "period_no",
+        "label",
+        "starts_at",
+        "ends_at",
+        "sort_order",
+        "note",
+        "created_at",
+        "updated_at",
+        "version",
+    } <= period_columns
+    assert "academic_year_id" not in period_columns
+    assert {
+        "id",
+        "academic_year_id",
+        "date",
+        "day_type",
+        "label",
+        "is_teaching_day",
+        "effective_weekday",
+        "source",
+        "note",
+        "created_at",
+        "updated_at",
+        "version",
+    } <= day_columns

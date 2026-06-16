@@ -986,7 +986,7 @@ POST /cases/{case_id}/close
 POST /cases/{case_id}/archive
 ```
 
-Case削除は提供しない。
+Case削除は通常導線としては提供しない。ただし、誤作成など未完了のまま消したいCaseのため、目立たない例外導線を用意してよい。現行方針では、Case詳細の完了ボタンを右クリックした時だけDeleteを表示する。Deleteは確認必須とし、System Caseには表示しない。
 
 ---
 
@@ -2273,7 +2273,7 @@ POST /maintenance/graceful-shutdown
 6. 外部副作用は確認可能にし、unknownは自動再実行しない。
 7. Contact未登録FromはPendingにする。
 8. Email Address単独Skipは作らない。
-9. Case削除は作らない。
+9. Case削除は通常導線として作らない。誤作成Case向けの目立たない確認付きDeleteのみ許可する。
 10. Task削除は論理削除にする。
 ```
 ## Phase 4 Current Send UI Note

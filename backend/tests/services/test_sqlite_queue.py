@@ -63,6 +63,46 @@ def test_sqlite_queue_failure_records_error(client, database_path: Path) -> None
     assert row == ("failed", "WorkerError", "boom")
 
 
+def test_sqlite_queue_retries_job_later(client, database_path: Path) -> None:
+    del client
+    insert_phase_2_job(database_path, job_id="job_retry_later", status="pending")
+
+    queue_module = importlib.import_module("caseclosed.services.queue")
+    queue = queue_module.SQLiteQueue()
+
+    claimed_job = queue.claim_next("worker-1")
+    queue.retry_later(
+        claimed_job.id,
+        error_type="OpenAIProviderError",
+        error_message="OpenAI API request failed: getaddrinfo failed",
+        available_at="2026-05-22T10:05:00+09:00",
+    )
+
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT status, error_type, error_message, retry_count, locked_by,
+                   locked_at, heartbeat_at, started_at, finished_at, available_at
+            FROM jobs
+            WHERE id = ?
+            """,
+            ("job_retry_later",),
+        ).fetchone()
+
+    assert row == (
+        "pending",
+        "OpenAIProviderError",
+        "OpenAI API request failed: getaddrinfo failed",
+        1,
+        None,
+        None,
+        None,
+        None,
+        None,
+        "2026-05-22T10:05:00+09:00",
+    )
+
+
 def test_sqlite_queue_refreshes_worker_heartbeat(
     client,
     database_path: Path,

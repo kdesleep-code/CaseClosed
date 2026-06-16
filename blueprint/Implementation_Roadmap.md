@@ -84,7 +84,7 @@ Codexには、巨大な一括実装を投げない。
 - Gmail送信やCalendar作成が二重実行されないか
 - Pending Contactの扱いが仕様通りか
 - Task削除が論理削除になっているか
-- Case削除APIが存在しないか
+- Case削除が通常導線に露出していないか、誤作成向けの例外操作に限定されているか
 - Email Address単独Skipが作られていないか
 - External Operation unknownが自動再実行されないか
 - LLM入力全文がllm_runsに保存されていないか
@@ -228,7 +228,8 @@ API:
 - 24時間セッションが作られる
 - 5回失敗でロックされる
 - Inbox / システムメンテナンス Caseが存在する
-- Case削除APIが存在しない
+- System Caseを削除できない
+- Case削除が通常導線ではなく、誤作成向けの例外操作として扱われる
 
 ### レビュー観点
 
@@ -1195,7 +1196,7 @@ API:
 - 認証・セッション
 - LLM入力保存方針
 - Pending Contact
-- Case削除禁止
+- Case削除の通常導線禁止と誤作成向け例外Delete
 - Task論理削除
 - Email Address単独Skip禁止
 - Gmailスター仕様
@@ -1252,7 +1253,7 @@ CaseClosedの設計書群に従って、[機能名] を実装してください�
 - ユーザー確定値をLLM/Systemで上書きしない
 - 外部副作用はexternal_operations経由
 - Task削除は論理削除
-- Case削除は作らない
+- Case削除は通常導線に出さず、誤作成向けの確認付き例外操作に限定する
 - Email Address単独Skipは作らない
 
 完了条件:
@@ -1467,7 +1468,7 @@ Phase 6開始時に特に確認する:
 □ 開発DBと本番DBを分ける
 □ 本番データをWindows開発環境に置かない方針を確認した
 □ mTLSはリバースプロキシで行う方針を確認した
-□ Case削除なしを確認した
+□ Case削除は通常導線に出さず、誤作成向け例外Deleteのみ許可することを確認した
 □ Task論理削除を確認した
 □ Email Address単独Skipなしを確認した
 □ 外部副作用はexternal_operations経由を確認した
@@ -1496,7 +1497,8 @@ CaseClosedの設計書群に従って、Phase 0〜1のテストを先に作成�
 - app_settings / system_logs / audit_logs / cases / case_events のmigrationテスト
 - Inbox Case と システムメンテナンス Case の初期データテスト
 - ログイン成功・失敗・5回失敗ロック・24時間セッション失効のテスト
-- Case削除APIが存在しないことのテスト
+- System Caseを削除できないことのテスト
+- 誤作成Case削除で関連Taskが論理削除され、通常完了CaseはArchive運用であることのテスト
 
 重要:
 - 既存テストは削除・弱体化しない
@@ -1522,7 +1524,7 @@ CaseClosedの設計書群と追加済みテストに従って、プロジェク�
 まだGmail / LLM / Calendarは実装しないでください。
 
 重要制約:
-- Case削除APIは作らない
+- Case削除は通常導線に出さず、誤作成向けの確認付き例外操作に限定する
 - 本番secretを含めない
 - migrationで初期データを投入できるようにする
 

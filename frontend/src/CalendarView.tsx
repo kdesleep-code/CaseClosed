@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { DragEvent } from 'react'
 import type { CSSProperties } from 'react'
 import {
@@ -7,9 +7,15 @@ import {
   listGoogleCalendars,
   moveCalendarDbEvent,
   syncGoogleCalendarEvents,
+  toJstIsoDateTime,
   updateCalendarDbEventTitleFit,
 } from './phase4Api'
-import type { GoogleCalendarEvent, GoogleCalendarListItem } from './phase4Api'
+import type {
+  GoogleCalendarAutoSyncSettings,
+  GoogleCalendarEvent,
+  GoogleCalendarListItem,
+} from './phase4Api'
+import settingsGearIconUrl from './assets/settings-gear.svg'
 import { t } from './i18n'
 import { AppLink, TopNav } from './navigation'
 
@@ -449,7 +455,59 @@ function formatJstLocalDateTime(date: Date) {
     }, {})
   return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`
 }
+
+function formatCalendarSyncTime(value: string | null) {
+  if (value === null) return t('common.none')
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return value
+  return new Intl.DateTimeFormat('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).format(parsed)
+}
+
+function calendarSyncStatusLabel(
+  settings: GoogleCalendarAutoSyncSettings | null,
+  isSyncing: boolean,
+) {
+  if (isSyncing) return t('calendar.sync.statusSyncing')
+  if (settings === null) return null
+  if (settings.last_error !== null) {
+    return t('calendar.sync.statusError')
+  }
+  if (settings.last_success_at === null) {
+    return t('calendar.sync.statusNever')
+  }
+  const parsed = Date.parse(settings.last_success_at)
+  if (!Number.isNaN(parsed)) {
+    const staleAfterMs = Math.max(5, settings.interval_minutes * 2) * 60_000
+    if (Date.now() - parsed > staleAfterMs) {
+      return t('calendar.sync.statusStale')
+    }
+  }
+  return null
+}
+
+function calendarSyncStatusTone(
+  settings: GoogleCalendarAutoSyncSettings | null,
+  isSyncing: boolean,
+) {
+  if (isSyncing) return 'pending'
+  if (settings?.last_error !== null && settings?.last_error !== undefined) return 'failed'
+  if (calendarSyncStatusLabel(settings, false) !== null) return 'pending'
+  return 'succeeded'
+}
+
 const CALENDAR_SOURCE_STORAGE_KEY = 'caseclosed.calendar.selectedCalendarIds'
+
+function initialCalendarDate() {
+  const value = new URLSearchParams(window.location.search).get('date')?.trim() ?? ''
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : jstDateToday()
+}
 
 function initialSelectedCalendarIds() {
   try {
@@ -473,9 +531,10 @@ function initialSelectedCalendarIds() {
 
 function CalendarView() {
   const today = useMemo(() => jstDateToday(), [])
+  const initialDate = useMemo(() => initialCalendarDate(), [])
   const [now, setNow] = useState(() => new Date())
-  const [calendarMonth, setCalendarMonth] = useState(today.slice(0, 7) + '-01')
-  const [selectedDate, setSelectedDate] = useState(today)
+  const [calendarMonth, setCalendarMonth] = useState(initialDate.slice(0, 7) + '-01')
+  const [selectedDate, setSelectedDate] = useState(initialDate)
   const [events, setEvents] = useState<CalendarEventWithSource[]>([])
   const [calendars, setCalendars] = useState<GoogleCalendarListItem[]>([])
   const [selectedCalendarIds, setSelectedCalendarIds] = useState<string[]>(
@@ -487,6 +546,9 @@ function CalendarView() {
   const [error, setError] = useState<string | null>(null)
   const [canRead, setCanRead] = useState(false)
   const [feedback, setFeedback] = useState<string | null>(null)
+  const [lastCalendarSyncAt, setLastCalendarSyncAt] = useState<string | null>(null)
+  const [calendarAutoSync, setCalendarAutoSync] =
+    useState<GoogleCalendarAutoSyncSettings | null>(null)
   const [dragPreview, setDragPreview] = useState<{
     dayIndex: number
     top: number
@@ -503,6 +565,8 @@ function CalendarView() {
     [calendarMonth, selectedDate],
   )
   const weekLabel = `${selectedWeekDays[0]} - ${selectedWeekDays[6]}`
+  const syncStatusLabel = calendarSyncStatusLabel(calendarAutoSync, isSyncing)
+  const syncStatusTone = calendarSyncStatusTone(calendarAutoSync, isSyncing)
   const weekHours = useMemo(
     () => Array.from({ length: 16 }, (_, index) => 6 + index),
     [],
@@ -651,6 +715,8 @@ function CalendarView() {
     try {
       const status = await getGoogleGmailStatus()
       setCanRead(status.calendar_read_enabled === true)
+      setLastCalendarSyncAt(status.calendar_auto_sync.last_success_at)
+      setCalendarAutoSync(status.calendar_auto_sync)
       if (status.connected !== true || status.calendar_read_enabled !== true) {
         setEvents([])
         setError(
@@ -674,15 +740,8 @@ function CalendarView() {
       if (nextCalendarIds.join('\n') !== selectedCalendarIds.join('\n')) {
         setSelectedCalendarIds(nextCalendarIds)
       }
-      const queryCalendarIds = [...nextCalendarIds]
-      const includesPrimaryCalendar = calendarItems.some(
-        (calendar) => calendar.primary === true && nextCalendarIds.includes(calendar.id),
-      )
-      if (includesPrimaryCalendar && !queryCalendarIds.includes('primary')) {
-        queryCalendarIds.push('primary')
-      }
       const eventPages = await listCalendarDbEvents({
-        calendar_id: queryCalendarIds,
+        calendar_id: nextCalendarIds,
         time_min: eventLoadRange.timeMin,
         time_max: eventLoadRange.timeMax,
       })
@@ -707,6 +766,7 @@ function CalendarView() {
         base_date: calendarMonth,
         month_count: 3,
       })
+      const syncedAt = new Date().toISOString()
       setFeedback(
         t('calendar.sync.done', {
           imported: String(result.imported_count),
@@ -714,6 +774,18 @@ function CalendarView() {
         }),
       )
       await loadMonthEvents()
+      setLastCalendarSyncAt(syncedAt)
+      setCalendarAutoSync((current) =>
+        current === null
+          ? current
+          : {
+              ...current,
+              last_run_at: syncedAt,
+              last_success_at: syncedAt,
+              last_error: null,
+              last_stop_reason: 'synced',
+            },
+      )
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : t('app.requestFailed'))
     } finally {
@@ -817,8 +889,8 @@ function CalendarView() {
     setFeedback(null)
     try {
       const result = await moveCalendarDbEvent(calendarEvent.id, {
-        start: target.nextStart,
-        end: target.nextEnd,
+        start: toJstIsoDateTime(target.nextStart),
+        end: toJstIsoDateTime(target.nextEnd),
         time_zone: 'Asia/Tokyo',
       })
       setEvents((currentEvents) =>
@@ -883,7 +955,19 @@ function CalendarView() {
         <header className="maintenance-header">
           <div>
             <p>{t('app.name')}</p>
-            <h1>{t('calendar.heading')}</h1>
+            <h1>
+              {t('calendar.heading')}
+              <span className="calendar-last-sync">
+                {t('calendar.lastSync', {
+                  value: formatCalendarSyncTime(lastCalendarSyncAt),
+                })}
+              </span>
+              {syncStatusLabel !== null && (
+                <span className="calendar-sync-status" data-status={syncStatusTone}>
+                  {syncStatusLabel}
+                </span>
+              )}
+            </h1>
           </div>
           <TopNav
             ariaLabelKey="calendar.navigation"
@@ -914,15 +998,7 @@ function CalendarView() {
                 <p>{t('calendar.day.count', { count: String(selectedEvents.length) })}</p>
               </div>
               <button
-                className={`button-loading-dot${isLoading ? ' is-loading' : ''}`}
-                disabled={isLoading || !canRead}
-                onClick={() => void loadMonthEvents()}
-                type="button"
-              >
-                {t('calendar.refresh')}
-              </button>
-              <button
-                className={`button-loading-dot${isSyncing ? ' is-loading' : ''}`}
+                className={`calendar-sync-button button-loading-dot${isSyncing ? ' is-loading' : ''}`}
                 disabled={isLoading || isSyncing || !canRead}
                 onClick={() => void syncVisibleCalendars()}
                 type="button"
@@ -1162,24 +1238,32 @@ function CalendarView() {
                 <p>{t('calendar.upcoming.empty')}</p>
               ) : (
                 <div className="calendar-upcoming-list">
-                  {upcomingEvents.map((event) => (
-                    <button
-                      key={event.id ?? `${calendarEventDate(event)}-${event.summary}`}
-                      onClick={() => {
-                        const date = calendarEventDate(event)
-                        if (date !== '') {
-                          setCalendarMonth(date.slice(0, 7) + '-01')
-                          selectDate(date)
-                        }
-                      }}
-                      type="button"
-                    >
-                      <span>
-                        {calendarEventDate(event)} {calendarEventTime(event)}
-                      </span>
-                      <strong>{event.summary || t('calendar.noTitle')}</strong>
-                    </button>
-                  ))}
+                  {upcomingEvents.map((event, index) => {
+                    const date = calendarEventDate(event)
+                    const previousDate =
+                      index === 0 ? null : calendarEventDate(upcomingEvents[index - 1])
+                    return (
+                      <Fragment key={event.id ?? `${date}-${event.summary}`}>
+                        {date !== previousDate && (
+                          <div className="calendar-upcoming-date-separator">
+                            -- {date} --
+                          </div>
+                        )}
+                        <button
+                          onClick={() => {
+                            if (date !== '') {
+                              setCalendarMonth(date.slice(0, 7) + '-01')
+                              selectDate(date)
+                            }
+                          }}
+                          type="button"
+                        >
+                          <span>{calendarEventTime(event)}</span>
+                          <strong>{event.summary || t('calendar.noTitle')}</strong>
+                        </button>
+                      </Fragment>
+                    )
+                  })}
                 </div>
               )}
             </section>
@@ -1192,9 +1276,10 @@ function CalendarView() {
                   aria-label={t('calendar.source.heading')}
                   className="case-icon-button"
                   onClick={() => setIsCalendarSourceOpen((current) => !current)}
+                  title={t('calendar.source.heading')}
                   type="button"
                 >
-                  ⚙
+                  <img alt="" aria-hidden="true" src={settingsGearIconUrl} />
                 </button>
               </div>
               {isCalendarSourceOpen && (
@@ -1221,6 +1306,9 @@ function CalendarView() {
                       </label>
                     ))
                   )}
+                  <AppLink className="calendar-settings-link" href="/academic-calendar">
+                    {t('academicCalendar.open')}
+                  </AppLink>
                 </div>
               )}
             </section>
