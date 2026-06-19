@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { AppLink, TopNav, navigateTo } from './navigation'
+import { AppLink, TopNav, navigateTo, returnToOrFallback } from './navigation'
 import {
   createCalendarDbEventLink,
   deleteCalendarDbEvent,
@@ -76,10 +76,20 @@ function locationHref(location: string | null | undefined) {
 }
 
 function attendanceLabel(value: string | null | undefined) {
-  if (value === 'not_required' || value === 'optional' || value === 'unnecessary' || value === 'no_attendance') {
+  const normalizedValue = value?.toLowerCase().trim()
+  if (
+    normalizedValue === 'not_required' ||
+    normalizedValue === 'optional' ||
+    normalizedValue === 'unnecessary' ||
+    normalizedValue === 'no_attendance'
+  ) {
     return t('calendar.event.attendanceOptional')
   }
   return t('calendar.event.attendanceRequired')
+}
+
+function attendanceValue(value: string | null | undefined) {
+  return attendanceLabel(value) === t('calendar.event.attendanceOptional') ? 'not_required' : 'required'
 }
 
 function syncLabel(value: string | null | undefined) {
@@ -192,6 +202,8 @@ export default function CalendarEventDetailView({
   const [tasks, setTasks] = useState<TaskItem[]>([])
   const [summaryDraft, setSummaryDraft] = useState('')
   const [calendarIdDraft, setCalendarIdDraft] = useState('')
+  const [locationDraft, setLocationDraft] = useState('')
+  const [attendanceDraft, setAttendanceDraft] = useState('required')
   const [caseQuery, setCaseQuery] = useState('')
   const [taskQuery, setTaskQuery] = useState('')
   const [startDraft, setStartDraft] = useState('')
@@ -304,6 +316,7 @@ export default function CalendarEventDetailView({
 
   const event = detail?.event ?? null
   const calendarHref = calendarHrefForEvent(event)
+  const returnHref = returnToOrFallback(calendarHref)
   const eventLocationHref = locationHref(event?.location)
   const canDeleteSeries =
     (event?.recurring_event_id !== undefined &&
@@ -357,6 +370,8 @@ export default function CalendarEventDetailView({
     if (mode !== 'edit' || event === null) return
     setSummaryDraft(event.summary)
     setCalendarIdDraft(event.calendar_source_id ?? 'primary')
+    setLocationDraft(event.location ?? '')
+    setAttendanceDraft(attendanceValue(event.attendance_requirement))
     setStartDraft(eventDateTimeInputValue(event, 'start'))
     setEndDraft(eventDateTimeInputValue(event, 'end'))
   }, [event?.id, mode])
@@ -378,6 +393,8 @@ export default function CalendarEventDetailView({
       await updateCalendarDbEvent(eventId, {
         summary: summaryDraft,
         calendar_id: calendarIdDraft,
+        location: locationDraft.trim() === '' ? null : locationDraft,
+        attendance_requirement: attendanceDraft,
       })
       setDetail(await getCalendarDbEvent(eventId))
     } catch (requestError) {
@@ -470,7 +487,7 @@ export default function CalendarEventDetailView({
     setLinkError(null)
     try {
       await deleteCalendarDbEvent(eventId, deleteScope)
-      navigateTo(calendarHref, true)
+      navigateTo(returnHref, true)
     } catch (requestError) {
       setLinkError(requestError instanceof Error ? requestError.message : t('app.requestFailed'))
       setIsDeleteConfirmOpen(false)
@@ -537,7 +554,7 @@ export default function CalendarEventDetailView({
                     },
                   ]
                 : []),
-              { href: calendarHref, labelKey: 'nav.calendar' },
+              { href: returnHref, labelKey: 'nav.calendar' },
               { href: '/', labelKey: 'top.heading' },
             ]}
           />
@@ -607,6 +624,14 @@ export default function CalendarEventDetailView({
                 <span>{attendanceLabel(event.attendance_requirement)}</span>
                 <span>{syncLabel(event.sync_status)}</span>
               </div>
+              {event.meeting_url !== undefined && event.meeting_url !== null && event.meeting_url.trim() !== '' && (
+                <div className="calendar-event-meeting-row">
+                  <span>{t('calendar.event.meeting')}</span>
+                  <a href={event.meeting_url} rel="noreferrer" target="_blank">
+                    {t('calendar.event.openMeeting')}
+                  </a>
+                </div>
+              )}
 
               {linkError !== null && mode !== 'edit' && (
                 <div className="mail-feedback">
@@ -644,6 +669,23 @@ export default function CalendarEventDetailView({
                           {calendars.length === 0 && (
                             <option value={calendarIdDraft}>{calendarIdDraft || '-'}</option>
                           )}
+                        </select>
+                      </label>
+                      <label className="calendar-event-link-field">
+                        <span>{t('calendar.event.location')}</span>
+                        <input
+                          onChange={(inputEvent) => setLocationDraft(inputEvent.target.value)}
+                          value={locationDraft}
+                        />
+                      </label>
+                      <label className="calendar-event-link-field">
+                        <span>{t('calendar.event.attendance')}</span>
+                        <select
+                          onChange={(inputEvent) => setAttendanceDraft(inputEvent.target.value)}
+                          value={attendanceDraft}
+                        >
+                          <option value="required">{t('calendar.event.attendanceRequired')}</option>
+                          <option value="not_required">{t('calendar.event.attendanceOptional')}</option>
                         </select>
                       </label>
                       <button

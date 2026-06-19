@@ -2431,7 +2431,7 @@ describe('Phase 2 maintenance screen', () => {
     ).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Jobs' })).not.toBeInTheDocument()
     expect(
-      screen.queryByRole('heading', { name: 'External Operations' }),
+      screen.queryByRole('heading', { name: 'External Confirmations' }),
     ).not.toBeInTheDocument()
   })
 

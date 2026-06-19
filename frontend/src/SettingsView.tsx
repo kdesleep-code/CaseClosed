@@ -2,8 +2,8 @@ import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { t } from './i18n'
 import { TopNav } from './navigation'
-import { readLlmCostHistory, updateLlmCostSettings } from './phase2Api'
-import type { LlmCostHistory } from './phase2Api'
+import { readLlmCostHistory, runGoogleSpeedTest, updateLlmCostSettings } from './phase2Api'
+import type { GoogleSpeedTestResult, LlmCostHistory } from './phase2Api'
 import {
   createGoogleGmailConnectUrl,
   disconnectGoogleGmail,
@@ -53,6 +53,8 @@ function SettingsView() {
   const [gmailAutoImportMaxMessages, setGmailAutoImportMaxMessages] = useState('100')
   const [calendarAutoSyncEnabled, setCalendarAutoSyncEnabled] = useState(true)
   const [calendarAutoSyncInterval, setCalendarAutoSyncInterval] = useState('60')
+  const [calendarAutoSyncMonthCount, setCalendarAutoSyncMonthCount] = useState('3')
+  const [googleSpeedTest, setGoogleSpeedTest] = useState<GoogleSpeedTestResult | null>(null)
   const [llmMonthlyBudget, setLlmMonthlyBudget] = useState('')
 
   useEffect(() => {
@@ -77,6 +79,7 @@ function SettingsView() {
     setGmailAutoImportMaxMessages(String(googleStatus.auto_import.max_messages_per_run))
     setCalendarAutoSyncEnabled(googleStatus.calendar_auto_sync.enabled)
     setCalendarAutoSyncInterval(String(googleStatus.calendar_auto_sync.interval_minutes))
+    setCalendarAutoSyncMonthCount(String(googleStatus.calendar_auto_sync.month_count))
   }, [googleStatus])
 
   useEffect(() => {
@@ -179,12 +182,27 @@ function SettingsView() {
     setNotice(null)
     try {
       const intervalMinutes = Math.max(5, Math.min(24 * 60, Number.parseInt(calendarAutoSyncInterval, 10) || 60))
+      const monthCount = Math.max(1, Math.min(12, Number.parseInt(calendarAutoSyncMonthCount, 10) || 3))
       const settings = await updateGoogleCalendarAutoSyncSettings({
         enabled: calendarAutoSyncEnabled,
         interval_minutes: intervalMinutes,
+        month_count: monthCount,
       })
       setGoogleStatus((current) => current === null ? current : { ...current, calendar_auto_sync: settings })
       setNotice(t('maintenance.debug.googleCalendarAutoSyncSaved'))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function handleGoogleSpeedTest() {
+    setBusyId('google-speed-test')
+    setError(null)
+    setNotice(null)
+    try {
+      setGoogleSpeedTest(await runGoogleSpeedTest())
     } catch (requestError) {
       setError(describeError(requestError))
     } finally {
@@ -279,6 +297,57 @@ function SettingsView() {
                       </div>
                     </section>
 
+                    <section className="mail-panel settings-google-speed">
+                      <div className="section-heading">
+                        <div>
+                          <h3>{t('maintenance.debug.googleSpeedTest')}</h3>
+                          <p>{t('maintenance.debug.googleSpeedTestNote')}</p>
+                        </div>
+                        <button
+                          className={`button-loading-dot${busyId === 'google-speed-test' ? ' is-loading' : ''}`}
+                          disabled={busyId !== null}
+                          onClick={handleGoogleSpeedTest}
+                          type="button"
+                        >
+                          {t('maintenance.debug.runGoogleSpeedTest')}
+                        </button>
+                      </div>
+                      {googleSpeedTest === null ? (
+                        <p className="maintenance-debug-muted">
+                          {t('maintenance.debug.googleSpeedTestEmpty')}
+                        </p>
+                      ) : (
+                        <>
+                          <dl className="settings-status-list">
+                            <div><dt>{t('maintenance.debug.googleSpeedTestStarted')}</dt><dd>{googleSpeedTest.started_at}</dd></div>
+                            <div><dt>{t('maintenance.debug.googleSpeedTestTotal')}</dt><dd>{googleSpeedTest.total_ms} ms</dd></div>
+                          </dl>
+                          <div className="maintenance-table-wrap">
+                            <table>
+                              <thead>
+                                <tr>
+                                  <th scope="col">{t('maintenance.debug.step')}</th>
+                                  <th scope="col">{t('common.status')}</th>
+                                  <th scope="col">{t('maintenance.debug.duration')}</th>
+                                  <th scope="col">{t('maintenance.debug.detail')}</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {googleSpeedTest.steps.map((step) => (
+                                  <tr key={step.name}>
+                                    <td>{step.name}</td>
+                                    <td><span data-status={step.status}>{step.status}</span></td>
+                                    <td>{step.duration_ms} ms</td>
+                                    <td>{step.detail ?? t('common.none')}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </>
+                      )}
+                    </section>
+
                     <section className="mail-panel">
                       <h3>{t('maintenance.debug.googleGmailAutoImport')}</h3>
                       <form className="settings-form settings-google-form" onSubmit={handleGoogleGmailAutoImportSettings}>
@@ -299,6 +368,7 @@ function SettingsView() {
                       <form className="settings-form settings-google-form settings-calendar-form" onSubmit={handleGoogleCalendarAutoSyncSettings}>
                         <label className="checkbox-label"><input checked={calendarAutoSyncEnabled} onChange={(event) => setCalendarAutoSyncEnabled(event.target.checked)} type="checkbox" /><span>{t('common.enabled')}</span></label>
                         <label><span>{t('maintenance.debug.googleCalendarAutoSyncInterval')}</span><input min={5} onChange={(event) => setCalendarAutoSyncInterval(event.target.value)} type="number" value={calendarAutoSyncInterval} /></label>
+                        <label><span>{t('maintenance.debug.googleCalendarAutoSyncMonthCount')}</span><input max={12} min={1} onChange={(event) => setCalendarAutoSyncMonthCount(event.target.value)} type="number" value={calendarAutoSyncMonthCount} /></label>
                         <button className={`button-loading-dot${busyId === 'calendar-auto-sync' ? ' is-loading' : ''}`} disabled={busyId !== null} type="submit">{t('common.save')}</button>
                       </form>
                       <dl className="settings-status-list">

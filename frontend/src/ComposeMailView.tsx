@@ -56,6 +56,7 @@ type ComposeRecipientSuggestion = {
   key: string
   value: string
   label: string
+  kindRank: number
   statusRank: number
   displayName: string
   emailAddress: string
@@ -168,18 +169,33 @@ function contactStatusRank(status: string) {
   return 99
 }
 
+function contactSuggestKindRank(contact: Contact) {
+  if (contact.kind === 'mailing_list') {
+    return 1
+  }
+  if (contact.kind === 'service') {
+    return 2
+  }
+  return 0
+}
+
 function recipientSuggestionsFromContacts(
   contacts: Contact[],
+  options: { primaryOnly?: boolean } = {},
 ): ComposeRecipientSuggestion[] {
   const suggestions: ComposeRecipientSuggestion[] = []
   const seen = new Set<string>()
   for (const contact of contacts) {
+    const kindRank = contactSuggestKindRank(contact)
     const statusRank = contactStatusRank(contact.status)
     if (statusRank === 99) {
       continue
     }
     for (const emailAddress of contact.email_addresses) {
       if ((emailAddress.status ?? 'active') !== 'active') {
+        continue
+      }
+      if (options.primaryOnly === true && !emailAddress.is_primary) {
         continue
       }
       const normalizedEmail = emailAddress.normalized_email_address.toLowerCase()
@@ -191,6 +207,7 @@ function recipientSuggestionsFromContacts(
         key: `${contact.id}:${emailAddress.id}`,
         value: `${contact.display_name} <${emailAddress.email_address}>`,
         label: `${contact.status} / ${contact.kind ?? 'person'}`,
+        kindRank,
         statusRank,
         displayName: contact.display_name,
         emailAddress: emailAddress.email_address,
@@ -199,6 +216,7 @@ function recipientSuggestionsFromContacts(
   }
   return suggestions.sort(
     (left, right) =>
+      left.kindRank - right.kindRank ||
       left.statusRank - right.statusRank ||
       left.displayName.localeCompare(right.displayName) ||
       left.emailAddress.localeCompare(right.emailAddress),
@@ -250,6 +268,9 @@ export default function ComposeMailView() {
   const [recipientSuggestions, setRecipientSuggestions] = useState<
     ComposeRecipientSuggestion[]
   >([])
+  const [allRecipientSuggestions, setAllRecipientSuggestions] = useState<
+    ComposeRecipientSuggestion[]
+  >([])
   const [contacts, setContacts] = useState<Contact[]>([])
   const [caseContexts, setCaseContexts] = useState<ContactSelectorCaseContext[]>([])
   const [selectedSignatureId, setSelectedSignatureId] = useState(() =>
@@ -297,13 +318,17 @@ export default function ComposeMailView() {
       .then((contacts) => {
         if (!canceled) {
           setContacts(contacts)
-          setRecipientSuggestions(recipientSuggestionsFromContacts(contacts))
+          setAllRecipientSuggestions(recipientSuggestionsFromContacts(contacts))
+          setRecipientSuggestions(
+            recipientSuggestionsFromContacts(contacts, { primaryOnly: true }),
+          )
         }
       })
       .catch(() => {
         if (!canceled) {
           setContacts([])
           setRecipientSuggestions([])
+          setAllRecipientSuggestions([])
         }
       })
     return () => {
@@ -406,9 +431,9 @@ export default function ComposeMailView() {
       .filter((item) => item.contacts.length > 0)
       .map((item) => ({
         selector: item.selector,
-        addresses: resolveRecipientAddressList(item.selector, contacts, caseContexts),
+        contacts: item.contacts,
       }))
-      .filter((item) => item.addresses.length > 0)
+      .filter((item) => item.contacts.length > 0)
   }
 
   function recipientPreview(value: string) {
@@ -422,8 +447,8 @@ export default function ComposeMailView() {
           <div key={item.selector} className="compose-recipient-preview-row">
             <span>{item.selector}</span>
             <div>
-              {item.addresses.map((address) => (
-                <em key={address}>{address}</em>
+              {item.contacts.map((contact) => (
+                <em key={contact.id}>{contact.display_name}</em>
               ))}
             </div>
           </div>
@@ -443,8 +468,11 @@ export default function ComposeMailView() {
   }
 
   function recipientSuggestOptions(field: 'to' | 'cc' | 'bcc'): SuggestInputOption[] {
+    const contactSuggestions = form[field].includes('@')
+      ? allRecipientSuggestions
+      : recipientSuggestions
     return [
-      ...recipientSuggestions.map((suggestion) => ({
+      ...contactSuggestions.map((suggestion) => ({
         key: suggestion.key,
         value: suggestion.value,
         label: suggestion.label,

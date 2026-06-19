@@ -35,6 +35,7 @@ import {
   listStorageObjectVersions,
   prepareStorageObjectLlmDigest,
   uploadStorageObjectVersion,
+  updateStorageObjectFilename,
   updateStorageObjectLlmInput,
 } from './phase3Api'
 import type { StorageObject } from './phase3Api'
@@ -554,6 +555,8 @@ function StorageObjectDetailView({ storageObjectId }: { storageObjectId: string 
   const [linkedCaseInput, setLinkedCaseInput] = useState('')
   const [caseSuggestions, setCaseSuggestions] = useState<CaseItem[]>([])
   const [linkedCasesBusy, setLinkedCasesBusy] = useState(false)
+  const [renameDraft, setRenameDraft] = useState('')
+  const [renameBusy, setRenameBusy] = useState(false)
   const [deleteBusy, setDeleteBusy] = useState(false)
   const [versionBusy, setVersionBusy] = useState(false)
   const [isVersionDragOver, setIsVersionDragOver] = useState(false)
@@ -570,6 +573,7 @@ function StorageObjectDetailView({ storageObjectId }: { storageObjectId: string 
       .then(async (nextObject) => {
         if (!isMounted) return
         setObject(nextObject)
+        setRenameDraft(nextObject.original_filename ?? nextObject.id)
         try {
           const nextVersions = await listStorageObjectVersions(storageObjectId)
           if (isMounted) setVersions(nextVersions)
@@ -878,6 +882,30 @@ function StorageObjectDetailView({ storageObjectId }: { storageObjectId: string 
     }
   }
 
+  async function handleRename(target: StorageObject) {
+    const nextName = renameDraft.trim()
+    if (nextName === '') {
+      setError(t('storage.rename.empty'))
+      return
+    }
+    if (nextName === (target.original_filename ?? target.id)) {
+      return
+    }
+    setRenameBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const updatedObject = await updateStorageObjectFilename(target.id, nextName)
+      setObject(updatedObject)
+      setRenameDraft(updatedObject.original_filename ?? updatedObject.id)
+      setNotice(t('storage.rename.updated', { name: updatedObject.original_filename ?? updatedObject.id }))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setRenameBusy(false)
+    }
+  }
+
   async function handleDelete(target: StorageObject) {
     if (!window.confirm(t('storage.delete.confirm', { name: target.original_filename ?? target.id }))) {
       return
@@ -1110,6 +1138,33 @@ function StorageObjectDetailView({ storageObjectId }: { storageObjectId: string 
                     ))}
                   </select>
                 </label>
+              </div>
+              <div className="storage-rename-row">
+                <label>
+                  <span>{t('storage.rename.label')}</span>
+                  <input
+                    onChange={(event) => setRenameDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault()
+                        void handleRename(object)
+                      }
+                    }}
+                    value={renameDraft}
+                  />
+                </label>
+                <button
+                  className={`button-loading-dot${renameBusy ? ' is-loading' : ''}`}
+                  disabled={
+                    renameBusy ||
+                    renameDraft.trim() === '' ||
+                    renameDraft.trim() === (object.original_filename ?? object.id)
+                  }
+                  onClick={() => void handleRename(object)}
+                  type="button"
+                >
+                  {t('storage.rename.save')}
+                </button>
               </div>
               <dl className="storage-detail-meta">
                 <div>
@@ -1556,6 +1611,7 @@ function splitMarkdownTableRow(line: string) {
   if (!trimmed.includes('|')) {
     return []
   }
+
   const withoutOuterPipes = trimmed.replace(/^\|/, '').replace(/\|$/, '')
   return withoutOuterPipes.split('|').map((cell) => cell.trim())
 }

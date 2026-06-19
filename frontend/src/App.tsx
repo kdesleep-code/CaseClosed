@@ -12,6 +12,9 @@ import CaseView from './CaseView'
 import ComposeMailView from './ComposeMailView'
 import ContactsView from './ContactsView'
 import type { ContactsInitialData } from './ContactsView'
+import ExtensionLaunchView from './ExtensionLaunchView'
+import ExtensionsHelpView from './ExtensionsHelpView'
+import ExtensionsView from './ExtensionsView'
 import LogView from './LogView'
 import MailView from './MailView'
 import type { MailInitialData } from './MailView'
@@ -25,6 +28,7 @@ import StorageView from './StorageView'
 import TaskDetailView from './TaskDetailView'
 import TaskNewView from './TaskNewView'
 import TaskView from './TaskView'
+import TodayView from './TodayView'
 import {
   createExternalTool,
   deleteExternalTool,
@@ -70,6 +74,10 @@ type LinkItem = {
   href: string
 }
 
+type LinkRenderItem = LinkItem & {
+  label?: string
+}
+
 type PageSlot = LinkItem | { blank: true; key: string }
 
 const pageLinks: LinkItem[] = [
@@ -80,12 +88,11 @@ const pageLinks: LinkItem[] = [
   { labelKey: 'nav.contacts', href: '/contacts' },
   { labelKey: 'nav.files', href: '/files' },
   { labelKey: 'nav.externalTools', href: '/external-tools' },
+  { labelKey: 'nav.extensions', href: '/extensions' },
 ]
 
 const mainPageSlots: PageSlot[] = [
   ...pageLinks,
-  { blank: true, key: 'main-reserved-1' },
-  { blank: true, key: 'main-reserved-2' },
 ]
 
 const utilityPageSlots: PageSlot[] = [
@@ -153,6 +160,42 @@ function jstDateToday() {
     }, {})
 
   return `${parts.year}-${parts.month}-${parts.day}`
+}
+
+function formatTopTodayLabel() {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    weekday: 'short',
+  })
+    .formatToParts(new Date())
+    .reduce<Record<string, string>>((dateParts, part) => {
+      dateParts[part.type] = part.value
+      return dateParts
+    }, {})
+
+  return `${parts.year}/${parts.month}./${parts.day} ${parts.weekday}.`
+}
+
+function topTodayClassName() {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Tokyo',
+    weekday: 'short',
+  }).formatToParts(new Date())
+  const weekday = parts.find((part) => part.type === 'weekday')?.value
+  if (weekday === 'Sat') {
+    return 'is-saturday'
+  }
+  if (weekday === 'Sun') {
+    return 'is-sunday'
+  }
+  return undefined
+}
+
+function linkLabel(link: LinkRenderItem) {
+  return link.label ?? t(link.labelKey)
 }
 
 function startOfDate(date: string) {
@@ -469,17 +512,17 @@ function TopView({
 
   const isLockedByPending = pendingCount !== null && pendingCount > 0
 
-  function lockedLink(link: LinkItem, className?: string) {
+  function lockedLink(link: LinkRenderItem, className?: string) {
     if (!isLockedByPending || link.href === '/maintenance') {
       return (
         <AppLink className={className} href={link.href} key={link.href}>
-          {t(link.labelKey)}
+          {linkLabel(link)}
         </AppLink>
       )
     }
     return (
       <span aria-disabled="true" className={className} key={link.href}>
-        {t(link.labelKey)}
+        {linkLabel(link)}
       </span>
     )
   }
@@ -527,9 +570,14 @@ function TopView({
           </section>
         )}
 
-        <section aria-labelledby="pages-heading" className="hub-section">
-          <h2 id="pages-heading">{t('top.pages.heading')}</h2>
+        <div className="top-today-link">
+          {lockedLink(
+            { labelKey: 'nav.today', href: '/today', label: formatTopTodayLabel() },
+            topTodayClassName(),
+          )}
+        </div>
 
+        <section aria-label={t('top.pages.heading')} className="hub-section">
           <nav aria-label={t('top.pages.navLabel')} className="hub-links">
             <div className="hub-links-main">
               {mainPageSlots.map((slot) => pageSlot(slot))}
@@ -1571,6 +1619,33 @@ function App() {
         </>
       )
     }
+    if (path === '/extensions') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <ExtensionsView />
+        </>
+      )
+    }
+    if (path === '/extensions/help') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <ExtensionsHelpView />
+        </>
+      )
+    }
+    if (path === '/extensions/launch') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <ExtensionLaunchView />
+        </>
+      )
+    }
     if (path === '/mail' || path === '/mail/action-needed') {
       return (
         <>
@@ -1580,6 +1655,15 @@ function App() {
             preload={routePreload ?? undefined}
             viewMode={path === '/mail/action-needed' ? 'action-needed' : 'normal'}
           />
+        </>
+      )
+    }
+    if (path === '/today' || path === '/tomorrow') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <TodayView dayOffset={path === '/tomorrow' ? 1 : 0} />
         </>
       )
     }

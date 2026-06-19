@@ -127,6 +127,17 @@ export type StorageOperationHistoryItem = {
   created_at: string
 }
 
+export type GoogleSpeedTestResult = {
+  started_at: string
+  total_ms: number
+  steps: Array<{
+    name: string
+    status: string
+    duration_ms: number
+    detail: string | null
+  }>
+}
+
 type ListResponse<T> = {
   items: T[]
 }
@@ -220,6 +231,12 @@ export async function listStorageOperationHistory(): Promise<StorageOperationHis
     '/api/v1/maintenance/storage-operation-history',
   )
   return data.items
+}
+
+export function runGoogleSpeedTest(): Promise<GoogleSpeedTestResult> {
+  return request<GoogleSpeedTestResult>('/api/v1/maintenance/google-speed-test', {
+    method: 'POST',
+  })
 }
 
 export async function listJobs(): Promise<Job[]> {

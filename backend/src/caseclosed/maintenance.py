@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from time import perf_counter
 from datetime import timedelta
 
 from fastapi import APIRouter
@@ -24,6 +25,14 @@ from caseclosed.db.models import WriteRequest
 from caseclosed.db.runtime import get_session
 from caseclosed.db.runtime import jst_iso
 from caseclosed.db.runtime import jst_now
+from caseclosed.google_integration import GMAIL_CONNECTION_KEY
+from caseclosed.google_integration import calendar_sync_range
+from caseclosed.google_integration import calendar_api_get_json
+from caseclosed.google_integration import encoded_calendar_path
+from caseclosed.google_integration import gmail_api_get_json
+from caseclosed.google_integration import google_calendar_auto_sync_settings_data
+from caseclosed.google_integration import google_gmail_access_token
+from caseclosed.google_integration import read_setting_json
 
 router = APIRouter(prefix="/api/v1/maintenance", tags=["maintenance"])
 
@@ -107,6 +116,134 @@ def get_storage_operation_history(
         "ok": True,
         "data": {"items": [storage_operation_history_data(row) for row in rows]},
     }
+
+
+@router.post("/google-speed-test")
+def run_google_speed_test(
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    connection = read_setting_json(session, GMAIL_CONNECTION_KEY) or {}
+    steps: list[dict[str, object]] = []
+    started = perf_counter()
+    access_token: str | None = None
+
+    def measure(name: str, fn) -> object | None:
+        step_started = perf_counter()
+        try:
+            result = fn()
+        except Exception as error:  # keep diagnostics readable in the UI
+            steps.append(
+                {
+                    "name": name,
+                    "status": "failed",
+                    "duration_ms": round((perf_counter() - step_started) * 1000, 1),
+                    "detail": str(error),
+                }
+            )
+            return None
+        steps.append(
+            {
+                "name": name,
+                "status": "ok",
+                "duration_ms": round((perf_counter() - step_started) * 1000, 1),
+                "detail": result if isinstance(result, str) else None,
+            }
+        )
+        return result
+
+    token_result = measure(
+        "oauth_token",
+        lambda: google_gmail_access_token(session, connection),
+    )
+    if isinstance(token_result, str) and token_result.strip() != "":
+        access_token = token_result
+
+    if access_token is not None:
+        measure(
+            "gmail_profile",
+            lambda: gmail_speed_profile(access_token),
+        )
+        measure(
+            "calendar_list",
+            lambda: calendar_speed_list(access_token),
+        )
+        auto_sync_settings = google_calendar_auto_sync_settings_data(session)
+        time_min, time_max = calendar_sync_range(
+            None,
+            int(auto_sync_settings.get("month_count") or 3),
+        )
+        calendar_ids = [
+            str(calendar_id)
+            for calendar_id in auto_sync_settings.get("calendar_ids", ["primary"])
+            if str(calendar_id).strip() != ""
+        ] or ["primary"]
+        for calendar_id in calendar_ids[:12]:
+            measure(
+                f"calendar_events:{calendar_id}",
+                lambda calendar_id=calendar_id: calendar_speed_events(
+                    access_token,
+                    calendar_id=calendar_id,
+                    time_min=time_min,
+                    time_max=time_max,
+                ),
+            )
+        if len(calendar_ids) > 12:
+            steps.append(
+                {
+                    "name": "calendar_events:skipped",
+                    "status": "skipped",
+                    "duration_ms": 0,
+                    "detail": f"{len(calendar_ids) - 12} calendar(s) skipped",
+                }
+            )
+
+    total_ms = round((perf_counter() - started) * 1000, 1)
+    return {
+        "ok": True,
+        "data": {
+            "started_at": jst_iso(),
+            "total_ms": total_ms,
+            "steps": steps,
+        },
+    }
+
+
+def gmail_speed_profile(access_token: str) -> str:
+    data = gmail_api_get_json("/users/me/profile", access_token)
+    email = data.get("emailAddress")
+    return "profile ok" if isinstance(email, str) else "profile ok"
+
+
+def calendar_speed_list(access_token: str) -> str:
+    data = calendar_api_get_json("/users/me/calendarList", access_token, {"maxResults": 10})
+    items = data.get("items")
+    return f"calendars={len(items) if isinstance(items, list) else 0}"
+
+
+def calendar_speed_events(
+    access_token: str,
+    *,
+    calendar_id: str = "primary",
+    time_min: str | None = None,
+    time_max: str | None = None,
+) -> str:
+    params: dict[str, object] = {
+        "maxResults": 10,
+        "singleEvents": "true",
+        "orderBy": "startTime",
+        "showDeleted": "true",
+    }
+    if time_min is not None:
+        params["timeMin"] = time_min
+    if time_max is not None:
+        params["timeMax"] = time_max
+    data = calendar_api_get_json(
+        encoded_calendar_path(calendar_id, "/events"),
+        access_token,
+        params,
+    )
+    items = data.get("items")
+    return f"events={len(items) if isinstance(items, list) else 0}"
 
 
 def count_rows(session: DatabaseSession, model, condition) -> int:

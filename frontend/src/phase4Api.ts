@@ -450,6 +450,7 @@ export type GoogleCalendarEvent = {
   description: string | null
   location: string | null
   html_link: string | null
+  meeting_url?: string | null
   start: Record<string, unknown>
   end: Record<string, unknown>
   status: string | null
@@ -476,6 +477,8 @@ export type CalendarEventTitleFitPayload = {
 export type CalendarEventUpdatePayload = {
   summary?: string | null
   calendar_id?: string | null
+  location?: string | null
+  attendance_requirement?: string | null
 }
 
 export type CalendarEventLink = {

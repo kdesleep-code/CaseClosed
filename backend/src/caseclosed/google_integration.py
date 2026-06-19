@@ -144,6 +144,8 @@ class CalendarEventMovePayload(BaseModel):
 class CalendarEventUpdatePayload(BaseModel):
     summary: str | None = None
     calendar_id: str | None = None
+    location: str | None = None
+    attendance_requirement: str | None = None
 
 
 class CalendarEventTitleFitPayload(BaseModel):
@@ -846,6 +848,20 @@ def update_calendar_db_event(
     summary = payload.summary.strip() if payload.summary is not None else None
     if payload.summary is not None and (summary is None or summary == ""):
         raise json_error(422, "VALIDATION_ERROR", "Event title is required.")
+    location_was_provided = "location" in payload.model_fields_set
+    location = payload.location.strip() if payload.location is not None else None
+    if location == "":
+        location = None
+    attendance_requirement_was_provided = "attendance_requirement" in payload.model_fields_set
+    attendance_requirement = (
+        payload.attendance_requirement.strip()
+        if payload.attendance_requirement is not None
+        else None
+    )
+    if attendance_requirement not in {None, "required", "optional", "not_required"}:
+        raise json_error(422, "VALIDATION_ERROR", "Attendance value is invalid.")
+    if attendance_requirement == "optional":
+        attendance_requirement = "not_required"
     target_calendar_id = payload.calendar_id.strip() if payload.calendar_id is not None else None
     if target_calendar_id == "":
         target_calendar_id = None
@@ -876,8 +892,12 @@ def update_calendar_db_event(
         calendar_id = event.external_calendar_id
         google_event_id = event.external_event_id
         google_data: dict[str, object] | None = None
-        if summary is not None:
-            patch_payload = {"summary": summary}
+        if summary is not None or location_was_provided:
+            patch_payload: dict[str, object] = {}
+            if summary is not None:
+                patch_payload["summary"] = summary
+            if location_was_provided:
+                patch_payload["location"] = location or ""
             operation = create_calendar_external_operation(
                 session,
                 operation_type="google_calendar_event_update",
@@ -940,6 +960,10 @@ def update_calendar_db_event(
             item=google_data,
             now=now,
         )
+        if attendance_requirement_was_provided:
+            db_event.attendance_requirement = attendance_requirement or "unknown"
+            db_event.updated_at = now
+            db_event.version += 1
         session.commit()
         return {
             "ok": True,
@@ -951,8 +975,12 @@ def update_calendar_db_event(
 
     if summary is not None:
         event.summary = summary
+    if location_was_provided:
+        event.location = location
     if target_calendar_id is not None:
         event.external_calendar_id = target_calendar_id
+    if attendance_requirement_was_provided:
+        event.attendance_requirement = attendance_requirement or "unknown"
     event.updated_at = now
     event.version += 1
     session.commit()
@@ -2579,6 +2607,7 @@ def normalized_google_calendar_event(
         "external_html_link": item.get("htmlLink")
         if isinstance(item.get("htmlLink"), str)
         else None,
+        "meeting_url": google_calendar_meeting_url(item),
         "external_updated_at": item.get("updated")
         if isinstance(item.get("updated"), str)
         else None,
@@ -2587,7 +2616,9 @@ def normalized_google_calendar_event(
         "description": item.get("description")
         if isinstance(item.get("description"), str)
         else None,
-        "location": item.get("location") if isinstance(item.get("location"), str) else None,
+        "location": item.get("location").strip()
+        if isinstance(item.get("location"), str) and item.get("location").strip() != ""
+        else None,
         "start_at": start_at,
         "end_at": end_at,
         "all_day": all_day,
@@ -2598,6 +2629,31 @@ def normalized_google_calendar_event(
     }
 
 
+def google_calendar_meeting_url(item: dict[str, object]) -> str | None:
+    hangout_link = item.get("hangoutLink")
+    if isinstance(hangout_link, str) and hangout_link.strip() != "":
+        return hangout_link.strip()
+    conference_data = item.get("conferenceData")
+    if not isinstance(conference_data, dict):
+        return None
+    entry_points = conference_data.get("entryPoints")
+    if not isinstance(entry_points, list):
+        return None
+    fallback_uri: str | None = None
+    for entry in entry_points:
+        if not isinstance(entry, dict):
+            continue
+        uri = entry.get("uri")
+        if not isinstance(uri, str) or uri.strip() == "":
+            continue
+        normalized_uri = uri.strip()
+        if entry.get("entryPointType") == "video":
+            return normalized_uri
+        if fallback_uri is None:
+            fallback_uri = normalized_uri
+    return fallback_uri
+
+
 def apply_google_calendar_event_update(
     event: CalendarEvent,
     values: dict[str, object],
@@ -2606,6 +2662,7 @@ def apply_google_calendar_event_update(
     event.external_etag = values["external_etag"]  # type: ignore[assignment]
     event.external_ical_uid = values["external_ical_uid"]  # type: ignore[assignment]
     event.external_html_link = values["external_html_link"]  # type: ignore[assignment]
+    event.meeting_url = values["meeting_url"]  # type: ignore[assignment]
     event.external_updated_at = values["external_updated_at"]  # type: ignore[assignment]
     event.google_status = values["google_status"]  # type: ignore[assignment]
     event.summary = str(values["summary"])
@@ -2792,6 +2849,7 @@ def calendar_db_event_item(event: CalendarEvent) -> dict[str, object]:
         "description": event.description,
         "location": event.location,
         "html_link": event.external_html_link,
+        "meeting_url": event.meeting_url,
         "start": start,
         "end": end,
         "status": event.google_status,

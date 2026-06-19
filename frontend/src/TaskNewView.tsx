@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
-import { AppLink, TopNav, navigateTo } from './navigation'
+import { AppLink, TopNav, navigateTo, returnToOrFallback } from './navigation'
 import { t } from './i18n'
 import { isCaseOpenForSuggestion, listCases } from './phase7Api'
 import type { CaseItem } from './phase7Api'
@@ -113,6 +113,7 @@ export default function TaskNewView() {
   const batchSuggestion =
     batchQueue !== null ? batchQueue.suggestions[safeBatchIndex] ?? null : null
   const isBatchMode = batchKey !== null && batchQueue !== null && batchSuggestion !== null
+  const returnHref = returnToOrFallback('/tasks')
 
   useEffect(() => {
     let isMounted = true
@@ -362,7 +363,7 @@ export default function TaskNewView() {
 
   function navigateAfterBatchStep() {
     if (!isBatchMode || batchKey === null || batchQueue === null) {
-      navigateTo('/tasks')
+      navigateTo(returnHref)
       return
     }
     const nextIndex = safeBatchIndex + 1
@@ -375,7 +376,7 @@ export default function TaskNewView() {
       return
     }
     window.sessionStorage.removeItem(batchKey)
-    navigateTo('/tasks')
+    navigateTo(returnHref)
   }
 
   function handleSkipBatchSuggestion() {
@@ -681,7 +682,7 @@ export default function TaskNewView() {
                   {t('tasks.create.skipSuggestion')}
                 </button>
               )}
-              <AppLink className="task-gadget-secondary-action" href="/tasks">
+              <AppLink className="task-gadget-secondary-action" href={returnHref}>
                 {t('tasks.create.cancel')}
               </AppLink>
             </section>

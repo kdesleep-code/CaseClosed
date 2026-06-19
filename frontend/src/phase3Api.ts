@@ -22,6 +22,7 @@ export type Contact = {
   kind?: 'person' | 'mailing_list' | 'service'
   sender_resolution_mode?: 'self' | 'reply_to'
   mailing_list_recipient_expression?: string | null
+  service_email_patterns?: string | null
   mail_importance_rule_action?: 'llm' | 'fixed' | 'llm_with_instruction'
   mail_importance_rule_importance?: 'pinned' | 'high' | 'middle' | 'low' | null
   mail_importance_rule_instruction?: string | null
@@ -316,6 +317,7 @@ export type ContactCreatePayload = {
   kind: 'person' | 'mailing_list' | 'service'
   sender_resolution_mode: 'self' | 'reply_to'
   mailing_list_recipient_expression?: string | null
+  service_email_patterns?: string | null
   mail_importance_rule_action?: 'llm' | 'fixed' | 'llm_with_instruction'
   mail_importance_rule_importance?: 'pinned' | 'high' | 'middle' | 'low' | null
   mail_importance_rule_instruction?: string | null
@@ -336,6 +338,7 @@ export type ContactUpdatePayload = {
   kind: 'person' | 'mailing_list' | 'service'
   sender_resolution_mode: 'self' | 'reply_to'
   mailing_list_recipient_expression?: string | null
+  service_email_patterns?: string | null
   mail_importance_rule_action: 'llm' | 'fixed' | 'llm_with_instruction'
   mail_importance_rule_importance: 'pinned' | 'high' | 'middle' | 'low' | null
   mail_importance_rule_instruction: string | null
@@ -666,6 +669,21 @@ export async function updateStorageObjectLlmInput(
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ llm_input_allowed: llmInputAllowed }),
+    },
+  )
+  return data.storage_object
+}
+
+export async function updateStorageObjectFilename(
+  storageObjectId: string,
+  filename: string,
+): Promise<StorageObject> {
+  const data = await request<{ storage_object: StorageObject }>(
+    `/api/v1/storage/objects/${encodeURIComponent(storageObjectId)}/filename`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename }),
     },
   )
   return data.storage_object

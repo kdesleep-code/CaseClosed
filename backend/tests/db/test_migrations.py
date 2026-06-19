@@ -6,6 +6,7 @@ from conftest import PHASE_3_TABLES
 from conftest import PHASE_4_TABLES
 from conftest import PHASE_6_TABLES
 from conftest import PHASE_9_TABLES
+from conftest import EXTENSION_TABLES
 from conftest import sqlite_table_names
 import sqlite3
 
@@ -391,3 +392,61 @@ def test_phase_9_migrations_add_academic_calendar_tables(
         "updated_at",
         "version",
     } <= day_columns
+
+
+def test_migrations_add_extension_tables(
+    migrated_database,
+) -> None:
+    table_names = sqlite_table_names(migrated_database)
+
+    assert EXTENSION_TABLES <= table_names
+
+    with sqlite3.connect(migrated_database) as connection:
+        definition_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(extension_definitions)"
+            ).fetchall()
+        }
+        instance_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(extension_instances)"
+            ).fetchall()
+        }
+
+    assert {
+        "id",
+        "slug",
+        "name",
+        "description",
+        "root_path",
+        "command_json",
+        "url_path",
+        "tags_json",
+        "manifest_json",
+        "status",
+        "created_at",
+        "updated_at",
+        "version",
+    } <= definition_columns
+    assert {
+        "id",
+        "extension_id",
+        "case_id",
+        "status",
+        "host",
+        "port",
+        "base_url",
+        "process_id",
+        "token_hash",
+        "launch_context_json",
+        "started_at",
+        "last_seen_at",
+        "idle_timeout_seconds",
+        "stopped_at",
+        "error_message",
+        "created_at",
+        "updated_at",
+        "version",
+    } <= instance_columns

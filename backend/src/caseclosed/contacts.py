@@ -67,6 +67,7 @@ class ContactCreate(BaseModel):
     kind: str = "person"
     sender_resolution_mode: str = "self"
     mailing_list_recipient_expression: str | None = None
+    service_email_patterns: str | None = None
     mail_importance_rule_action: str = "llm"
     mail_importance_rule_importance: str | None = None
     mail_importance_rule_instruction: str | None = None
@@ -85,6 +86,7 @@ class ContactPatch(BaseModel):
     kind: str | None = None
     sender_resolution_mode: str | None = None
     mailing_list_recipient_expression: str | None = None
+    service_email_patterns: str | None = None
     mail_importance_rule_action: str | None = None
     mail_importance_rule_importance: str | None = None
     mail_importance_rule_instruction: str | None = None
@@ -412,6 +414,7 @@ def contact_data(contact: Contact, session: DatabaseSession) -> dict[str, object
         "kind": contact.kind,
         "sender_resolution_mode": contact.sender_resolution_mode,
         "mailing_list_recipient_expression": contact.mailing_list_recipient_expression,
+        "service_email_patterns": contact.service_email_patterns,
         "mail_importance_rule_action": contact.mail_importance_rule_action,
         "mail_importance_rule_importance": contact.mail_importance_rule_importance,
         "mail_importance_rule_instruction": contact.mail_importance_rule_instruction,
@@ -930,6 +933,11 @@ def create_contact(
             if payload.kind == "mailing_list"
             else None
         ),
+        service_email_patterns=(
+            normalize_optional_text(payload.service_email_patterns)
+            if payload.kind == "service"
+            else None
+        ),
         mail_importance_rule_action=mail_importance_rule_action,
         mail_importance_rule_importance=mail_importance_rule_importance,
         mail_importance_rule_instruction=normalize_optional_text(
@@ -1038,6 +1046,12 @@ def update_contact(
         )
     if next_kind != "mailing_list":
         contact.mailing_list_recipient_expression = None
+    if payload.service_email_patterns is not None:
+        contact.service_email_patterns = normalize_optional_text(
+            payload.service_email_patterns
+        )
+    if next_kind != "service":
+        contact.service_email_patterns = None
     if payload.display_name is not None:
         display_name = payload.display_name.strip()
         if display_name == "":

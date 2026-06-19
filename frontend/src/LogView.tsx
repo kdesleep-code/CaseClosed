@@ -16,6 +16,19 @@ const allLogTypes = [
   'mail_send',
 ]
 
+function initialLogTypesFromUrl() {
+  const params = new URLSearchParams(window.location.search)
+  const types = params
+    .get('types')
+    ?.split(',')
+    .map((type) => type.trim())
+    .filter((type) => allLogTypes.includes(type))
+  if (types === undefined || types.length === 0) {
+    return allLogTypes
+  }
+  return Array.from(new Set(types))
+}
+
 function describeError(error: unknown) {
   return error instanceof Error ? error.message : t('app.requestFailed')
 }
@@ -94,7 +107,7 @@ function LogRow({ entry }: { entry: LogEntry }) {
 
 function LogView() {
   const [pageData, setPageData] = useState<LogPage | null>(null)
-  const [selectedTypes, setSelectedTypes] = useState<string[]>(allLogTypes)
+  const [selectedTypes, setSelectedTypes] = useState<string[]>(initialLogTypesFromUrl)
   const [query, setQuery] = useState('')
   const [dateFrom, setDateFrom] = useState(defaultDateFrom)
   const [dateTo, setDateTo] = useState('')

@@ -117,6 +117,7 @@ class CalendarEvent(Base):
     external_etag: Mapped[str | None] = mapped_column(Text)
     external_ical_uid: Mapped[str | None] = mapped_column(Text)
     external_html_link: Mapped[str | None] = mapped_column(Text)
+    meeting_url: Mapped[str | None] = mapped_column(Text)
     external_updated_at: Mapped[str | None] = mapped_column(Text)
     google_status: Mapped[str | None] = mapped_column(Text)
     summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
@@ -317,6 +318,47 @@ class ExternalToolLink(Base):
     tags_json: Mapped[str] = mapped_column(Text, nullable=False)
     note: Mapped[str | None] = mapped_column(Text)
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class ExtensionDefinition(Base):
+    __tablename__ = "extension_definitions"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    slug: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    root_path: Mapped[str] = mapped_column(Text, nullable=False)
+    command_json: Mapped[str] = mapped_column(Text, nullable=False)
+    url_path: Mapped[str | None] = mapped_column(Text)
+    tags_json: Mapped[str] = mapped_column(Text, nullable=False)
+    manifest_json: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="enabled")
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class ExtensionInstance(Base):
+    __tablename__ = "extension_instances"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    extension_id: Mapped[str] = mapped_column(ForeignKey("extension_definitions.id"), nullable=False)
+    case_id: Mapped[str | None] = mapped_column(ForeignKey("cases.id"))
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="starting")
+    host: Mapped[str] = mapped_column(Text, nullable=False, default="127.0.0.1")
+    port: Mapped[int] = mapped_column(Integer, nullable=False)
+    base_url: Mapped[str] = mapped_column(Text, nullable=False)
+    process_id: Mapped[int | None] = mapped_column(Integer)
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    launch_context_json: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[str] = mapped_column(Text, nullable=False)
+    last_seen_at: Mapped[str] = mapped_column(Text, nullable=False)
+    idle_timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=1800)
+    stopped_at: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
@@ -844,6 +886,7 @@ class Contact(Base):
         default="self",
     )
     mailing_list_recipient_expression: Mapped[str | None] = mapped_column(Text)
+    service_email_patterns: Mapped[str | None] = mapped_column(Text)
     mail_importance_rule_action: Mapped[str] = mapped_column(
         Text,
         nullable=False,

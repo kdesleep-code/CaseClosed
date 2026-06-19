@@ -2,7 +2,7 @@ import { Fragment, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { t } from './i18n'
 import type { MessageKey } from './i18n'
-import { TopNav } from './navigation'
+import { AppLink, TopNav } from './navigation'
 import {
   previewableImageExtensions,
   previewableTextExtensions,
@@ -564,7 +564,6 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
     }
   }
 
-
   return (
     <main className="app-shell">
       <div className="maintenance-shell">
@@ -949,9 +948,15 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                   className="maintenance-section"
                 >
                   <div className="section-heading">
-                    <h2 id="external-operations-heading">
-                      {t('maintenance.external.heading')}
-                    </h2>
+                    <div>
+                      <h2 id="external-operations-heading">
+                        {t('maintenance.external.heading')}
+                      </h2>
+                      <p>{t('maintenance.external.note')}</p>
+                    </div>
+                    <AppLink className="maintenance-inline-link" href="/logs?types=external">
+                      {t('maintenance.external.viewLogs')}
+                    </AppLink>
                   </div>
 
                   <div className="maintenance-table-wrap">

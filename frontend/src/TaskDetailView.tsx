@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
-import { AppLink, TopNav } from './navigation'
+import { AppLink, TopNav, returnToOrFallback } from './navigation'
 import { CaseStorageWindow } from './CaseView'
 import { t } from './i18n'
 import gmailIconUrl from './assets/gmail-icon-2020.svg'
@@ -136,12 +136,7 @@ function taskReturnToFallback(task: TaskItem) {
 }
 
 function taskReturnTo(task: TaskItem) {
-  const params = new URLSearchParams(window.location.search)
-  const returnTo = params.get('return_to')
-  if (returnTo !== null && (returnTo === '/tasks' || returnTo.startsWith('/tasks?'))) {
-    return returnTo
-  }
-  return taskReturnToFallback(task)
+  return returnToOrFallback(taskReturnToFallback(task))
 }
 
 export default function TaskDetailView({ taskId }: { taskId: string }) {
@@ -464,7 +459,7 @@ export default function TaskDetailView({ taskId }: { taskId: string }) {
     setIsDeleting(true)
     deleteTask(task.id)
       .then(() => {
-        window.location.href = '/tasks'
+        window.location.href = taskReturnTo(task)
       })
       .catch((requestError) => {
         setError(describeError(requestError))
@@ -489,6 +484,7 @@ export default function TaskDetailView({ taskId }: { taskId: string }) {
     progressEntries.length === 0 &&
     task?.progress_memo !== null &&
     task?.progress_memo !== undefined
+  const returnHref = task === null ? returnToOrFallback('/tasks') : taskReturnTo(task)
 
   function renderProgressEntry(entry: TaskProgressEntry) {
     const isEntryEditing = editingProgressEntryId === entry.id
@@ -557,7 +553,7 @@ export default function TaskDetailView({ taskId }: { taskId: string }) {
             ariaLabelKey="tasks.navigation"
             items={[
               { href: '/', labelKey: 'top.heading' },
-              { href: '/tasks', labelKey: 'tasks.heading' },
+              { href: returnHref, labelKey: 'tasks.heading' },
               { href: '/cases', labelKey: 'cases.heading' },
             ]}
           />

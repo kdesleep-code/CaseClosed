@@ -1,0 +1,197 @@
+from __future__ import annotations
+
+import base64
+import sys
+from pathlib import Path
+
+
+def create_case(client, name: str = "Extension Case") -> dict[str, object]:
+    response = client.post(
+        "/api/v1/cases",
+        json={"name": name, "progress_status": "in_progress", "ball_status": "user"},
+    )
+    assert response.status_code == 200
+    return response.json()["data"]["case"]
+
+
+def ingest_mail(
+    client,
+    *,
+    gmail_message_id: str,
+    gmail_thread_id: str,
+    from_address: str,
+    subject: str,
+    received_at: str,
+    body_text: str,
+) -> str:
+    response = client.post(
+        "/api/v1/mails/mock-ingest",
+        json={
+            "gmail_message_id": gmail_message_id,
+            "gmail_thread_id": gmail_thread_id,
+            "message_id_header": f"<{gmail_message_id}@example.com>",
+            "from_address": from_address,
+            "subject": subject,
+            "received_at": received_at,
+            "body_text": body_text,
+        },
+    )
+    assert response.status_code == 200
+    return response.json()["data"]["message_id"]
+
+
+def test_default_extension_template_is_registered(client) -> None:
+    response = client.get("/api/v1/extensions")
+    assert response.status_code == 200
+    extensions = response.json()["data"]["items"]
+    template = next(
+        item for item in extensions if item["slug"] == "caseclosed-extension-template"
+    )
+    assert template["name"] == "CaseClosed Extension Template"
+    assert template["source"] == "default"
+
+
+def test_extension_can_register_start_use_case_api_and_stop(client, tmp_path: Path) -> None:
+    case = create_case(client)
+    message_id = ingest_mail(
+        client,
+        gmail_message_id="gmail_extension_report_1",
+        gmail_thread_id="thread_extension_report",
+        from_address="student@example.com",
+        subject="Report Submission",
+        received_at="2026-06-10T10:00:00+09:00",
+        body_text="This is a report body for extension search.",
+    )
+    ingest_mail(
+        client,
+        gmail_message_id="gmail_extension_report_2",
+        gmail_thread_id="thread_extension_report_unlinked",
+        from_address="student2@example.com",
+        subject="Report Submission",
+        received_at="2026-06-10T10:05:00+09:00",
+        body_text="This is an unlinked report body for extension all-mail search.",
+    )
+    assign_response = client.post(
+        f"/api/v1/mails/{message_id}/case-links",
+        json={"case_id": case["id"]},
+    )
+    assert assign_response.status_code == 200
+    manifest = {
+        "slug": "mail-report-grader-test",
+        "name": "Mail Report Grader Test",
+        "description": "Test extension.",
+        "command": [
+            sys.executable,
+            "-c",
+            "import time; time.sleep(60)",
+        ],
+        "url_path": "/",
+        "tags": ["grading"],
+    }
+
+    register_response = client.post(
+        "/api/v1/extensions/register",
+        json={"root_path": str(tmp_path), "manifest": manifest},
+    )
+    assert register_response.status_code == 200
+    extension = register_response.json()["data"]["extension"]
+    assert extension["slug"] == "mail-report-grader-test"
+    assert extension["name"] == "Mail Report Grader Test"
+
+    start_response = client.post(
+        f"/api/v1/extensions/{extension['id']}/start",
+        json={"case_id": case["id"], "context": {"assignment": "report-1"}},
+    )
+    assert start_response.status_code == 200
+    start_data = start_response.json()["data"]
+    instance = start_data["instance"]
+    token = start_data["extension_token"]
+    assert instance["case_id"] == case["id"]
+    assert instance["status"] == "running"
+    assert isinstance(instance["process_id"], int)
+
+    reused_response = client.post(
+        f"/api/v1/extensions/{extension['id']}/start",
+        json={"case_id": case["id"], "idle_timeout_seconds": 1200},
+    )
+    assert reused_response.status_code == 200
+    reused_data = reused_response.json()["data"]
+    assert reused_data["reused"] is True
+    assert reused_data["instance"]["id"] == instance["id"]
+    assert reused_data["open_url"] == start_data["open_url"]
+    assert reused_data["instance"]["idle_timeout_seconds"] == 1200
+
+    headers = {"X-CaseClosed-Extension-Token": token}
+    context_response = client.get("/api/v1/extension-api/context", headers=headers)
+    assert context_response.status_code == 200
+    assert context_response.json()["data"]["instance"]["launch_context"]["context"] == {
+        "assignment": "report-1",
+    }
+
+    case_response = client.get("/api/v1/extension-api/case", headers=headers)
+    assert case_response.status_code == 200
+    assert case_response.json()["data"]["case"]["id"] == case["id"]
+
+    mails_response = client.get(
+        "/api/v1/extension-api/mails?q=report&include_body=true",
+        headers=headers,
+    )
+    assert mails_response.status_code == 200
+    mails = mails_response.json()["data"]["items"]
+    assert [item["subject"] for item in mails] == ["Report Submission"]
+    assert mails[0]["body_text"] == "This is a report body for extension search."
+
+    all_mails_response = client.get(
+        "/api/v1/extension-api/mails?scope=all&q=report&include_body=true",
+        headers=headers,
+    )
+    assert all_mails_response.status_code == 200
+    all_mails = all_mails_response.json()["data"]["items"]
+    assert len(all_mails) == 2
+    assert {item["from_address"] for item in all_mails} == {
+        "student@example.com",
+        "student2@example.com",
+    }
+
+    upload_response = client.post(
+        "/api/v1/extension-api/case/files",
+        headers=headers,
+        json={
+            "filename": "grading-result.csv",
+            "content_type": "text/csv",
+            "data_base64": base64.b64encode(b"student,score\nA,90\n").decode("ascii"),
+        },
+    )
+    assert upload_response.status_code == 200
+    storage_object = upload_response.json()["data"]["storage_object"]
+    assert storage_object["original_filename"] == "grading-result.csv"
+    assert storage_object["source_type"] == "extension"
+
+    files_response = client.get("/api/v1/extension-api/case/files", headers=headers)
+    assert files_response.status_code == 200
+    filenames = {
+        item["original_filename"]
+        for item in files_response.json()["data"]["items"]
+    }
+    assert "grading-result.csv" in filenames
+
+    stop_response = client.post(f"/api/v1/extensions/instances/{instance['id']}/stop")
+    assert stop_response.status_code == 200
+    assert stop_response.json()["data"]["instance"]["status"] == "stopped"
+
+    logs_response = client.get("/api/v1/logs?q=extension&types=audit")
+    assert logs_response.status_code == 200
+    action_types = {
+        item["category"]
+        for item in logs_response.json()["data"]["items"]
+    }
+    assert {
+        "extension.registered",
+        "extension.started",
+        "extension.reused",
+        "extension.case_context_read",
+        "extension.mails_listed",
+        "extension.case_files_listed",
+        "extension.case_file_uploaded",
+        "extension.stopped",
+    } <= action_types

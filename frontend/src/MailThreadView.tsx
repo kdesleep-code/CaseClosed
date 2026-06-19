@@ -249,7 +249,7 @@ function detailStillVisibleInReturnTo(detail: MailDetail, returnTo: string) {
     return detail.thread_messages.some(isIncompleteNeedsActionIncomingMessage)
   }
   if (destination.pathname !== '/mail') {
-    return true
+    return false
   }
 
   const tab = destination.searchParams.get('tab') ?? 'unprocessed'
@@ -1118,9 +1118,9 @@ function returnToHrefFromLocation() {
     const destination = new URL(returnTo, window.location.origin)
     if (
       destination.origin !== window.location.origin ||
-      !destination.pathname.startsWith('/mail') ||
       (destination.pathname.startsWith('/mail/') &&
-        destination.pathname !== '/mail/action-needed')
+        destination.pathname !== '/mail/action-needed') ||
+      destination.pathname === window.location.pathname
     ) {
       return null
     }
@@ -2282,6 +2282,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
     detail.thread_messages.find((threadMessage) => threadMessage.id === messageId) ??
     detail.message
   const mailListHref = mailListHrefFor(focusedMessage)
+  const returnHref = returnToHrefFromLocation() ?? mailListHref
   const gmailThreadLink =
     detail.message.gmail_link ??
     threadMessages.find((message) => message.gmail_link !== null)?.gmail_link ??
@@ -2409,7 +2410,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
             ariaLabelKey="mail.thread.navLabel"
             className="mail-thread-nav"
             items={[
-              { href: mailListHref, labelKey: 'mail.heading' },
+              { href: returnHref, labelKey: 'mail.heading' },
               { href: '/', labelKey: 'top.heading' },
             ]}
           />

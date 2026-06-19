@@ -424,6 +424,75 @@ def ensure_runtime_schema() -> None:
                     """
                 )
             )
+    if "extension_definitions" not in inspect(engine).get_table_names():
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE extension_definitions (
+                        id TEXT PRIMARY KEY,
+                        slug TEXT NOT NULL UNIQUE,
+                        name TEXT NOT NULL,
+                        description TEXT,
+                        root_path TEXT NOT NULL,
+                        command_json TEXT NOT NULL,
+                        url_path TEXT,
+                        tags_json TEXT NOT NULL,
+                        manifest_json TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'enabled',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+            )
+    if "extension_instances" not in inspect(engine).get_table_names():
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE extension_instances (
+                        id TEXT PRIMARY KEY,
+                        extension_id TEXT NOT NULL REFERENCES extension_definitions(id),
+                        case_id TEXT REFERENCES cases(id),
+                        status TEXT NOT NULL DEFAULT 'starting',
+                        host TEXT NOT NULL DEFAULT '127.0.0.1',
+                        port INTEGER NOT NULL,
+                        base_url TEXT NOT NULL,
+                        process_id INTEGER,
+                        token_hash TEXT NOT NULL,
+                        launch_context_json TEXT NOT NULL,
+                        started_at TEXT NOT NULL,
+                        last_seen_at TEXT NOT NULL,
+                        idle_timeout_seconds INTEGER NOT NULL DEFAULT 1800,
+                        stopped_at TEXT,
+                        error_message TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+            )
+    if "extension_instances" in inspect(engine).get_table_names():
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_extension_instances_status
+                    ON extension_instances (status)
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_extension_instances_case
+                    ON extension_instances (case_id)
+                    """
+                )
+            )
     if "calendar_events" not in inspect(engine).get_table_names():
         with engine.begin() as connection:
             connection.execute(
@@ -437,6 +506,7 @@ def ensure_runtime_schema() -> None:
                         external_etag TEXT,
                         external_ical_uid TEXT,
                         external_html_link TEXT,
+                        meeting_url TEXT,
                         external_updated_at TEXT,
                         google_status TEXT,
                         summary TEXT NOT NULL DEFAULT '',
@@ -470,6 +540,10 @@ def ensure_runtime_schema() -> None:
             if "academic_series_id" not in calendar_event_columns:
                 connection.execute(
                     text("ALTER TABLE calendar_events ADD COLUMN academic_series_id TEXT")
+                )
+            if "meeting_url" not in calendar_event_columns:
+                connection.execute(
+                    text("ALTER TABLE calendar_events ADD COLUMN meeting_url TEXT")
                 )
         with engine.begin() as connection:
             connection.execute(
@@ -748,6 +822,8 @@ def ensure_runtime_schema() -> None:
                 )
         if "ai_memo" not in contact_columns:
             connection.execute(text("ALTER TABLE contacts ADD COLUMN ai_memo TEXT"))
+        if "service_email_patterns" not in contact_columns:
+            connection.execute(text("ALTER TABLE contacts ADD COLUMN service_email_patterns TEXT"))
         if "mail_importance_rule_action" not in contact_columns:
             connection.execute(
                 text(

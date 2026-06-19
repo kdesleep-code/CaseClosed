@@ -21,3 +21,15 @@ data/
 logs/
 storage/
 .tmp/
+certs/*.pem
+certs/*.crt
+certs/*.cer
+certs/*.key
+certs/*.pfx
+
+# Local Extension implementations
+extensions/*
+!extensions/.gitkeep
+!extensions/caseclosed-extension-template/
+!extensions/caseclosed-extension-template/**
+extensions/user-extensions/

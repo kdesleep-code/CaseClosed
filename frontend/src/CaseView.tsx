@@ -891,6 +891,34 @@ function caseToolIconLabelFromUrl(url: string) {
   )
 }
 
+function isValidCaseToolIconLabel(value: string) {
+  const trimmed = value.trim()
+  if (trimmed === '') return false
+  const characters = Array.from(trimmed)
+  const isAscii = characters.every((character) => character.charCodeAt(0) < 128)
+  return isAscii ? characters.length <= 2 : characters.length === 1
+}
+
+function caseToolTarget(url: string) {
+  if (url.startsWith('/extensions/launch')) {
+    const params = new URLSearchParams(url.split('?', 2)[1] ?? '')
+    const extensionId = params.get('extension_id') ?? 'extension'
+    const caseId = params.get('case_id') ?? 'no-case'
+    return `caseclosed_extension_${extensionId}_${caseId}`.replace(/[^a-zA-Z0-9_]/g, '_')
+  }
+  return url.startsWith('http') ? '_blank' : undefined
+}
+
+function caseToolHref(url: string, caseId: string) {
+  if (!url.startsWith('/extensions/launch')) return url
+  const [path, query = ''] = url.split('?', 2)
+  const params = new URLSearchParams(query)
+  if (!params.has('case_id')) {
+    params.set('case_id', caseId)
+  }
+  return `${path}?${params.toString()}`
+}
+
 function CaseToolsGadget({
   caseId,
   initialTools,
@@ -901,6 +929,7 @@ function CaseToolsGadget({
   const [tools, setTools] = useState<CaseToolLink[]>(initialTools)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [url, setUrl] = useState('')
+  const [iconLabel, setIconLabel] = useState('')
   const [draggedToolId, setDraggedToolId] = useState<string | null>(null)
   const [dropIndex, setDropIndex] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
@@ -913,16 +942,18 @@ function CaseToolsGadget({
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const normalizedUrl = url.trim()
-    if (normalizedUrl === '') return
+    const normalizedIconLabel = iconLabel.trim() || caseToolIconLabelFromUrl(normalizedUrl || 'tool')
+    if (normalizedUrl === '' || !isValidCaseToolIconLabel(normalizedIconLabel)) return
     setBusy(true)
     setError(null)
     try {
       const tool = await createCaseToolLink(caseId, {
         url: normalizedUrl,
-        icon_label: caseToolIconLabelFromUrl(normalizedUrl),
+        icon_label: normalizedIconLabel,
       })
       setTools((currentTools) => [...currentTools, tool])
       setUrl('')
+      setIconLabel('')
     } catch (requestError) {
       setError(describeError(requestError))
     } finally {
@@ -1023,7 +1054,9 @@ function CaseToolsGadget({
         {tools.length === 0 ? (
           <p className="case-tool-empty">{t('cases.tools.empty')}</p>
         ) : (
-          tools.map((tool, index) => (
+          tools.map((tool, index) => {
+            const href = caseToolHref(tool.url, caseId)
+            return (
             <div
               className={`case-tool-icon-item${
                 isSettingsOpen ? ' is-configuring' : ''
@@ -1047,12 +1080,12 @@ function CaseToolsGadget({
               onDrop={handleToolDrop}
             >
               <a
-                href={tool.url}
+                href={href}
                 onClick={(event) => {
                   if (isSettingsOpen || tool.url === '#') event.preventDefault()
                 }}
                 rel="noreferrer"
-                target={tool.url.startsWith('http') ? '_blank' : undefined}
+                target={caseToolTarget(href)}
                 title={tool.url}
               >
                 {tool.icon_url !== null && tool.icon_url !== '' ? (
@@ -1072,7 +1105,8 @@ function CaseToolsGadget({
                 </button>
               )}
             </div>
-          ))
+            )
+          })
         )}
         {isSettingsOpen && tools.length > 0 && (
           <div
@@ -1093,12 +1127,32 @@ function CaseToolsGadget({
               <span>{t('cases.tools.url')}</span>
               <input
                 onChange={(event) => setUrl(event.target.value)}
-                placeholder="https://example.com"
-                type="url"
+                placeholder="/extensions/launch?extension_id=..."
+                type="text"
                 value={url}
               />
             </label>
-            <button disabled={busy} type="submit">{t('cases.tools.add')}</button>
+            <label>
+              <span>{t('cases.tools.iconLabel')}</span>
+              <input
+                maxLength={2}
+                onChange={(event) => setIconLabel(event.target.value)}
+                placeholder={caseToolIconLabelFromUrl(url.trim() || 'tool')}
+                type="text"
+                value={iconLabel}
+              />
+            </label>
+            <p className="case-tool-settings-help">{t('cases.tools.iconLabelHelp')}</p>
+            <button
+              disabled={
+                busy ||
+                url.trim() === '' ||
+                !isValidCaseToolIconLabel(iconLabel.trim() || caseToolIconLabelFromUrl(url.trim() || 'tool'))
+              }
+              type="submit"
+            >
+              {t('cases.tools.add')}
+            </button>
           </form>
         </div>
       )}

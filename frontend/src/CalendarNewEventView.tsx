@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
-import { AppLink, TopNav, navigateTo } from './navigation'
+import { AppLink, TopNav, navigateTo, returnToOrFallback } from './navigation'
 import {
   createCalendarDbEventLink,
   createGoogleCalendarEvent,
@@ -213,8 +213,9 @@ function displayPeriodTime(value: string) {
 
 export default function CalendarNewEventView() {
   const preselectedCaseId = new URLSearchParams(window.location.search).get('case_id')
-  const cancelHref =
-    preselectedCaseId === null ? '/calendar' : `/cases/${encodeURIComponent(preselectedCaseId)}`
+  const cancelHref = returnToOrFallback(
+    preselectedCaseId === null ? '/calendar' : `/cases/${encodeURIComponent(preselectedCaseId)}`,
+  )
   const [calendars, setCalendars] = useState<GoogleCalendarListItem[]>([])
   const [cases, setCases] = useState<CaseItem[]>([])
   const [tasks, setTasks] = useState<TaskItem[]>([])
@@ -609,9 +610,13 @@ export default function CalendarNewEventView() {
           }
         }
         if (createdEventIds.length === 1) {
-          navigateTo(`/calendar/events/${encodeURIComponent(createdEventIds[0])}`)
+          navigateTo(
+            `/calendar/events/${encodeURIComponent(createdEventIds[0])}?return_to=${encodeURIComponent(
+              cancelHref,
+            )}`,
+          )
         } else {
-          navigateTo('/calendar')
+          navigateTo(cancelHref)
         }
         return
       }
@@ -635,9 +640,13 @@ export default function CalendarNewEventView() {
         })
       }
       if (eventId !== null) {
-        navigateTo(`/calendar/events/${encodeURIComponent(eventId)}`)
+        navigateTo(
+          `/calendar/events/${encodeURIComponent(eventId)}?return_to=${encodeURIComponent(
+            cancelHref,
+          )}`,
+        )
       } else {
-        navigateTo('/calendar')
+        navigateTo(cancelHref)
       }
     } catch (requestError) {
       setError(describeError(requestError))

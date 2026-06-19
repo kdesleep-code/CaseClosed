@@ -132,6 +132,10 @@ class StorageObjectLlmInputPatch(BaseModel):
     llm_input_allowed: bool
 
 
+class StorageObjectFilenamePatch(BaseModel):
+    filename: str | None = None
+
+
 class StorageObjectDirectoryPatch(BaseModel):
     directory_id: str | None = None
 
@@ -3437,6 +3441,51 @@ def update_storage_object_llm_input(
         now=now,
         storage_object=storage_object,
         details={"llm_input_allowed": payload.llm_input_allowed},
+    )
+    session.commit()
+    return {
+        "ok": True,
+        "data": {"storage_object": storage_object_data(storage_object, session)},
+    }
+
+
+@router.patch("/objects/{storage_object_id}/filename")
+def update_storage_object_filename(
+    storage_object_id: str,
+    payload: StorageObjectFilenamePatch,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    storage_object = session.get(StorageObject, storage_object_id)
+    if (
+        storage_object is None
+        or storage_object.status != "active"
+        or storage_object.scope != "managed"
+    ):
+        raise json_error(404, "NOT_FOUND", "Storage object not found.")
+    next_filename = normalized_optional_filename(payload.filename)
+    if next_filename is None:
+        raise json_error(422, "VALIDATION_ERROR", "Filename is required.")
+    if len(next_filename) > 255 or any(character in next_filename for character in "\\/\r\n\t"):
+        raise json_error(422, "VALIDATION_ERROR", "Filename contains invalid characters.")
+    previous_filename = storage_object.original_filename
+    if previous_filename == next_filename:
+        return {
+            "ok": True,
+            "data": {"storage_object": storage_object_data(storage_object, session)},
+        }
+    now = jst_iso()
+    storage_object.original_filename = next_filename
+    storage_object.updated_at = now
+    storage_object.version += 1
+    record_storage_operation(
+        session,
+        operation_type="renamed",
+        now=now,
+        storage_object=storage_object,
+        details={
+            "old_filename": previous_filename,
+            "new_filename": next_filename,
+        },
     )
     session.commit()
     return {

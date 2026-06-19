@@ -294,6 +294,7 @@ function ContactsView({
     detailMailingListRecipientExpression,
     setDetailMailingListRecipientExpression,
   ] = useState('')
+  const [detailServiceEmailPatterns, setDetailServiceEmailPatterns] = useState('')
   const [detailTags, setDetailTags] = useState('')
   const [newEmailAddress, setNewEmailAddress] = useState('')
   const [moveTargetContactIds, setMoveTargetContactIds] = useState<Record<string, string>>(
@@ -639,6 +640,7 @@ function ContactsView({
     setDetailMailingListRecipientExpression(
       contact.mailing_list_recipient_expression ?? '',
     )
+    setDetailServiceEmailPatterns(contact.service_email_patterns ?? '')
     setDetailTags(contact.tags.join(', '))
     setNewEmailAddress('')
     setMoveTargetContactIds({})
@@ -668,6 +670,7 @@ function ContactsView({
     setDetailMailingListRecipientExpression(
       contact.mailing_list_recipient_expression ?? '',
     )
+    setDetailServiceEmailPatterns(contact.service_email_patterns ?? '')
     setDetailTags(contact.tags.join(', '))
     setIsContactDetailEditing(true)
   }
@@ -704,6 +707,8 @@ function ContactsView({
           detailKind === 'mailing_list'
             ? detailMailingListRecipientExpression
             : null,
+        service_email_patterns:
+          detailKind === 'service' ? detailServiceEmailPatterns : null,
         mail_importance_rule_action: detailMailImportanceRuleAction,
         mail_importance_rule_importance:
           detailMailImportanceRuleAction === 'fixed'
@@ -1976,6 +1981,18 @@ function ContactsView({
                                           value={detailMailingListRecipientExpression}
                                         />
                                       </label>
+                                    ) : selectedIsService ? (
+                                      <label>
+                                        <span>{t('contacts.service.emailPatterns')}</span>
+                                        <textarea
+                                          aria-label={t('contacts.service.emailPatterns')}
+                                          onChange={(event) =>
+                                            setDetailServiceEmailPatterns(event.target.value)
+                                          }
+                                          placeholder="*@amazon.com"
+                                          value={detailServiceEmailPatterns}
+                                        />
+                                      </label>
                                     ) : (
                                       <label>
                                         <span>{t('contacts.tags')}</span>
@@ -2105,6 +2122,15 @@ function ContactsView({
                                       <span>{t('contacts.mailingList.recipientExpression')}</span>
                                       <p>
                                         {selectedContact.mailing_list_recipient_expression ??
+                                          t('common.none')}
+                                      </p>
+                                    </div>
+                                  )}
+                                  {selectedIsService && (
+                                    <div>
+                                      <span>{t('contacts.service.emailPatterns')}</span>
+                                      <p>
+                                        {selectedContact.service_email_patterns ??
                                           t('common.none')}
                                       </p>
                                     </div>

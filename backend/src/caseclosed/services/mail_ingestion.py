@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -28,10 +29,37 @@ from caseclosed.services.contact_ai_memo_update import (
 
 SUMMARY_TARGET_IMPORTANCE = {"high", "middle"}
 SPAM_SUBJECT_PATTERN = re.compile(r"\[\s*spam\s*\]", re.IGNORECASE)
+SERVICE_EMAIL_PATTERN_SPLIT = re.compile(r"[\s,;]+")
 
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex}"
+
+
+def service_email_patterns(value: str | None) -> list[str]:
+    return [
+        pattern.strip().lower()
+        for pattern in SERVICE_EMAIL_PATTERN_SPLIT.split(value or "")
+        if pattern.strip()
+    ]
+
+
+def find_matching_service_contact(
+    session: DatabaseSession,
+    normalized_email_address: str,
+) -> Contact | None:
+    service_contacts = session.scalars(
+        select(Contact).where(
+            Contact.kind == "service",
+            Contact.deleted_at.is_(None),
+            Contact.service_email_patterns.is_not(None),
+        )
+    ).all()
+    for contact in service_contacts:
+        for pattern in service_email_patterns(contact.service_email_patterns):
+            if fnmatchcase(normalized_email_address, pattern):
+                return contact
+    return None
 
 
 @dataclass(frozen=True)
@@ -848,22 +876,35 @@ def upsert_observed_email_address(
     now: str,
 ) -> ContactEmailAddress:
     normalized_email_address = normalize_email_address(email_address)
+    matched_service = find_matching_service_contact(session, normalized_email_address)
     contact_email_address = session.scalar(
         select(ContactEmailAddress).where(
             ContactEmailAddress.normalized_email_address == normalized_email_address
         )
     )
     if contact_email_address is None:
+        should_be_primary = False
+        if matched_service is not None:
+            has_active_email_address = session.scalar(
+                select(ContactEmailAddress.id)
+                .where(
+                    ContactEmailAddress.contact_id == matched_service.id,
+                    ContactEmailAddress.status == "active",
+                    ContactEmailAddress.deleted_at.is_(None),
+                )
+                .limit(1)
+            )
+            should_be_primary = has_active_email_address is None
         contact_email_address = ContactEmailAddress(
             id=new_id("email"),
-            contact_id=None,
+            contact_id=matched_service.id if matched_service is not None else None,
             email_address=email_address.strip(),
             normalized_email_address=normalized_email_address,
-            resolution_status="unresolved",
+            resolution_status="linked" if matched_service is not None else "unresolved",
             status="active",
             has_inbound_message_history=1,
-            is_primary=0,
-            source="gmail",
+            is_primary=1 if should_be_primary else 0,
+            source="service_pattern" if matched_service is not None else "gmail",
             first_seen_at=now,
             last_seen_at=now,
             deactivated_at=None,
@@ -874,6 +915,30 @@ def upsert_observed_email_address(
         )
         session.add(contact_email_address)
         return contact_email_address
+
+    if (
+        matched_service is not None
+        and (
+            contact_email_address.contact_id is None
+            or contact_email_address.resolution_status != "linked"
+        )
+        and contact_email_address.deleted_at is None
+    ):
+        has_active_email_address = session.scalar(
+            select(ContactEmailAddress.id)
+            .where(
+                ContactEmailAddress.contact_id == matched_service.id,
+                ContactEmailAddress.status == "active",
+                ContactEmailAddress.deleted_at.is_(None),
+                ContactEmailAddress.id != contact_email_address.id,
+            )
+            .limit(1)
+        )
+        contact_email_address.contact_id = matched_service.id
+        contact_email_address.resolution_status = "linked"
+        contact_email_address.status = "active"
+        contact_email_address.source = "service_pattern"
+        contact_email_address.is_primary = 1 if has_active_email_address is None else 0
 
     if contact_email_address.first_seen_at is None:
         contact_email_address.first_seen_at = now

@@ -1101,6 +1101,21 @@ def tool_icon_label_from_url(url: str) -> str:
     return "".join(letters[:2]) or "TL"
 
 
+def normalize_case_tool_icon_label(value: str | None, *, url: str) -> str:
+    text = (value or "").strip()
+    if text == "":
+        return tool_icon_label_from_url(url)
+    characters = list(text)
+    is_ascii = all(ord(character) < 128 for character in characters)
+    if is_ascii:
+        if len(characters) > 2:
+            raise json_error(422, "VALIDATION_ERROR", "Icon label must be at most 2 half-width characters.")
+        return text.upper()
+    if len(characters) != 1:
+        raise json_error(422, "VALIDATION_ERROR", "Icon label must be 1 full-width character.")
+    return text
+
+
 def normalize_case_tool_icon_match_url(value: str | None) -> str:
     normalized = (value or "").strip().lower()
     if normalized == "":
@@ -2070,7 +2085,7 @@ def create_case_tool_link(
         or 0
     ) + 1
     now = jst_iso()
-    icon_label = (payload.icon_label or tool_icon_label_from_url(url)).strip().upper()[:4]
+    icon_label = normalize_case_tool_icon_label(payload.icon_label, url=url)
     tool_link = CaseToolLink(
         id=new_id("case_tool_link"),
         case_id=case_id,

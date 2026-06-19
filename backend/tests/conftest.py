@@ -76,6 +76,11 @@ PHASE_9_TABLES = {
     "calendar_events",
 }
 
+EXTENSION_TABLES = {
+    "extension_definitions",
+    "extension_instances",
+}
+
 
 @pytest.fixture
 def database_path(tmp_path: Path) -> Path:

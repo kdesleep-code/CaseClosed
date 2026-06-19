@@ -20,11 +20,25 @@ function formatShortDate(value: string | null) {
   return value.slice(0, 10)
 }
 
+function formatDueDate(value: string | null) {
+  if (value === null) return t('tasks.noDueDate')
+  return `~ ${value.slice(0, 10)}`
+}
+
 function todayKey() {
   const now = new Date()
   const month = String(now.getMonth() + 1).padStart(2, '0')
   const day = String(now.getDate()).padStart(2, '0')
   return `${now.getFullYear()}-${month}-${day}`
+}
+
+function isOverdueDate(value: string | null) {
+  if (value === null) return false
+  if (value.length <= 10) {
+    return value.slice(0, 10) < todayKey()
+  }
+  const dueTime = new Date(value).getTime()
+  return Number.isFinite(dueTime) && dueTime < Date.now()
 }
 
 function isTaskClosed(task: TaskItem) {
@@ -126,7 +140,9 @@ function TaskCard({ task, returnTo }: { task: TaskItem; returnTo: string }) {
       </div>
       <div className="task-row-side">
         <span>{t('tasks.due')}</span>
-        <strong>{formatShortDate(task.due_at)}</strong>
+        <strong className={isOverdueDate(task.due_at) ? 'task-due-overdue' : undefined}>
+          {formatDueDate(task.due_at)}
+        </strong>
         {task.estimate_minutes !== null && (
           <small>{t('tasks.estimateMinutes', { value: String(task.estimate_minutes) })}</small>
         )}

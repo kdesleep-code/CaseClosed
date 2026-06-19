@@ -17,8 +17,13 @@ from caseclosed.cases import router as cases_router
 from caseclosed.contacts import router as contacts_router
 from caseclosed.db.runtime import bootstrap_database
 from caseclosed.db.runtime import rebuild_runtime_database
+from caseclosed.db.runtime import SessionLocal
 from caseclosed.external_operations import router as external_operations_router
 from caseclosed.external_tools import router as external_tools_router
+from caseclosed.extensions import ExtensionIdleSupervisor
+from caseclosed.extensions import bootstrap_default_extensions
+from caseclosed.extensions import extension_api_router
+from caseclosed.extensions import router as extensions_router
 from caseclosed.google_integration import router as google_integration_router
 from caseclosed.jobs import router as jobs_router
 from caseclosed.logs import router as logs_router
@@ -43,12 +48,16 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     rebuild_runtime_database()
     bootstrap_database()
     bootstrap_mail_drafts_database()
+    with SessionLocal() as session:
+        bootstrap_default_extensions(session)
     storage_root()
     background_worker = None
     calendar_auto_sync = CalendarAutoSyncSupervisor()
+    extension_idle = ExtensionIdleSupervisor()
     gmail_auto_import = GmailAutoImportSupervisor()
     gmail_auto_import.start()
     calendar_auto_sync.start()
+    extension_idle.start()
     if is_background_worker_enabled():
         background_worker = BackgroundWorkerSupervisor()
         background_worker.start()
@@ -57,6 +66,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     finally:
         if background_worker is not None:
             await background_worker.stop()
+        await extension_idle.stop()
         await calendar_auto_sync.stop()
         await gmail_auto_import.stop()
 
@@ -69,6 +79,8 @@ app.include_router(contacts_router)
 app.include_router(jobs_router)
 app.include_router(external_operations_router)
 app.include_router(external_tools_router)
+app.include_router(extensions_router)
+app.include_router(extension_api_router)
 app.include_router(google_integration_router)
 app.include_router(maintenance_router)
 app.include_router(logs_router)
