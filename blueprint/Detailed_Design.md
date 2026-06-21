@@ -1064,38 +1064,49 @@ Google Tasks連携は後続拡張とする。
 
 ---
 
-# 15. Follow-up Watch / リマインド
+# 15. Follow-up Candidate / リマインド
 
 ## 15.1 基本方針
 
-返信待ちはTaskではない。一定期間返信がなければ、リマインドTaskが自動生成される。
+返信待ちはTaskではない。
+初期実装では、返信待ちの正確なWatch管理ではなく、送信メールから
+「確認した方がよい候補」をルールベースで作成する。
+候補はFollow Upページで一覧し、ユーザーが `resolved` / `dismissed` / `snoozed`
+として軽く処理できるようにする。
 
 ## 15.2 作成条件
 
-- ユーザーが「返信を待つ」を明示した場合
-- LLMが候補提示し、ユーザーが承認した場合
+- 送信メール本文に「ご確認」「ご査収」などの定型表現が含まれる。
+- AutoBody / quoted reply等の自動引用領域は探索対象から除外する。
+- 初期候補の期限は原則1週間後とする。
 
-すべての送信メールに自動では作らない。
+すべての送信メールに過剰に出すことは避けるが、候補検出の誤りコストは高くないため、
+まずは手動負担を減らすことを優先する。
 
-## 15.3 待ち期間
+## 15.3 LLM利用方針
 
-デフォルトは1週間。ユーザー指定可能。
+初期実装ではLLMを使わない。
+Dismissされた候補サンプルが十分に溜まった後で、ルール改善またはLLMフィルタに利用する。
 
 ## 15.4 状態
 
 ```text
-active
-fulfilled
-reminder_task_created
-closed
+pending
+resolved
+dismissed
+snoozed
 ```
 
-## 15.5 解除条件
+## 15.5 操作
 
-- 同一Gmail threadに相手から返信が来た
-- ユーザーが手動解除
-- リマインドTask完了
-- リマインドメール送信
+- `dismissed`: 候補ではないと判断して閉じる。理由入力は求めない。
+- `resolved`: 対応済みとして閉じる。
+- `snoozed`: 確認日を後ろへ送る。
+
+## 15.6 UI配置
+
+- Mail画面右ガジェットの一番下にFollow Upへの導線を置く。
+- TopページにはFollow Upボタンを常設しない。
 
 ---
 
@@ -1659,7 +1670,7 @@ UIの完全自動テストより、以下のロジックテストを重視する
 - LLM High判定 → Gmailスター付与 → external_operations succeeded
 - メールから返信草案 → 編集 → 送信 → 処理済み化
 - メールから予定抽出 → Calendar作成 → 処理済み化
-- 送信メール → follow-up watch → 期限超過 → リマインドTask生成
+- 送信メール → Follow-up Candidate生成 → ユーザーがResolve / Dismiss / Snooze
 - Task木構造 → 子Task完了 → 親Task完了
 - Task論理削除 → 通常一覧非表示 → 監査ログ整合
 - File upload → 機密度判定 → trash → restore → purge
@@ -1780,9 +1791,9 @@ MVPという用語は用いない。以下の順に段階的に実装する。
 2. 今日の予定取得
 3. メールから予定作成
 4. 準備Task生成
-5. follow_up_watches
-6. リマインドTask
-7. リマインドメール生成
+5. follow_ups
+6. Follow-up候補一覧
+7. Dismissサンプル蓄積とルール改善
 
 ## Stage 10：Recurring / File / Handover / Backup
 
@@ -1852,7 +1863,7 @@ MVPという用語は用いない。以下の順に段階的に実装する。
 - mail_thread_summaries
 - mail_drafts
 - case_mail_links
-- follow_up_watches
+- follow_ups
 
 ## Contact
 

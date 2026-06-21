@@ -1212,12 +1212,14 @@ function ContactsView({
           </div>
           <TopNav
             ariaLabelKey="contacts.navLabel"
-            className=""
             items={[
               ...(mode === 'pending'
                 ? [{ href: '/contacts', labelKey: 'contacts.heading' as const }]
                 : []),
               { href: '/', labelKey: 'top.heading' },
+              { href: '/mail', labelKey: 'nav.mail' },
+              { href: '/cases', labelKey: 'nav.cases' },
+              { href: '/settings', labelKey: 'nav.settings' },
             ]}
           />
         </header>

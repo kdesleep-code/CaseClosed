@@ -135,12 +135,18 @@ function topNavRank(href: string) {
   if (pathname === '/mail' || pathname === '/mail/action-needed' || pathname === '/mail/compose') {
     return 10
   }
+  if (pathname === '/today' || pathname === '/tomorrow') return 5
+  if (pathname === '/follow-ups') return 15
   if (pathname === '/contacts' || pathname === '/contacts/pending') return 20
   if (pathname === '/cases') return 30
   if (pathname === '/tasks' || pathname === '/tasks/new') return 40
   if (pathname === '/calendar' || pathname === '/calendar/new') return 50
+  if (pathname === '/academic-calendar') return 55
   if (pathname === '/files' || pathname === '/file-icons') return 60
+  if (pathname === '/external-tools') return 65
+  if (pathname === '/extensions' || pathname.startsWith('/extensions/')) return 66
   if (pathname === '/profile') return 70
+  if (pathname === '/settings') return 75
   if (pathname === '/logs') return 80
   if (pathname === '/maintenance') return 90
   return 100

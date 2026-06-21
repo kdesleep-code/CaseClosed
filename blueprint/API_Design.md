@@ -1767,47 +1767,64 @@ POST /api/v1/calendar/events/{calendar_event_link_id}/cancel
 
 ---
 
-# 12. Follow-up Watch API
+# 12. Follow-up Candidate API
 
-## 12.1 Follow-up Watch作成
+現行仕様では、返信待ちを永続的なWatchとしてユーザーが管理するのではなく、
+ルールベースで「確認した方がよい送信メール候補」を作る。
+検出誤りのコストは高くないため、初期実装ではLLMを使わず、本文中の定型表現を
+もとに候補化し、ユーザーは候補を `resolved` または `dismissed` にする。
+
+AutoBody / quoted reply 等の自動引用領域は候補検出の対象外とする。
+
+## 12.1 Follow-up候補一覧
 
 ```http
-POST /api/v1/follow-up-watches
+GET /api/v1/follow-ups
 ```
 
-Request:
+Query:
 
-```json
-{
-  "case_id": "case_...",
-  "message_id": "mail_...",
-  "gmail_thread_id": "...",
-  "wait_until": "...",
-  "note": "1週間返事がなければリマインド"
-}
+```text
+status=pending|resolved|dismissed
 ```
 
 仕様:
 
-- すべての送信メールに自動では作らない。
-- ユーザー明示、またはLLM候補をユーザー承認した場合のみ作成。
+- 初期候補はルールベースで作成する。
+- 例: 「ご確認」「ご査収」等が含まれる送信メールを、送信から約1週間後の確認候補にする。
+- 候補はMail画面右ガジェットから遷移するFollow Upページで確認する。
+- Topページには常設しない。
 
-## 12.2 Follow-up Watch解除
-
-```http
-POST /api/v1/follow-up-watches/{watch_id}/close
-```
-
-## 12.3 リマインドTask生成
+## 12.2 Follow-up候補のDismiss
 
 ```http
-POST /api/v1/follow-up-watches/{watch_id}/create-reminder-task
+POST /api/v1/follow-ups/{follow_up_id}/dismiss
 ```
 
 仕様:
 
-- Case配下に「リマインドを送る」Taskを作成する。
-- Watch状態は `reminder_task_created`。
+- Dismiss時に理由入力は求めない。
+- 将来、Dismissされた候補をサンプルとしてルール改善またはLLM判定に利用できる。
+
+## 12.3 Follow-up候補のResolve
+
+```http
+POST /api/v1/follow-ups/{follow_up_id}/resolve
+```
+
+仕様:
+
+- ユーザーが対応済みと判断した候補を閉じる。
+
+## 12.4 Follow-up候補のSnooze
+
+```http
+POST /api/v1/follow-ups/{follow_up_id}/snooze
+```
+
+仕様:
+
+- 候補の確認日を後日に送る。
 
 ---
 
@@ -2039,7 +2056,7 @@ POST /api/v1/mails/attachments/{attachment_id}/move-to-storage
 - 添付実体取得はJob化し、`jobs.job_type = mail_attachment_fetch` で扱う。
 - Storage移動時は添付元メール参照をStorage objectに保持する。
 
-## 13.15 Maintenance / Debug
+## 13.15 Maintenance / Storage
 
 ```http
 GET /api/v1/maintenance/storage-operation-history
@@ -2048,6 +2065,36 @@ GET /api/v1/maintenance/storage-operation-history
 仕様:
 
 - Storage操作履歴を直近順で表示する。
+- Storage logは `data/storage/managed` に対応するmanaged Storage objectの操作を対象にする。
+- IconやContact Imageなど、managed Storage以外の補助ファイルはLog画面のStorage種別に集約しすぎない。
+
+## 13.16 Settings / Google diagnostics
+
+```http
+POST /api/v1/maintenance/google-speed-test
+```
+
+仕様:
+
+- Google接続が遅い場合に、ユーザーが明示実行して診断する。
+- OAuth token、Gmail profile、Calendar list、Calendar events取得を段階ごとに測定する。
+- 常時Logに流すものではなく、SettingsのGoogle Connection近傍に表示する。
+- Calendar events測定はCalendar自動同期設定の取得範囲を使い、対象Calendarが多い場合は上限件数で打ち切る。
+
+## 13.17 Settings API
+
+設定系UIはMaintenance / Debugから分離し、Settingsページに集約する。
+
+現行Settingsタブ:
+
+- Google: Google接続、Gmail自動取り込み、Calendar自動同期、Google Speed Test
+- LLM: 機能別LLM profile割当、LLM block filter、Blocked mail一覧
+- Budget: LLM monthly budget、使用量、残量
+
+Maintenance / Debugに残すもの:
+
+- 一時的・復旧支援用のDebug機能
+- 現行ではプレビュー可能拡張子の確認
 
 ---
 

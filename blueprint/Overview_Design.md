@@ -570,7 +570,7 @@ MVPという区分は用いない。代わりに、以下の順で段階的に�
 - メールからTask化
 - Google Calendar今日表示
 - メールから予定作成
-- Follow-up Watch
+- Follow-up Candidate
 
 ### 優先度E: File / Backup / Handover
 

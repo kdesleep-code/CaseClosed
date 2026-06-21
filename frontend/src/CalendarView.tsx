@@ -972,9 +972,10 @@ function CalendarView() {
           <TopNav
             ariaLabelKey="calendar.navigation"
             items={[
+              { href: '/', labelKey: 'top.heading' },
+              { href: '/mail', labelKey: 'nav.mail' },
               { href: '/tasks', labelKey: 'nav.tasks' },
               { href: '/cases', labelKey: 'nav.cases' },
-              { href: '/', labelKey: 'top.heading' },
             ]}
           />
         </header>

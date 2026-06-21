@@ -728,7 +728,13 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
           </div>
           <TopNav
             ariaLabelKey="mail.navigation"
-            items={[{ href: '/', labelKey: 'top.heading' }]}
+            items={[
+              { href: '/', labelKey: 'top.heading' },
+              { href: '/cases', labelKey: 'nav.cases' },
+              { href: '/tasks', labelKey: 'nav.tasks' },
+              { href: '/calendar', labelKey: 'nav.calendar' },
+              { href: '/contacts', labelKey: 'nav.contacts' },
+            ]}
           />
         </header>
 
@@ -1123,6 +1129,17 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
                   </button>
                 </div>
               </form>
+            </section>
+
+            <section aria-labelledby="mail-tools-heading" className="mail-panel mail-tools-panel">
+              <div className="section-heading">
+                <h2 id="mail-tools-heading">{t('mail.tools.heading')}</h2>
+              </div>
+              <div className="mail-side-actions">
+                <AppLink className="mail-side-action" href="/follow-ups">
+                  {t('nav.followUps')}
+                </AppLink>
+              </div>
             </section>
           </aside>
         </div>

@@ -512,7 +512,12 @@ export default function ProfileView() {
           </div>
           <TopNav
             ariaLabelKey="profile.navigation"
-            items={[{ href: '/', labelKey: 'top.heading' }]}
+            items={[
+              { href: '/', labelKey: 'top.heading' },
+              { href: '/settings', labelKey: 'nav.settings' },
+              { href: '/maintenance', labelKey: 'nav.maintenance' },
+              { href: '/logs', labelKey: 'nav.logs' },
+            ]}
           />
         </header>
 

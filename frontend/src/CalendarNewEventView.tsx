@@ -143,6 +143,14 @@ function addDateDays(value: string, days: number) {
   ).padStart(2, '0')}`
 }
 
+function addDateMonths(value: string, months: number) {
+  const [year, month, day] = value.split('-').map(Number)
+  const date = new Date(Date.UTC(year, month - 1 + months, day))
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(
+    date.getUTCDate(),
+  ).padStart(2, '0')}`
+}
+
 function untilPart(value: string) {
   return value.trim() === '' ? '' : `;UNTIL=${value.replaceAll('-', '')}T145959Z`
 }
@@ -158,6 +166,19 @@ function datePart(value: string, fallback: number, index: number) {
   const parts = value.split('-')
   const parsed = Number(parts[index])
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
+
+function recurrenceWeekdayNumber(value: string) {
+  const index = recurrenceWeekdays.findIndex((weekday) => weekday.value === value)
+  return index >= 0 ? index : 1
+}
+
+function calendarGridWeekDate(year: number, monthIndex: number, week: number, weekday: number) {
+  const firstWeekday = new Date(Date.UTC(year, monthIndex, 1)).getUTCDay()
+  const day = 1 - firstWeekday + weekday + (week - 1) * 7
+  const daysInMonth = new Date(Date.UTC(year, monthIndex + 1, 0)).getUTCDate()
+  if (day < 1 || day > daysInMonth) return null
+  return `${year}-${String(monthIndex + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
 }
 
 function isVisibleCalendarTime(value: string) {
@@ -381,6 +402,62 @@ export default function CalendarNewEventView() {
     recurrenceYearMonth,
   ])
 
+  const isCalendarGridWeekRepeat =
+    !isAcademicRepeat &&
+    (recurrenceType === 'monthly' || recurrenceType === 'yearly') &&
+    recurrenceMonthPattern === 'weekday' &&
+    recurrenceMonthWeek !== '-1'
+
+  const calendarGridWeekRepeatOccurrences = useMemo(() => {
+    if (!isCalendarGridWeekRepeat) return []
+    const week = Number(recurrenceMonthWeek)
+    if (!Number.isInteger(week) || week < 1 || week > 5) return []
+    const weekday = recurrenceWeekdayNumber(recurrenceMonthWeekday)
+    const untilDate = recurrenceUntil.trim() === '' ? addDateMonths(startDate, 24) : recurrenceUntil
+    const occurrences: Array<{ date: string; endDate: string }> = []
+    if (recurrenceType === 'monthly') {
+      const [startYear, startMonth] = startDate.split('-').map(Number)
+      const [untilYear, untilMonth] = untilDate.split('-').map(Number)
+      let cursorYear = startYear
+      let cursorMonthIndex = startMonth - 1
+      while (
+        cursorYear < untilYear ||
+        (cursorYear === untilYear && cursorMonthIndex <= untilMonth - 1)
+      ) {
+        const occurrenceDate = calendarGridWeekDate(cursorYear, cursorMonthIndex, week, weekday)
+        if (occurrenceDate !== null && occurrenceDate >= startDate && occurrenceDate <= untilDate) {
+          occurrences.push({ date: occurrenceDate, endDate: occurrenceDate })
+        }
+        cursorMonthIndex += 1
+        if (cursorMonthIndex > 11) {
+          cursorMonthIndex = 0
+          cursorYear += 1
+        }
+      }
+      return occurrences
+    }
+
+    const parsedYearMonth = Number(recurrenceYearMonth)
+    if (!Number.isInteger(parsedYearMonth) || parsedYearMonth < 1 || parsedYearMonth > 12) return []
+    const startYear = Number(startDate.slice(0, 4))
+    const untilYear = Number(untilDate.slice(0, 4))
+    for (let year = startYear; year <= untilYear; year += 1) {
+      const occurrenceDate = calendarGridWeekDate(year, parsedYearMonth - 1, week, weekday)
+      if (occurrenceDate !== null && occurrenceDate >= startDate && occurrenceDate <= untilDate) {
+        occurrences.push({ date: occurrenceDate, endDate: occurrenceDate })
+      }
+    }
+    return occurrences
+  }, [
+    isCalendarGridWeekRepeat,
+    recurrenceMonthWeek,
+    recurrenceMonthWeekday,
+    recurrenceType,
+    recurrenceUntil,
+    recurrenceYearMonth,
+    startDate,
+  ])
+
   useEffect(() => {
     let isMounted = true
     setIsLoading(true)
@@ -578,6 +655,10 @@ export default function CalendarNewEventView() {
       setError(t('calendar.create.invalidYearlyDate'))
       return
     }
+    if (isCalendarGridWeekRepeat && calendarGridWeekRepeatOccurrences.length === 0) {
+      setError('No dates match this calendar-week monthly repeat setting.')
+      return
+    }
     setIsCreating(true)
     setError(null)
     try {
@@ -596,6 +677,45 @@ export default function CalendarNewEventView() {
             time_zone: 'Asia/Tokyo',
             linked_case_id: selectedCase?.id ?? null,
             academic_series_id: academicSeriesId,
+          })
+          const eventId = result.db_event?.id ?? null
+          if (eventId !== null) {
+            createdEventIds.push(eventId)
+            if (selectedTask !== null) {
+              await createCalendarDbEventLink(eventId, {
+                linked_type: 'task',
+                linked_id: selectedTask.id,
+                role: 'related',
+              })
+            }
+          }
+        }
+        if (createdEventIds.length === 1) {
+          navigateTo(
+            `/calendar/events/${encodeURIComponent(createdEventIds[0])}?return_to=${encodeURIComponent(
+              cancelHref,
+            )}`,
+          )
+        } else {
+          navigateTo(cancelHref)
+        }
+        return
+      }
+      if (isCalendarGridWeekRepeat) {
+        const createdEventIds: string[] = []
+        const calendarWeekSeriesId = newAcademicSeriesId()
+        for (const occurrence of calendarGridWeekRepeatOccurrences) {
+          const result = await createGoogleCalendarEvent({
+            calendar_id: calendarId,
+            summary: summary.trim(),
+            start: toJstIsoDateTime(`${occurrence.date}T${startTime}`),
+            end: toJstIsoDateTime(`${occurrence.endDate}T${endTime}`),
+            location: location.trim() === '' ? null : location,
+            description: description.trim() === '' ? null : description,
+            recurrence_rule: null,
+            time_zone: 'Asia/Tokyo',
+            linked_case_id: selectedCase?.id ?? null,
+            academic_series_id: calendarWeekSeriesId,
           })
           const eventId = result.db_event?.id ?? null
           if (eventId !== null) {
@@ -683,6 +803,9 @@ export default function CalendarNewEventView() {
             items={[
               { href: '/calendar', labelKey: 'nav.calendar' },
               { href: '/', labelKey: 'top.heading' },
+              { href: '/cases', labelKey: 'nav.cases' },
+              { href: '/tasks', labelKey: 'nav.tasks' },
+              { href: '/academic-calendar', labelKey: 'academicCalendar.open' },
             ]}
           />
         </header>

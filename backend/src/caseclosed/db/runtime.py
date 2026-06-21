@@ -137,6 +137,37 @@ def ensure_runtime_schema() -> None:
                     """
                 )
             )
+    if (
+        "follow_ups" not in table_names
+        and "gmail_messages" in table_names
+        and "gmail_threads" in table_names
+        and "cases" in table_names
+    ):
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE follow_ups (
+                        id TEXT PRIMARY KEY,
+                        source_message_id TEXT NOT NULL REFERENCES gmail_messages(id),
+                        thread_id TEXT NOT NULL REFERENCES gmail_threads(id),
+                        case_id TEXT REFERENCES cases(id),
+                        status TEXT NOT NULL DEFAULT 'active',
+                        due_on TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        matched_phrase TEXT NOT NULL,
+                        source TEXT NOT NULL DEFAULT 'rule',
+                        resolved_by_message_id TEXT REFERENCES gmail_messages(id),
+                        resolved_at TEXT,
+                        dismissed_at TEXT,
+                        dismissed_reason TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+            )
     if "case_auto_assign_rules" not in table_names and "cases" in table_names:
         with engine.begin() as connection:
             connection.execute(

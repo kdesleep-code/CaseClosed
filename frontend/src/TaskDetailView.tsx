@@ -553,8 +553,10 @@ export default function TaskDetailView({ taskId }: { taskId: string }) {
             ariaLabelKey="tasks.navigation"
             items={[
               { href: '/', labelKey: 'top.heading' },
-              { href: returnHref, labelKey: 'tasks.heading' },
-              { href: '/cases', labelKey: 'cases.heading' },
+              { href: returnHref, labelKey: 'nav.tasks' },
+              { href: '/cases', labelKey: 'nav.cases' },
+              { href: '/mail', labelKey: 'nav.mail' },
+              { href: '/calendar', labelKey: 'nav.calendar' },
             ]}
           />
         </header>

@@ -1072,51 +1072,54 @@ Google Calendar予定を削除することと、CaseClosed上のリンクを外�
 
 ---
 
-# 12. Follow-up Watch状態
+# 12. Follow-up Candidate状態
 
 ## 12.1 状態
 
 ```text
-active
-fulfilled
-reminder_task_created
-closed
+pending
+resolved
+dismissed
+snoozed
 ```
 
-## 12.2 active
+## 12.2 pending
 
-返信待ち監視中。
+ルールベースで作成された未処理候補。
 
-## 12.3 fulfilled
+## 12.3 resolved
 
-同一Gmail threadに相手から返信が来た。
+ユーザーが対応済みと判断して閉じた。
 
-## 12.4 reminder_task_created
+## 12.4 dismissed
 
-期限超過により、リマインドTaskが作成された。
+候補ではない、または対応不要として閉じた。
+理由入力は求めない。
 
-## 12.5 closed
+## 12.5 snoozed
 
-ユーザーが手動解除、またはリマインド対応完了により閉じた。
+確認日を後ろへ送った。
 
 ## 12.6 状態遷移
 
 ```text
-active -> fulfilled
-active -> reminder_task_created
-active -> closed
-reminder_task_created -> closed
-fulfilled -> closed
+pending -> resolved
+pending -> dismissed
+pending -> snoozed
+snoozed -> resolved
+snoozed -> dismissed
+snoozed -> pending
 ```
 
 ## 12.7 作成条件
 
-Follow-up Watchはすべての送信メールに自動作成しない。
+Follow-up Candidateは送信メールからルールベースで作成する。
 
 作成条件:
 
-- ユーザーが「返信を待つ」を明示
-- LLMが候補提示し、ユーザーが承認
+- 本文に「ご確認」「ご査収」などの確認依頼表現が含まれる。
+- AutoBody / quoted reply等の自動引用領域は探索しない。
+- 初期実装ではLLMを使わない。
 
 ---
 
@@ -1653,7 +1656,7 @@ Case Context更新
 - Calendar Event Link
 - LLM Run
 - Client Certificate
-- Follow-up Watch
+- Follow-up Candidate
 
 ## Priority C
 
@@ -1675,7 +1678,7 @@ Case Context更新
 - Contact archivedの表示範囲
 - Draft failed状態の詳細
 - File purged後のUI表現
-- Follow-up Watchの自動解除条件の細部
+- Follow-up Candidateの自動生成条件とDismissサンプル活用
 - Backup復旧テストの詳細
 
 ---

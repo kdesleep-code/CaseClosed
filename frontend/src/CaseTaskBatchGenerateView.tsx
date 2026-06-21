@@ -96,9 +96,11 @@ export default function CaseTaskBatchGenerateView({ caseId }: { caseId: string }
                 href: `/cases/${encodeURIComponent(caseId)}`,
                 labelKey: 'cases.detailHeading',
               },
-              { href: '/cases', labelKey: 'cases.heading' },
-              { href: '/tasks', labelKey: 'tasks.heading' },
+              { href: '/cases', labelKey: 'nav.cases' },
+              { href: '/tasks', labelKey: 'nav.tasks' },
               { href: '/', labelKey: 'top.heading' },
+              { href: '/mail', labelKey: 'nav.mail' },
+              { href: '/calendar', labelKey: 'nav.calendar' },
             ]}
           />
         </header>

@@ -26,6 +26,8 @@ from caseclosed.email_addressing import normalize_email_address
 from caseclosed.services.contact_ai_memo_update import (
     enqueue_contact_ai_memo_update_job,
 )
+from caseclosed.services.follow_up_rules import create_follow_up_for_sent_message
+from caseclosed.services.follow_up_rules import resolve_follow_ups_for_reply
 
 SUMMARY_TARGET_IMPORTANCE = {"high", "middle"}
 SPAM_SUBJECT_PATTERN = re.compile(r"\[\s*spam\s*\]", re.IGNORECASE)
@@ -130,6 +132,10 @@ def ingest_mock_mail(
     if existing_message is not None:
         now = jst_iso()
         upsert_message_attachments(session, existing_message, mail_input, now)
+        if is_sent:
+            create_follow_up_for_sent_message(session, existing_message, now)
+        else:
+            resolve_follow_ups_for_reply(session, existing_message, now)
         existing_auto_state = session.scalar(
             select(MailAutoState).where(MailAutoState.message_id == existing_message.id)
         )
@@ -142,7 +148,7 @@ def ingest_mock_mail(
             existing_auto_state.llm_blocked_at = None
             existing_auto_state.updated_at = now
             existing_auto_state.version += 1
-            session.commit()
+        session.commit()
         pending_email_address = (
             session.get(ContactEmailAddress, existing_auto_state.pending_from_address_id)
             if existing_auto_state is not None
@@ -317,6 +323,10 @@ def ingest_mock_mail(
         )
     ):
         apply_case_auto_assign_rules(session, message, now)
+    if is_sent:
+        create_follow_up_for_sent_message(session, message, now)
+    else:
+        resolve_follow_ups_for_reply(session, message, now)
     session.commit()
 
     return MailIngestionResult(

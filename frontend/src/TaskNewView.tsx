@@ -394,9 +394,11 @@ export default function TaskNewView() {
           <TopNav
             ariaLabelKey="tasks.navigation"
             items={[
-              { href: '/tasks', labelKey: 'tasks.heading' },
-              { href: '/cases', labelKey: 'cases.heading' },
+              { href: '/tasks', labelKey: 'nav.tasks' },
+              { href: '/cases', labelKey: 'nav.cases' },
               { href: '/', labelKey: 'top.heading' },
+              { href: '/mail', labelKey: 'nav.mail' },
+              { href: '/calendar', labelKey: 'nav.calendar' },
             ]}
           />
         </header>

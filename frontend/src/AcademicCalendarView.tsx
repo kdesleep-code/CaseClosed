@@ -569,10 +569,11 @@ function AcademicCalendarView() {
           <TopNav
             ariaLabelKey="academicCalendar.navigation"
             items={[
+              { href: '/', labelKey: 'top.heading' },
               { href: '/calendar', labelKey: 'nav.calendar' },
               { href: '/tasks', labelKey: 'nav.tasks' },
               { href: '/cases', labelKey: 'nav.cases' },
-              { href: '/', labelKey: 'top.heading' },
+              { href: '/settings', labelKey: 'nav.settings' },
             ]}
           />
         </header>

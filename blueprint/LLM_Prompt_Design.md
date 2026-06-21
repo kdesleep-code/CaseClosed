@@ -1026,13 +1026,14 @@ reminder_mail_generation
 
 手動実行。
 
-Follow-up Watchの期限超過後、リマインドTaskから実行する。
+Follow-up Candidateからユーザーが必要と判断した場合に手動実行する。
+初期実装では候補検出にLLMを使わない。
 
 ## 15.3 入力
 
 - 元送信メール
 - Thread context
-- Follow-up Watch情報
+- Follow-up Candidate情報
 - Case Context
 - Contact情報
 - ユーザー追加プロンプト

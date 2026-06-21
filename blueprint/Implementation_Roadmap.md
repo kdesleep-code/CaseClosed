@@ -982,27 +982,29 @@ LLM:
 
 DB:
 
-- follow_up_watches
+- follow_ups
 - external_operations
 
 API:
 
 - `POST /drafts/{id}/send`
 - `POST /mails/send`
-- `POST /follow-up-watches`
-- `GET /follow-up-watches`
-- `PATCH /follow-up-watches/{id}`
+- `GET /follow-ups`
+- `POST /follow-ups/{id}/resolve`
+- `POST /follow-ups/{id}/dismiss`
+- `POST /follow-ups/{id}/snooze`
 
 画面:
 
 - 送信前確認
 - 送信履歴
-- Follow-up候補表示
-- Follow-up一覧
+- Mail右ガジェットからのFollow Up候補一覧
+- 候補のResolve / Dismiss / Snooze
 
 LLM:
 
-- reminder_mail_generation
+- 初期実装ではFollow-up候補検出にLLMを使わない
+- Dismissサンプルが溜まった後、必要に応じてLLMフィルタまたはルール改善に使う
 
 外部副作用:
 
@@ -1016,15 +1018,18 @@ LLM:
 - unknown時に自動再送しない
 - 送信成功後にprocessedになる
 - HighになったらGmailスター付与operationが作られる
-- 必要ならFollow-up Watch候補を出せる
-- Follow-up Watchを完了・解除できる
+- 送信メール本文からFollow-up候補を出せる
+- AutoBody / quoted replyはFollow-up候補検出対象から除外される
+- Follow-up候補をResolve / Dismiss / Snoozeできる
+- Dismiss時に理由入力を求めない
 
 ### レビュー観点
 
 - 送信前確認が邪魔すぎないか
 - unknown時の表示が怖くないか
 - Gmail送信済みのDB反映が分かりやすいか
-- Follow-upが過剰に出すぎないか
+- Follow-up候補が過剰に出すぎないか
+- 手動操作が増えすぎていないか
 
 ---
 

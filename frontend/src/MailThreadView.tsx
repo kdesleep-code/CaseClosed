@@ -2256,8 +2256,12 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
               ariaLabelKey="mail.thread.navLabel"
               className="mail-thread-nav"
               items={[
-                { href: '/mail', labelKey: 'mail.heading' },
+                { href: '/mail', labelKey: 'nav.mail' },
                 { href: '/', labelKey: 'top.heading' },
+                { href: '/follow-ups', labelKey: 'nav.followUps' },
+                { href: '/cases', labelKey: 'nav.cases' },
+                { href: '/tasks', labelKey: 'nav.tasks' },
+                { href: '/calendar', labelKey: 'nav.calendar' },
               ]}
             />
           </header>
@@ -2410,8 +2414,12 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
             ariaLabelKey="mail.thread.navLabel"
             className="mail-thread-nav"
             items={[
-              { href: returnHref, labelKey: 'mail.heading' },
+              { href: returnHref, labelKey: 'nav.mail' },
               { href: '/', labelKey: 'top.heading' },
+              { href: '/follow-ups', labelKey: 'nav.followUps' },
+              { href: '/cases', labelKey: 'nav.cases' },
+              { href: '/tasks', labelKey: 'nav.tasks' },
+              { href: '/calendar', labelKey: 'nav.calendar' },
             ]}
           />
         </header>

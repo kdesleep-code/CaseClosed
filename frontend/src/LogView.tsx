@@ -190,6 +190,7 @@ function LogView() {
               { href: '/', labelKey: 'top.heading' },
               { href: '/logs', labelKey: 'nav.logs' },
               { href: '/maintenance', labelKey: 'nav.maintenance' },
+              { href: '/settings', labelKey: 'nav.settings' },
             ]}
           />
         </header>

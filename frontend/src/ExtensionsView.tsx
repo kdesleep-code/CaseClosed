@@ -230,8 +230,10 @@ export default function ExtensionsView() {
           <TopNav
             ariaLabelKey="extensions.navigation"
             items={[
-              { href: '/external-tools', labelKey: 'nav.externalTools' },
               { href: '/', labelKey: 'top.heading' },
+              { href: '/external-tools', labelKey: 'nav.externalTools' },
+              { href: '/cases', labelKey: 'nav.cases' },
+              { href: '/settings', labelKey: 'nav.settings' },
             ]}
           />
         </header>

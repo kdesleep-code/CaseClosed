@@ -87,8 +87,10 @@ export default function ExtensionLaunchView() {
           <TopNav
             ariaLabelKey="extensions.navigation"
             items={[
-              { href: '/extensions', labelKey: 'extensions.heading' },
               { href: '/', labelKey: 'top.heading' },
+              { href: '/extensions', labelKey: 'extensions.heading' },
+              { href: '/external-tools', labelKey: 'nav.externalTools' },
+              { href: '/cases', labelKey: 'nav.cases' },
             ]}
           />
         </header>

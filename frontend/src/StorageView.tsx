@@ -1037,8 +1037,10 @@ function StorageObjectDetailView({ storageObjectId }: { storageObjectId: string 
           <TopNav
             ariaLabelKey="storage.navigation"
             items={[
-              { href: '/files', labelKey: 'storage.heading' },
+              { href: '/files', labelKey: 'nav.files' },
               { href: '/', labelKey: 'top.heading' },
+              { href: '/cases', labelKey: 'nav.cases' },
+              { href: '/tasks', labelKey: 'nav.tasks' },
             ]}
           />
         </header>
@@ -2025,6 +2027,9 @@ function StorageListBrowserView() {
             ariaLabelKey="storage.navigation"
             items={[
               { href: '/', labelKey: 'top.heading' },
+              { href: '/cases', labelKey: 'nav.cases' },
+              { href: '/tasks', labelKey: 'nav.tasks' },
+              { href: '/mail', labelKey: 'nav.mail' },
               { href: '/maintenance', labelKey: 'nav.maintenance' },
             ]}
           />

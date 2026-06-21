@@ -1172,3 +1172,27 @@ class MailSendRequest(Base):
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class FollowUp(Base):
+    __tablename__ = "follow_ups"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    source_message_id: Mapped[str] = mapped_column(
+        ForeignKey("gmail_messages.id"),
+        nullable=False,
+    )
+    thread_id: Mapped[str] = mapped_column(ForeignKey("gmail_threads.id"), nullable=False)
+    case_id: Mapped[str | None] = mapped_column(ForeignKey("cases.id"))
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
+    due_on: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    matched_phrase: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False, default="rule")
+    resolved_by_message_id: Mapped[str | None] = mapped_column(ForeignKey("gmail_messages.id"))
+    resolved_at: Mapped[str | None] = mapped_column(Text)
+    dismissed_at: Mapped[str | None] = mapped_column(Text)
+    dismissed_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)

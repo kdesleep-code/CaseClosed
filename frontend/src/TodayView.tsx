@@ -468,9 +468,8 @@ function TodayView({ dayOffset = 0 }: { dayOffset?: 0 | 1 }) {
             ariaLabelKey="today.navigation"
             items={[
               { href: '/', labelKey: 'top.heading' },
-              { href: '/mail', labelKey: 'nav.mail' },
-              { href: '/tasks', labelKey: 'nav.tasks' },
-              { href: '/calendar', labelKey: 'nav.calendar' },
+              { href: '/follow-ups', labelKey: 'nav.followUps' },
+              { href: '/cases', labelKey: 'nav.cases' },
             ]}
           />
         </header>

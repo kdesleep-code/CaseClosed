@@ -872,8 +872,13 @@ export default function ComposeMailView() {
           <TopNav
             ariaLabelKey="mail.compose.navigation"
             items={[
-              { href: '/mail', labelKey: 'mail.heading' },
+              { href: '/mail', labelKey: 'nav.mail' },
               { href: '/', labelKey: 'top.heading' },
+              { href: '/follow-ups', labelKey: 'nav.followUps' },
+              { href: '/cases', labelKey: 'nav.cases' },
+              { href: '/tasks', labelKey: 'nav.tasks' },
+              { href: '/calendar', labelKey: 'nav.calendar' },
+              { href: '/contacts', labelKey: 'nav.contacts' },
             ]}
           />
         </header>

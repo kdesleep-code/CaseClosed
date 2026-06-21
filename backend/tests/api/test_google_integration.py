@@ -84,6 +84,40 @@ def test_google_gmail_connect_url_stores_state_without_loading_mail(
     assert mail_count == 0
 
 
+def test_google_gmail_connect_url_uses_frontend_origin_for_redirect_uri(
+    client,
+    database_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CASECLOSED_GOOGLE_OAUTH_CLIENT_ID", "google-client-id")
+    monkeypatch.setenv("CASECLOSED_GOOGLE_OAUTH_CLIENT_SECRET", "google-client-secret")
+
+    response = client.post(
+        "/api/v1/google/gmail/connect-url",
+        json={"frontend_origin": "https://desktop-r043eh2.tail913207.ts.net:8443"},
+    )
+
+    assert response.status_code == 200
+    parsed = urlparse(response.json()["data"]["authorization_url"])
+    params = parse_qs(parsed.query)
+    expected_redirect_uri = (
+        "https://desktop-r043eh2.tail913207.ts.net:8443"
+        "/api/v1/google/gmail/oauth/callback"
+    )
+    assert params["redirect_uri"] == [expected_redirect_uri]
+
+    with sqlite3.connect(database_path) as connection:
+        state_row = connection.execute(
+            "SELECT value_json FROM app_settings WHERE key = ?",
+            ("google_gmail_oauth_state",),
+        ).fetchone()
+
+    assert state_row is not None
+    state_data = json.loads(state_row[0])
+    assert state_data["state"] == params["state"][0]
+    assert state_data["redirect_uri"] == expected_redirect_uri
+
+
 def test_google_calendar_status_reports_granted_scopes(client, database_path) -> None:
     with sqlite3.connect(database_path) as connection:
         connection.execute(

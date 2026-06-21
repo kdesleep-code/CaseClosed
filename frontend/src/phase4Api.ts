@@ -901,7 +901,11 @@ export function createGoogleGmailConnectUrl(): Promise<{
   authorization_url: string
   mail_loading_enabled: boolean
 }> {
-  return request('/api/v1/google/gmail/connect-url', { method: 'POST' })
+  return request('/api/v1/google/gmail/connect-url', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ frontend_origin: window.location.origin }),
+  })
 }
 
 export function disconnectGoogleGmail(): Promise<GoogleGmailStatus> {

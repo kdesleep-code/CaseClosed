@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
+import type { CSSProperties } from 'react'
 import { AppLink, TopNav } from './navigation'
 import { t } from './i18n'
-import { isCaseOpenForSuggestion, listCases } from './phase7Api'
-import type { CaseItem } from './phase7Api'
+import { isCaseOpenForSuggestion, listCaseGenres, listCases } from './phase7Api'
+import type { CaseGenre, CaseItem } from './phase7Api'
 import { listTasks } from './phase8Api'
 import type { TaskItem } from './phase8Api'
 
@@ -154,6 +155,7 @@ function TaskCard({ task, returnTo }: { task: TaskItem; returnTo: string }) {
 export default function TaskView() {
   const [tasks, setTasks] = useState<TaskItem[]>([])
   const [cases, setCases] = useState<CaseItem[]>([])
+  const [genres, setGenres] = useState<CaseGenre[]>([])
   const [searchQuery, setSearchQuery] = useState(() => {
     const params = new URLSearchParams(window.location.search)
     return params.get('q') ?? ''
@@ -163,6 +165,7 @@ export default function TaskView() {
     const caseId = params.get('case_id')
     return caseId === null || caseId.trim() === '' ? null : caseId
   })
+  const [isCaseMaskOpen, setIsCaseMaskOpen] = useState(false)
   const [sortMode, setSortMode] = useState<TaskSortMode>(() => {
     const params = new URLSearchParams(window.location.search)
     const value = params.get('sort')
@@ -185,11 +188,12 @@ export default function TaskView() {
   useEffect(() => {
     let isMounted = true
     setIsLoading(true)
-    Promise.all([listTasks({ status: 'all', limit: 500 }), listCases('all')])
-      .then(([nextTasks, nextCases]) => {
+    Promise.all([listTasks({ status: 'all', limit: 500 }), listCases('all'), listCaseGenres()])
+      .then(([nextTasks, nextCases, nextGenres]) => {
         if (!isMounted) return
         setTasks(nextTasks)
         setCases(nextCases)
+        setGenres(nextGenres)
         setError(null)
       })
       .catch((requestError) => {
@@ -242,12 +246,24 @@ export default function TaskView() {
       }, new Map<string, number>()),
     [searchedTasks],
   )
+  const genreById = useMemo(() => new Map(genres.map((genre) => [genre.id, genre])), [genres])
+  const genreOrderById = useMemo(
+    () => new Map(genres.map((genre, index) => [genre.id, index])),
+    [genres],
+  )
   const caseChips = useMemo(
     () =>
       cases
         .filter((item) => isCaseOpenForSuggestion(item))
-        .sort((first, second) => first.name.localeCompare(second.name)),
-    [cases],
+        .sort((first, second) => {
+          const firstOrder =
+            first.genre_id !== null ? (genreOrderById.get(first.genre_id) ?? 9998) : 9999
+          const secondOrder =
+            second.genre_id !== null ? (genreOrderById.get(second.genre_id) ?? 9998) : 9999
+          if (firstOrder !== secondOrder) return firstOrder - secondOrder
+          return first.name.localeCompare(second.name)
+        }),
+    [cases, genreOrderById],
   )
   const openTaskCount = tasks.filter((task) => taskBelongsToTab(task, 'inbox')).length
   const overdueTaskCount = tasks.filter(
@@ -278,7 +294,10 @@ export default function TaskView() {
             ariaLabelKey="tasks.navigation"
             items={[
               { href: '/', labelKey: 'top.heading' },
-              { href: '/cases', labelKey: 'cases.heading' },
+              { href: '/cases', labelKey: 'nav.cases' },
+              { href: '/mail', labelKey: 'nav.mail' },
+              { href: '/calendar', labelKey: 'nav.calendar' },
+              { href: '/files', labelKey: 'nav.files' },
             ]}
           />
         </header>
@@ -306,31 +325,52 @@ export default function TaskView() {
                 />
               </label>
             </div>
-            <div aria-label={t('tasks.caseMask.label')} className="task-case-filters">
+            <div className="task-case-mask-shell">
               <button
-                aria-pressed={selectedCaseId === null}
-                onClick={() => setSelectedCaseId(null)}
+                aria-expanded={isCaseMaskOpen}
+                className="task-case-mask-toggle"
+                onClick={() => setIsCaseMaskOpen((current) => !current)}
                 type="button"
               >
-                {t('tasks.caseMask.all')}
-                <span>{searchedTasks.length}</span>
+                <span>{t('tasks.caseMask.label')}</span>
+                <strong>{selectedCaseId === null ? t('tasks.caseMask.all') : cases.find((item) => item.id === selectedCaseId)?.name ?? t('tasks.caseMask.label')}</strong>
               </button>
-              {caseChips.map((item) => (
+            </div>
+            {isCaseMaskOpen && (
+              <div aria-label={t('tasks.caseMask.label')} className="task-case-filters">
                 <button
-                  aria-pressed={selectedCaseId === item.id}
-                  key={item.id}
-                  onClick={() =>
-                    setSelectedCaseId((currentCaseId) =>
-                      currentCaseId === item.id ? null : item.id,
-                    )
-                  }
+                  aria-pressed={selectedCaseId === null}
+                  onClick={() => setSelectedCaseId(null)}
                   type="button"
                 >
-                  {item.name}
-                  <span>{caseTaskCounts.get(item.id) ?? 0}</span>
+                  {t('tasks.caseMask.all')}
+                  <span>{searchedTasks.length}</span>
                 </button>
-              ))}
-            </div>
+                {caseChips.map((item) => (
+                  <button
+                    aria-pressed={selectedCaseId === item.id}
+                    key={item.id}
+                    onClick={() =>
+                      setSelectedCaseId((currentCaseId) =>
+                        currentCaseId === item.id ? null : item.id,
+                      )
+                    }
+                    style={
+                      {
+                        '--task-case-genre-color':
+                          item.genre_id === null
+                            ? '#ffffff'
+                            : genreById.get(item.genre_id)?.color_hex ?? '#ffffff',
+                      } as CSSProperties
+                    }
+                    type="button"
+                  >
+                    {item.name}
+                    <span>{caseTaskCounts.get(item.id) ?? 0}</span>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </section>
 

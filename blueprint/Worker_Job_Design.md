@@ -1233,7 +1233,7 @@ SQLite writeはSingle DB Writerのみが行う。
 
 ```text
 Gmail差分同期
-Follow-up Watch確認
+Follow-up Candidate生成
 Recurring Task生成
 証明書期限確認
 バックアップ予定確認
@@ -1248,7 +1248,7 @@ unknown external operation確認
 Gmail差分同期:
   5〜15分ごと。実装時調整。
 
-Follow-up Watch確認:
+Follow-up Candidate生成:
   1日1回。
 
 Recurring Task生成:

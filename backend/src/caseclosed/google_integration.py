@@ -16,6 +16,7 @@ from urllib.parse import urlencode
 from urllib.parse import quote
 from urllib.parse import unquote
 from urllib.parse import unquote_plus
+from urllib.parse import urlparse
 from urllib.error import HTTPError
 from urllib.error import URLError
 from urllib.request import Request
@@ -119,6 +120,10 @@ class CalendarAutoSyncSettingsPayload(BaseModel):
     interval_minutes: int
     calendar_ids: list[str] | None = None
     month_count: int | None = None
+
+
+class GoogleOAuthConnectUrlPayload(BaseModel):
+    frontend_origin: str | None = None
 
 
 class GoogleCalendarEventCreatePayload(BaseModel):
@@ -401,6 +406,18 @@ def write_google_calendar_auto_sync_settings(
     return google_calendar_auto_sync_settings_data(session)
 
 
+def google_oauth_redirect_uri(frontend_origin: str | None) -> str:
+    fallback = get_google_oauth_redirect_uri()
+    if frontend_origin is None or frontend_origin.strip() == "":
+        return fallback
+    parsed = urlparse(frontend_origin.strip())
+    if parsed.scheme not in {"http", "https"} or parsed.netloc == "":
+        raise json_error(422, "VALIDATION_ERROR", "frontend_origin must be an http(s) origin.")
+    if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
+        raise json_error(422, "VALIDATION_ERROR", "frontend_origin must not include a path, query, or fragment.")
+    return f"{parsed.scheme}://{parsed.netloc}/api/v1/google/gmail/oauth/callback"
+
+
 def create_calendar_external_operation(
     session: DatabaseSession,
     *,
@@ -560,6 +577,7 @@ def update_google_calendar_auto_sync_settings(
 
 @router.post("/connect-url")
 def google_gmail_connect_url(
+    payload: GoogleOAuthConnectUrlPayload | None = None,
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
     client_id = get_google_oauth_client_id()
@@ -573,17 +591,20 @@ def google_gmail_connect_url(
 
     now = jst_iso()
     state = secrets.token_urlsafe(32)
+    redirect_uri = google_oauth_redirect_uri(
+        payload.frontend_origin if payload is not None else None
+    )
     write_setting_json(
         session,
         GMAIL_OAUTH_STATE_KEY,
-        {"state": state, "created_at": now},
+        {"state": state, "redirect_uri": redirect_uri, "created_at": now},
         now,
     )
     session.commit()
 
     params = {
         "client_id": client_id,
-        "redirect_uri": get_google_oauth_redirect_uri(),
+        "redirect_uri": redirect_uri,
         "response_type": "code",
         "scope": " ".join(get_google_gmail_scopes()),
         "state": state,
@@ -616,7 +637,7 @@ def google_gmail_oauth_callback(
             now,
         )
         session.commit()
-        return RedirectResponse("/maintenance?google_gmail=error")
+        return RedirectResponse("/settings?google_gmail=error")
 
     stored_state = read_setting_json(session, GMAIL_OAUTH_STATE_KEY)
     if (
@@ -632,9 +653,10 @@ def google_gmail_oauth_callback(
             now,
         )
         session.commit()
-        return RedirectResponse("/maintenance?google_gmail=error")
+        return RedirectResponse("/settings?google_gmail=error")
 
-    token_data = exchange_authorization_code(code)
+    redirect_uri = str(stored_state.get("redirect_uri") or get_google_oauth_redirect_uri())
+    token_data = exchange_authorization_code(code, redirect_uri=redirect_uri)
     expires_in = int(token_data.get("expires_in", 0) or 0)
     token_expires_at = (
         jst_now() + timedelta(seconds=expires_in)
@@ -658,7 +680,7 @@ def google_gmail_oauth_callback(
     )
     write_setting_json(session, GMAIL_OAUTH_STATE_KEY, {}, now)
     session.commit()
-    return RedirectResponse("/maintenance?google_gmail=connected")
+    return RedirectResponse("/settings?google_gmail=connected")
 
 
 @router.post("/disconnect")
@@ -2077,7 +2099,7 @@ def gmail_messages_for_special_import(
     )
 
 
-def exchange_authorization_code(code: str) -> dict[str, object]:
+def exchange_authorization_code(code: str, *, redirect_uri: str | None = None) -> dict[str, object]:
     client_id = get_google_oauth_client_id()
     client_secret = get_google_oauth_client_secret()
     if client_id is None or client_secret is None:
@@ -2091,7 +2113,7 @@ def exchange_authorization_code(code: str) -> dict[str, object]:
             "code": code,
             "client_id": client_id,
             "client_secret": client_secret,
-            "redirect_uri": get_google_oauth_redirect_uri(),
+            "redirect_uri": redirect_uri or get_google_oauth_redirect_uri(),
             "grant_type": "authorization_code",
         }
     ).encode("utf-8")

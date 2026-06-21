@@ -167,13 +167,43 @@ def test_extension_can_register_start_use_case_api_and_stop(client, tmp_path: Pa
     assert storage_object["original_filename"] == "grading-result.csv"
     assert storage_object["source_type"] == "extension"
 
+    version_upload_response = client.post(
+        "/api/v1/extension-api/case/files",
+        headers=headers,
+        json={
+            "filename": "grading-result.csv",
+            "content_type": "text/csv",
+            "data_base64": base64.b64encode(b"student,score\nA,95\n").decode("ascii"),
+        },
+    )
+    assert version_upload_response.status_code == 200
+    version_upload_data = version_upload_response.json()["data"]
+    assert version_upload_data["storage_object"]["id"] == storage_object["id"]
+    assert version_upload_data["version"]["version_number"] == 1
+    assert version_upload_data["skipped"] is False
+
+    duplicate_upload_response = client.post(
+        "/api/v1/extension-api/case/files",
+        headers=headers,
+        json={
+            "filename": "grading-result.csv",
+            "content_type": "text/csv",
+            "data_base64": base64.b64encode(b"student,score\nA,95\n").decode("ascii"),
+        },
+    )
+    assert duplicate_upload_response.status_code == 200
+    duplicate_upload_data = duplicate_upload_response.json()["data"]
+    assert duplicate_upload_data["storage_object"]["id"] == storage_object["id"]
+    assert duplicate_upload_data["version"] is None
+    assert duplicate_upload_data["skipped"] is True
+    assert duplicate_upload_data["skip_reason"] == "duplicate_content"
+
     files_response = client.get("/api/v1/extension-api/case/files", headers=headers)
     assert files_response.status_code == 200
-    filenames = {
-        item["original_filename"]
-        for item in files_response.json()["data"]["items"]
-    }
+    files = files_response.json()["data"]["items"]
+    filenames = {item["original_filename"] for item in files}
     assert "grading-result.csv" in filenames
+    assert sum(1 for item in files if item["original_filename"] == "grading-result.csv") == 1
 
     stop_response = client.post(f"/api/v1/extensions/instances/{instance['id']}/stop")
     assert stop_response.status_code == 200
@@ -193,5 +223,7 @@ def test_extension_can_register_start_use_case_api_and_stop(client, tmp_path: Pa
         "extension.mails_listed",
         "extension.case_files_listed",
         "extension.case_file_uploaded",
+        "extension.case_file_version_added",
+        "extension.case_file_upload_skipped",
         "extension.stopped",
     } <= action_types

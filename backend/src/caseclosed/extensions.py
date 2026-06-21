@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import asyncio
+from io import BytesIO
 from contextlib import suppress
 from datetime import datetime
 import hashlib
@@ -23,20 +24,29 @@ from sqlalchemy.orm import Session as DatabaseSession
 
 from caseclosed.auth import json_error
 from caseclosed.cases import case_root_visible_storage_objects
+from caseclosed.cases import case_storage_directory_ids
 from caseclosed.cases import ensure_case_exists
 from caseclosed.db.models import AuditLog
+from caseclosed.db.models import CaseGenre
 from caseclosed.db.models import CaseMailLink
 from caseclosed.db.models import ExtensionDefinition
 from caseclosed.db.models import ExtensionInstance
 from caseclosed.db.models import GmailMessage
 from caseclosed.db.models import MailAutoState
 from caseclosed.db.models import MailUserState
+from caseclosed.db.models import StorageDirectory
+from caseclosed.db.models import StorageObject
 from caseclosed.db.runtime import case_storage_directory_id
 from caseclosed.db.runtime import get_session
 from caseclosed.db.runtime import jst_iso
 from caseclosed.db import runtime as db_runtime
 from caseclosed.storage import save_storage_object
+from caseclosed.storage import storage_directory_data
+from caseclosed.storage import storage_directory_path
+from caseclosed.storage import storage_object_absolute_path
 from caseclosed.storage import storage_object_data
+from caseclosed.storage import storage_object_version_data
+from caseclosed.storage import update_storage_object_from_upload
 
 router = APIRouter(prefix="/api/v1/extensions", tags=["extensions"])
 extension_api_router = APIRouter(prefix="/api/v1/extension-api", tags=["extension-api"])
@@ -68,6 +78,20 @@ class ExtensionOutputUpload(BaseModel):
     filename: str
     content_type: str | None = None
     data_base64: str
+    directory_id: str | None = None
+
+
+class BytesUpload:
+    def __init__(self, *, filename: str, content_type: str, data: bytes) -> None:
+        self.filename = filename
+        self.content_type = content_type
+        self._handle = BytesIO(data)
+
+    async def read(self, size: int = -1) -> bytes:
+        return self._handle.read(size)
+
+    async def close(self) -> None:
+        self._handle.close()
 
 
 def new_id(prefix: str) -> str:
@@ -721,6 +745,7 @@ def get_extension_case(
     if instance.case_id is None:
         raise json_error(409, "NO_CASE_CONTEXT", "Extension was not started with a Case.")
     case = ensure_case_exists(session, instance.case_id)
+    genre = session.get(CaseGenre, case.genre_id) if case.genre_id is not None else None
     extension = session.get(ExtensionDefinition, instance.extension_id)
     write_extension_audit_log(
         session,
@@ -740,6 +765,15 @@ def get_extension_case(
         "data": {
             "case": {
                 "id": case.id,
+                "genre_id": case.genre_id,
+                "genre": {
+                    "id": genre.id,
+                    "title": genre.title,
+                    "color_hex": genre.color_hex,
+                    "sort_order": genre.sort_order,
+                }
+                if genre is not None
+                else None,
                 "name": case.name,
                 "description": case.description,
                 "open_when_text": case.open_when_text,
@@ -781,6 +815,107 @@ def list_extension_case_files(
         "ok": True,
         "data": {
             "items": [storage_object_data(storage_object, session) for storage_object in storage_objects],
+        },
+    }
+
+
+@extension_api_router.get("/case/storage-tree")
+def list_extension_case_storage_tree(
+    instance: ExtensionInstance = Depends(require_extension_instance),
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    if instance.case_id is None:
+        raise json_error(409, "NO_CASE_CONTEXT", "Extension was not started with a Case.")
+    case = ensure_case_exists(session, instance.case_id)
+    directory_ids = case_storage_directory_ids(session, case)
+    directories = session.scalars(
+        select(StorageDirectory)
+        .where(StorageDirectory.status == "active")
+        .where(StorageDirectory.id.in_(directory_ids))
+        .order_by(StorageDirectory.name.asc(), StorageDirectory.id.asc())
+    ).all()
+    storage_objects = session.scalars(
+        select(StorageObject)
+        .where(StorageObject.scope == "managed")
+        .where(StorageObject.status == "active")
+        .where(StorageObject.directory_id.in_(directory_ids))
+        .order_by(StorageObject.original_filename.asc(), StorageObject.id.asc())
+    ).all()
+    extension = session.get(ExtensionDefinition, instance.extension_id)
+    write_extension_audit_log(
+        session,
+        action_type="extension.case_storage_tree_listed",
+        target_type="case",
+        target_id=case.id,
+        case_id=case.id,
+        metadata={
+            "extension_instance_id": instance.id,
+            "extension_id": instance.extension_id,
+            "slug": extension.slug if extension is not None else None,
+            "directory_count": len(directories),
+            "file_count": len(storage_objects),
+        },
+    )
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "root_directory_id": case_storage_directory_id(case.id),
+            "directories": [
+                {
+                    **storage_directory_data(directory),
+                    "path": storage_directory_path(session, directory.id),
+                }
+                for directory in directories
+            ],
+            "files": [storage_object_data(storage_object, session) for storage_object in storage_objects],
+        },
+    }
+
+
+@extension_api_router.get("/case/files/{storage_object_id}/content")
+def get_extension_case_file_content(
+    storage_object_id: str,
+    instance: ExtensionInstance = Depends(require_extension_instance),
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    if instance.case_id is None:
+        raise json_error(409, "NO_CASE_CONTEXT", "Extension was not started with a Case.")
+    case = ensure_case_exists(session, instance.case_id)
+    directory_ids = case_storage_directory_ids(session, case)
+    storage_object = session.get(StorageObject, storage_object_id)
+    if (
+        storage_object is None
+        or storage_object.status != "active"
+        or storage_object.scope != "managed"
+        or storage_object.directory_id not in directory_ids
+    ):
+        raise json_error(404, "NOT_FOUND", "Storage object not found.")
+    object_path = storage_object_absolute_path(storage_object, session)
+    if not object_path.is_file():
+        raise json_error(404, "NOT_FOUND", "Storage object file not found.")
+    data = object_path.read_bytes()
+    extension = session.get(ExtensionDefinition, instance.extension_id)
+    write_extension_audit_log(
+        session,
+        action_type="extension.case_file_content_read",
+        target_type="storage_object",
+        target_id=storage_object.id,
+        case_id=case.id,
+        metadata={
+            "extension_instance_id": instance.id,
+            "extension_id": instance.extension_id,
+            "slug": extension.slug if extension is not None else None,
+            "filename": storage_object.original_filename,
+            "byte_size": storage_object.byte_size,
+        },
+    )
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "storage_object": storage_object_data(storage_object, session),
+            "data_base64": base64.b64encode(data).decode("ascii"),
         },
     }
 
@@ -883,7 +1018,7 @@ def list_extension_mails(
 
 
 @extension_api_router.post("/case/files")
-def upload_extension_case_file(
+async def upload_extension_case_file(
     payload: ExtensionOutputUpload,
     instance: ExtensionInstance = Depends(require_extension_instance),
     session: DatabaseSession = Depends(get_session),
@@ -895,20 +1030,47 @@ def upload_extension_case_file(
     if len(data) == 0:
         raise json_error(422, "VALIDATION_ERROR", "Uploaded file is empty.")
     now = jst_iso()
-    storage_object = save_storage_object(
-        session,
-        scope="managed",
-        filename=payload.filename,
-        content_type=payload.content_type or "application/octet-stream",
-        data=data,
-        now=now,
-        directory_id=case_storage_directory_id(instance.case_id),
-        source_type="extension",
+    content_type = payload.content_type or "application/octet-stream"
+    case = ensure_case_exists(session, instance.case_id)
+    case_directory_ids = case_storage_directory_ids(session, case)
+    directory_id = payload.directory_id or case_storage_directory_id(instance.case_id)
+    if directory_id not in case_directory_ids:
+        raise json_error(403, "FORBIDDEN", "Extension can only upload files to its launch Case storage.")
+    storage_object = session.scalar(
+        select(StorageObject)
+        .where(StorageObject.scope == "managed")
+        .where(StorageObject.status == "active")
+        .where(StorageObject.directory_id == directory_id)
+        .where(StorageObject.original_filename == payload.filename)
+        .order_by(StorageObject.updated_at.desc(), StorageObject.id.desc())
     )
+    version = None
+    skipped = False
+    action_type = "extension.case_file_uploaded"
+    if storage_object is None:
+        storage_object = save_storage_object(
+            session,
+            scope="managed",
+            filename=payload.filename,
+            content_type=content_type,
+            data=data,
+            now=now,
+            directory_id=directory_id,
+            source_type="extension",
+        )
+    else:
+        version = await update_storage_object_from_upload(
+            session,
+            storage_object,
+            upload=BytesUpload(filename=payload.filename, content_type=content_type, data=data),
+            now=now,
+        )
+        skipped = version is None
+        action_type = "extension.case_file_version_added" if version is not None else "extension.case_file_upload_skipped"
     extension = session.get(ExtensionDefinition, instance.extension_id)
     write_extension_audit_log(
         session,
-        action_type="extension.case_file_uploaded",
+        action_type=action_type,
         target_type="storage_object",
         target_id=storage_object.id,
         case_id=instance.case_id,
@@ -919,6 +1081,8 @@ def upload_extension_case_file(
             "filename": storage_object.original_filename,
             "content_type": storage_object.content_type,
             "byte_size": storage_object.byte_size,
+            "version_id": version.id if version is not None else None,
+            "skipped": skipped,
         },
     )
     session.commit()
@@ -926,5 +1090,8 @@ def upload_extension_case_file(
         "ok": True,
         "data": {
             "storage_object": storage_object_data(storage_object, session),
+            "version": storage_object_version_data(version) if version is not None else None,
+            "skipped": skipped,
+            "skip_reason": "duplicate_content" if skipped else None,
         },
     }

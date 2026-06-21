@@ -57,11 +57,28 @@ cd frontend
 npm run dev -- --host 0.0.0.0 --port 8443
 ```
 
+Or restart both dev servers with:
+
+```powershell
+.\restart-caseclosed-dev.windows.ps1
+```
+
 Open CaseClosed from the other PC by MagicDNS name:
 
 ```text
 https://desktop-r043eh2.tail913207.ts.net:8443
 ```
+
+When connecting Google from another PC, add the proxied callback URL to the
+Google OAuth client's authorized redirect URIs:
+
+```text
+https://desktop-r043eh2.tail913207.ts.net:8443/api/v1/google/gmail/oauth/callback
+```
+
+The frontend passes its current origin to the backend when creating the Google
+OAuth URL, so OAuth returns to the same HTTPS/Tailscale origin instead of
+`127.0.0.1`.
 
 The generated server certificate is signed by a CaseClosed local root CA. To remove
 browser warnings on another Windows PC, copy `certs/caseclosed-local-root-ca.cer` to

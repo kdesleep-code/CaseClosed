@@ -15,7 +15,9 @@ import type { ContactsInitialData } from './ContactsView'
 import ExtensionLaunchView from './ExtensionLaunchView'
 import ExtensionsHelpView from './ExtensionsHelpView'
 import ExtensionsView from './ExtensionsView'
+import FollowUpView from './FollowUpView'
 import LogView from './LogView'
+import ManualView from './ManualView'
 import MailView from './MailView'
 import type { MailInitialData } from './MailView'
 import type { MailTab } from './MailView'
@@ -100,7 +102,7 @@ const utilityPageSlots: PageSlot[] = [
   { labelKey: 'nav.settings', href: '/settings' },
   { labelKey: 'nav.maintenance', href: '/maintenance' },
   { labelKey: 'nav.profile', href: '/profile' },
-  { blank: true, key: 'reserved-1' },
+  { labelKey: 'nav.manual', href: '/manual' },
   { blank: true, key: 'reserved-2' },
 ]
 
@@ -1001,7 +1003,12 @@ function ExternalToolsView() {
           </div>
           <TopNav
             ariaLabelKey="externalTools.navigation"
-            items={[{ href: '/', labelKey: 'top.heading' }]}
+            items={[
+              { href: '/', labelKey: 'top.heading' },
+              { href: '/cases', labelKey: 'nav.cases' },
+              { href: '/extensions', labelKey: 'nav.extensions' },
+              { href: '/settings', labelKey: 'nav.settings' },
+            ]}
           />
         </header>
 
@@ -1601,12 +1608,30 @@ function App() {
         </>
       )
     }
+    if (path === '/follow-ups') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <FollowUpView />
+        </>
+      )
+    }
     if (path === '/settings') {
       return (
         <>
           {pendingContactNoticeElement}
           {navigationError !== null && <p className="route-error">{navigationError}</p>}
           <SettingsView />
+        </>
+      )
+    }
+    if (path === '/manual') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <ManualView />
         </>
       )
     }

@@ -20,6 +20,7 @@ from caseclosed.db.runtime import rebuild_runtime_database
 from caseclosed.db.runtime import SessionLocal
 from caseclosed.external_operations import router as external_operations_router
 from caseclosed.external_tools import router as external_tools_router
+from caseclosed.followups import router as followups_router
 from caseclosed.extensions import ExtensionIdleSupervisor
 from caseclosed.extensions import bootstrap_default_extensions
 from caseclosed.extensions import extension_api_router
@@ -79,6 +80,7 @@ app.include_router(contacts_router)
 app.include_router(jobs_router)
 app.include_router(external_operations_router)
 app.include_router(external_tools_router)
+app.include_router(followups_router)
 app.include_router(extensions_router)
 app.include_router(extension_api_router)
 app.include_router(google_integration_router)

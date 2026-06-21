@@ -1550,7 +1550,7 @@ Gmail送信前に確認ダイアログを表示する。
 - Gmail送信済みメールをDBへ反映する
 - 関連Caseがあれば、Caseの関連メール集合に追加する
 - 関連Taskがあれば、Taskイベントに記録する
-- 必要に応じてFollow-up Watch作成候補を表示する
+- 必要に応じてFollow-up候補を表示する
 
 ## 14.8 監査ログ
 
@@ -1843,17 +1843,33 @@ GET /audit-exposure-batches
 
 # 20. Settings画面
 
-## 18.1 目的
+## 20.1 目的
 
 アプリ全体の設定を管理する。
+運用監視・復旧支援はMaintenanceへ、接続設定・モデル設定・Budget設定はSettingsへ分離する。
 
-## 18.2 設定項目
+## 20.2 現行タブ構成
 
-- LLM provider
-- LLM model
-- LLM cost limit
-- Gmail同期設定
-- Calendar設定
+- `Google`
+  - Google接続状態
+  - Google connect / disconnect
+  - Gmail自動取り込み設定
+  - Calendar自動同期設定
+  - Google Speed Test
+- `LLM`
+  - 機能別LLM profile割当
+  - profileごとのprovider / model / API key env確認
+  - LLM block filter
+  - Blocked mail一覧
+- `Budget`
+  - 月額Budget
+  - 当月使用量
+  - 当月残量
+  - 当日使用量
+  - 累計使用量
+
+## 20.3 後続候補
+
 - Worker数
 - rate limit
 - セッション設定
@@ -1865,40 +1881,22 @@ GET /audit-exposure-batches
 - prompt version管理
 - 出力JSON schema確認
 
-## 18.3 必須操作
-
-- 設定変更
-- ルール追加
-- ルール編集
-- ルール並び替え
-- ルール無効化
-- prompt version確認
-- prompt version作成
-- 出力schema確認
-- LLM追加指示ルール追加
-- LLM追加指示ルール編集
-- LLM追加指示ルール並び替え
-- LLM追加指示ルール無効化
-
 API:
 
 ```http
-GET /settings
-PATCH /settings
-GET /mail-importance-rules
-POST /mail-importance-rules
-PATCH /mail-importance-rules/{rule_id}
-GET /case-candidate-rules
-POST /case-candidate-rules
-PATCH /case-candidate-rules/{rule_id}
-GET /llm-instruction-rules
-POST /llm-instruction-rules
-PATCH /llm-instruction-rules/{rule_id}
-GET /llm/prompt-versions
-POST /llm/prompt-versions
+GET /api/v1/google/gmail/status
+POST /api/v1/google/gmail/connect-url
+POST /api/v1/google/gmail/disconnect
+PATCH /api/v1/google/gmail/auto-import-settings
+PATCH /api/v1/google/gmail/calendar/auto-sync-settings
+POST /api/v1/maintenance/google-speed-test
+GET /api/v1/google/gmail/llm-model-config
+PATCH /api/v1/google/gmail/llm-model-assignments/{function_type}
+GET /api/v1/maintenance/llm-cost-history
+PATCH /api/v1/maintenance/llm-cost-settings
 ```
 
-## 18.4 注意
+## 20.4 注意
 
 From単独Skipルールは作成不可。  
 FromだけでSkipしたい場合はContact skippedを使う。
@@ -1911,46 +1909,58 @@ Prompt Versionの既存版は上書きせず、変更時は新versionを作成�
 
 # 21. Maintenance画面
 
-## 19.1 目的
+## 21.1 目的
 
 システムメンテナンス系の操作、異常確認、復旧支援を行う。
+設定変更の主要導線はSettingsへ移動し、Maintenanceは監視・復旧・状態確認を担当する。
 
-## 19.2 表示項目
+## 21.2 現行タブ構成
 
-- System Maintenance Case
-- stale jobs
-- failed jobs
-- unknown external operations
-- LLM Cost Limit警告
-- 証明書期限
-- バックアップ状態
-- 復旧テスト状態
-- Worker稼働状態
-- Queue長
-- DB Writer状態
-- Audit Log Writer状態
+- `Usage`
+  - Storage使用量
+  - LLM Cost使用量
+  - LLM Cost予測
+  - Mail総数
+  - 直近7日の受信数
+  - 直近7日の送信数
+  - 30日平均メール数
+  - Importance割合
+  - Running jobs
+  - Pending write requests
+  - External unknown
+- `Jobs`
+  - failed / stale jobs
+  - retry / discard
+- `Storage`
+  - managed storage location
+  - object count
+  - active byte size
+- `Debug`
+  - previewable image/text extensions確認
+
+Debugに残すものは、一時的・復旧支援用の機能に限定する。
+Google接続、Google Speed Test、Gmail/Calendar同期間隔、LLM model、LLM block filter、BudgetはSettingsへ置く。
+
+## 21.3 表示候補
 
 API:
 
 ```http
-GET /maintenance/status
-GET /jobs
-GET /external-operations
-GET /client-certificates
-GET /backups
+GET /api/v1/maintenance/status
+GET /api/v1/jobs
+GET /api/v1/external-operations
+GET /api/v1/storage/locations
+GET /api/v1/maintenance/storage-operation-history
 ```
 
-### Phase 2タブ構成
+### 21.3.1 Usageタブ
 
-- `Usage` タブはDB容量、ストレージ容量、LLM Cost状況などの利用状況表示を受け持つ。
-- `Usage` の3x3現在値カードは、下段にRunning jobs、Pending write requests、External unknownの処理状況カードを置く。
-- `Needs Action` タブはPhase 2の復旧支援向けJob一覧、External Operation一覧を受け持つ。
-- `Usage` の計測値は初期状態ではプレースホルダーでもよく、後続Phaseで取得可能になった項目から追加する。
+- `Usage` タブはStorage容量、LLM Cost状況、メール量、Job/Write/Externalの処理状況を受け持つ。
 - `Usage` は現在値カードを上段に置き、選択したカードの経時変化グラフ領域を下段に置く。
 - グラフ領域は横軸ラベルを持ち、履歴データが未実装の段階でも表示期間切り替えUIを用意する。
-- Phase 2ではグラフ領域は空状態でよい。DB容量、ストレージ容量、下段の処理状況カードなどの履歴保存テーブル、サンプリングJob、保持期間、履歴APIは後続Phaseで設計する。
+- 履歴保存テーブル、サンプリングJob、保持期間、履歴APIは後続Phaseで強化する。
 
-## 19.3 必須操作
+## 21.4 必須操作
 
 - Graceful Shutdown
 - stale job確認
@@ -2300,11 +2310,11 @@ Contact detail UI shows two memo areas.
 
 Saving ordinary Contact edits updates User memo only. AI memo remains unchanged unless an AI/context update workflow writes it.
 
-# Phase 4 Maintenance LLM Block UI Note
+# Phase 4 LLM Block UI Note
 
-Maintenance Debug contains a temporary LLM block filter.
+Settings / LLM contains the LLM block filter.
 
 - User enters a filter query and reason.
 - Matching mails are marked as LLM-blocked.
-- Blocked mails are listed in the same Debug area.
+- Blocked mails are listed in the same Settings / LLM area.
 - The normal mail UI may still show and open the mail, but LLM workers must not submit its body text.

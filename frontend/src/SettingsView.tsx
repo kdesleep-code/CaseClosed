@@ -5,16 +5,22 @@ import { TopNav } from './navigation'
 import { readLlmCostHistory, runGoogleSpeedTest, updateLlmCostSettings } from './phase2Api'
 import type { GoogleSpeedTestResult, LlmCostHistory } from './phase2Api'
 import {
+  applyMailLlmBlockFilter,
   createGoogleGmailConnectUrl,
   disconnectGoogleGmail,
   getGoogleGmailStatus,
   getLlmModelConfig,
+  listLlmBlockFilters,
+  listLlmBlockedMails,
   updateGoogleCalendarAutoSyncSettings,
   updateGoogleGmailAutoImportSettings,
+  updateLlmBlockFilter,
   updateLlmModelAssignment,
 } from './phase4Api'
 import type {
   GoogleGmailStatus,
+  LlmBlockedMail,
+  LlmBlockFilter,
   LlmModelConfig,
 } from './phase4Api'
 
@@ -40,13 +46,26 @@ function formatMoney(value: number | null | undefined, currency: string) {
   }).format(value)
 }
 
+function initialSettingsNotice() {
+  const status = new URLSearchParams(window.location.search).get('google_gmail')
+  if (status === 'connected') {
+    return t('maintenance.debug.googleGmailConnectedNotice')
+  }
+  if (status === 'error') {
+    return t('maintenance.debug.googleGmailErrorNotice')
+  }
+  return null
+}
+
 function SettingsView() {
   const [activeTab, setActiveTab] = useState<SettingsTab>('google')
   const [error, setError] = useState<string | null>(null)
-  const [notice, setNotice] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(initialSettingsNotice)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [googleStatus, setGoogleStatus] = useState<GoogleGmailStatus | null>(null)
   const [llmModelConfig, setLlmModelConfig] = useState<LlmModelConfig | null>(null)
+  const [llmBlockFilters, setLlmBlockFilters] = useState<LlmBlockFilter[] | null>(null)
+  const [llmBlockedMails, setLlmBlockedMails] = useState<LlmBlockedMail[] | null>(null)
   const [llmCostHistory, setLlmCostHistory] = useState<LlmCostHistory | null>(null)
   const [gmailAutoImportEnabled, setGmailAutoImportEnabled] = useState(true)
   const [gmailAutoImportInterval, setGmailAutoImportInterval] = useState('10')
@@ -55,7 +74,14 @@ function SettingsView() {
   const [calendarAutoSyncInterval, setCalendarAutoSyncInterval] = useState('60')
   const [calendarAutoSyncMonthCount, setCalendarAutoSyncMonthCount] = useState('3')
   const [googleSpeedTest, setGoogleSpeedTest] = useState<GoogleSpeedTestResult | null>(null)
+  const [llmBlockQuery, setLlmBlockQuery] = useState('password')
+  const [llmBlockReason, setLlmBlockReason] = useState('May contain password.')
   const [llmMonthlyBudget, setLlmMonthlyBudget] = useState('')
+
+  useEffect(() => {
+    if (!new URLSearchParams(window.location.search).has('google_gmail')) return
+    window.history.replaceState({}, '', '/settings')
+  }, [])
 
   useEffect(() => {
     if (activeTab !== 'google' || googleStatus !== null) return
@@ -96,6 +122,31 @@ function SettingsView() {
       isMounted = false
     }
   }, [activeTab, llmModelConfig])
+
+  useEffect(() => {
+    if (
+      activeTab !== 'llm' ||
+      (llmBlockFilters !== null && llmBlockedMails !== null)
+    ) {
+      return
+    }
+    let isMounted = true
+    Promise.all([listLlmBlockFilters(), listLlmBlockedMails()])
+      .then(([nextFilters, nextMails]) => {
+        if (!isMounted) return
+        setLlmBlockFilters(nextFilters)
+        setLlmBlockedMails(nextMails)
+      })
+      .catch((requestError) => {
+        if (!isMounted) return
+        setError(describeError(requestError))
+        setLlmBlockFilters([])
+        setLlmBlockedMails([])
+      })
+    return () => {
+      isMounted = false
+    }
+  }, [activeTab, llmBlockFilters, llmBlockedMails])
 
   useEffect(() => {
     if (activeTab !== 'budget' || llmCostHistory !== null) return
@@ -222,6 +273,60 @@ function SettingsView() {
     }
   }
 
+  async function refreshLlmBlockedMails() {
+    setLlmBlockFilters(await listLlmBlockFilters())
+    setLlmBlockedMails(await listLlmBlockedMails())
+  }
+
+  async function handleApplyLlmBlockFilter(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setBusyId('llm-block-filter')
+    setError(null)
+    setNotice(null)
+    try {
+      const result = await applyMailLlmBlockFilter(
+        llmBlockQuery,
+        llmBlockReason.trim() === '' ? null : llmBlockReason,
+      )
+      setLlmBlockFilters((currentFilters) =>
+        currentFilters === null ? [result.filter] : [result.filter, ...currentFilters],
+      )
+      setNotice(
+        t('maintenance.debug.llmBlockApplied', {
+          matched: result.matched,
+          changed: result.changed,
+        }),
+      )
+      await refreshLlmBlockedMails()
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function handleToggleLlmBlockFilter(blockFilter: LlmBlockFilter) {
+    setBusyId(`llm-block-filter-${blockFilter.id}`)
+    setError(null)
+    try {
+      const updatedFilter = await updateLlmBlockFilter(
+        blockFilter.id,
+        !blockFilter.is_enabled,
+      )
+      setLlmBlockFilters((currentFilters) =>
+        currentFilters === null
+          ? [updatedFilter]
+          : currentFilters.map((currentFilter) =>
+              currentFilter.id === updatedFilter.id ? updatedFilter : currentFilter,
+            ),
+      )
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
   async function handleLlmCostSettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setBusyId('llm-cost-settings')
@@ -248,7 +353,15 @@ function SettingsView() {
             <p>{t('app.name')}</p>
             <h1>{t('settings.heading')}</h1>
           </div>
-          <TopNav ariaLabelKey="settings.navigation" items={[{ href: '/', labelKey: 'top.heading' }]} />
+          <TopNav
+            ariaLabelKey="settings.navigation"
+            items={[
+              { href: '/', labelKey: 'top.heading' },
+              { href: '/maintenance', labelKey: 'nav.maintenance' },
+              { href: '/logs', labelKey: 'nav.logs' },
+              { href: '/profile', labelKey: 'nav.profile' },
+            ]}
+          />
         </header>
 
         {error !== null && <p className="maintenance-error" role="alert">{error}</p>}
@@ -409,6 +522,143 @@ function SettingsView() {
                     </tbody>
                   </table>
                 </div>
+
+                <section
+                  aria-labelledby="settings-llm-block-heading"
+                  className="maintenance-section settings-llm-block-section"
+                >
+                  <div className="section-heading">
+                    <h2 id="settings-llm-block-heading">
+                      {t('maintenance.debug.llmBlock')}
+                    </h2>
+                    <button
+                      className={`button-loading-dot${busyId === 'llm-block-refresh' ? ' is-loading' : ''}`}
+                      disabled={busyId !== null}
+                      onClick={() => {
+                        setBusyId('llm-block-refresh')
+                        setError(null)
+                        refreshLlmBlockedMails()
+                          .catch((requestError) => setError(describeError(requestError)))
+                          .finally(() => setBusyId(null))
+                      }}
+                      type="button"
+                    >
+                      {t('mail.refresh')}
+                    </button>
+                  </div>
+
+                  <form className="settings-form settings-google-form" onSubmit={handleApplyLlmBlockFilter}>
+                    <label>
+                      <span>{t('maintenance.debug.llmBlockQuery')}</span>
+                      <input
+                        onChange={(event) => setLlmBlockQuery(event.target.value)}
+                        required
+                        value={llmBlockQuery}
+                      />
+                    </label>
+                    <label>
+                      <span>{t('maintenance.debug.llmBlockReason')}</span>
+                      <input
+                        onChange={(event) => setLlmBlockReason(event.target.value)}
+                        value={llmBlockReason}
+                      />
+                    </label>
+                    <button
+                      className={`button-loading-dot${busyId === 'llm-block-filter' ? ' is-loading' : ''}`}
+                      disabled={busyId !== null}
+                      type="submit"
+                    >
+                      {t('maintenance.debug.applyLlmBlock')}
+                    </button>
+                  </form>
+
+                  <div className="maintenance-table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th scope="col">{t('common.id')}</th>
+                          <th scope="col">{t('maintenance.debug.llmBlockQuery')}</th>
+                          <th scope="col">{t('maintenance.debug.reason')}</th>
+                          <th scope="col">{t('common.status')}</th>
+                          <th scope="col">{t('common.action')}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {llmBlockFilters === null && (
+                          <tr>
+                            <td colSpan={5}>{t('maintenance.debug.loading')}</td>
+                          </tr>
+                        )}
+                        {llmBlockFilters?.map((blockFilter) => (
+                          <tr key={blockFilter.id}>
+                            <td>{blockFilter.id}</td>
+                            <td>{blockFilter.query_text}</td>
+                            <td>{blockFilter.reason}</td>
+                            <td>
+                              <span data-status={blockFilter.is_enabled ? 'enabled' : 'disabled'}>
+                                {blockFilter.is_enabled
+                                  ? t('common.enabled')
+                                  : t('common.disabled')}
+                              </span>
+                            </td>
+                            <td>
+                              <button
+                                className={`button-loading-dot${busyId === `llm-block-filter-${blockFilter.id}` ? ' is-loading' : ''}`}
+                                disabled={busyId !== null}
+                                onClick={() => handleToggleLlmBlockFilter(blockFilter)}
+                                type="button"
+                              >
+                                {blockFilter.is_enabled
+                                  ? t('common.disable')
+                                  : t('common.enable')}
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                        {llmBlockFilters?.length === 0 && (
+                          <tr>
+                            <td colSpan={5}>{t('maintenance.debug.noLlmBlockFilters')}</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="maintenance-table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th scope="col">{t('common.id')}</th>
+                          <th scope="col">{t('mail.from')}</th>
+                          <th scope="col">{t('mail.subject')}</th>
+                          <th scope="col">{t('maintenance.debug.reason')}</th>
+                          <th scope="col">{t('maintenance.debug.blockedAt')}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {llmBlockedMails === null && (
+                          <tr>
+                            <td colSpan={5}>{t('maintenance.debug.loading')}</td>
+                          </tr>
+                        )}
+                        {llmBlockedMails?.map((mail) => (
+                          <tr key={mail.id}>
+                            <td>{mail.id}</td>
+                            <td>{mail.from_address}</td>
+                            <td>{mail.subject ?? t('mail.noSubject')}</td>
+                            <td>{mail.llm_block_reason ?? t('common.none')}</td>
+                            <td>{mail.llm_blocked_at ?? t('common.none')}</td>
+                          </tr>
+                        ))}
+                        {llmBlockedMails?.length === 0 && (
+                          <tr>
+                            <td colSpan={5}>{t('maintenance.debug.empty')}</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
               </section>
             )}
 

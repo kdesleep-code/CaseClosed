@@ -1283,7 +1283,12 @@ function CaseListView() {
             ariaLabelKey="cases.navigation"
             items={[
               { href: '/', labelKey: 'top.heading' },
-              { href: '/mail', labelKey: 'mail.heading' },
+              { href: '/mail', labelKey: 'nav.mail' },
+              { href: '/tasks', labelKey: 'nav.tasks' },
+              { href: '/calendar', labelKey: 'nav.calendar' },
+              { href: '/files', labelKey: 'nav.files' },
+              { href: '/contacts', labelKey: 'nav.contacts' },
+              { href: '/external-tools', labelKey: 'nav.externalTools' },
             ]}
           />
         </header>
@@ -1817,8 +1822,13 @@ function CaseDetailView({ caseId }: { caseId: string }) {
           <TopNav
             ariaLabelKey="cases.navigation"
             items={[
-              { href: '/cases', labelKey: 'cases.heading' },
+              { href: '/cases', labelKey: 'nav.cases' },
               { href: '/', labelKey: 'top.heading' },
+              { href: '/mail', labelKey: 'nav.mail' },
+              { href: '/tasks', labelKey: 'nav.tasks' },
+              { href: '/calendar', labelKey: 'nav.calendar' },
+              { href: '/files', labelKey: 'nav.files' },
+              { href: '/external-tools', labelKey: 'nav.externalTools' },
             ]}
           />
         </header>
@@ -2302,8 +2312,11 @@ function CaseCreateView() {
           <TopNav
             ariaLabelKey="cases.navigation"
             items={[
-              { href: '/cases', labelKey: 'cases.heading' },
+              { href: '/cases', labelKey: 'nav.cases' },
               { href: '/', labelKey: 'top.heading' },
+              { href: '/tasks', labelKey: 'nav.tasks' },
+              { href: '/calendar', labelKey: 'nav.calendar' },
+              { href: '/contacts', labelKey: 'nav.contacts' },
             ]}
           />
         </header>
@@ -2826,9 +2839,11 @@ function CaseMailListView({ caseId }: { caseId: string }) {
                 href: `/cases/${encodeURIComponent(caseId)}`,
                 labelKey: 'cases.detailHeading',
               },
-              { href: '/cases', labelKey: 'cases.heading' },
-              { href: '/mail', labelKey: 'mail.heading' },
+              { href: '/cases', labelKey: 'nav.cases' },
+              { href: '/mail', labelKey: 'nav.mail' },
               { href: '/', labelKey: 'top.heading' },
+              { href: '/tasks', labelKey: 'nav.tasks' },
+              { href: '/calendar', labelKey: 'nav.calendar' },
             ]}
           />
         </header>
