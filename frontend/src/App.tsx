@@ -71,6 +71,15 @@ import {
   pendingContactRedirectEventName,
   type PendingContactRedirectEvent,
 } from './pendingContactRedirect'
+import {
+  pausePomodoro,
+  readPomodoroState,
+  resetPomodoro,
+  skipPomodoro,
+  startPomodoro,
+  updatePomodoroSettings,
+} from './pomodoroApi'
+import type { PomodoroState } from './pomodoroApi'
 import './App.css'
 
 type LinkItem = {
@@ -85,6 +94,8 @@ type LinkRenderItem = LinkItem & {
 }
 
 type PageSlot = LinkItem | { blank: true; key: string }
+
+const pomodoroSettingsStorageKey = 'caseclosed.pomodoroSettings'
 
 const pageLinks: LinkItem[] = [
   { labelKey: 'nav.mail', href: '/mail' },
@@ -667,38 +678,184 @@ function TopView({
   )
 }
 
-type PomodoroPhase = 'work' | 'break' | 'done'
+type RememberedPomodoroSettings = {
+  work_minutes: number
+  break_minutes: number
+  cycle_count: number
+}
+
+function readRememberedPomodoroSettings(): RememberedPomodoroSettings | null {
+  try {
+    const value = window.localStorage.getItem(pomodoroSettingsStorageKey)
+    if (value === null) return null
+    const parsed = JSON.parse(value) as Partial<RememberedPomodoroSettings>
+    const workMinutes = Number(parsed.work_minutes)
+    const breakMinutes = Number(parsed.break_minutes)
+    const cycleCount = Number(parsed.cycle_count)
+    if (!Number.isFinite(workMinutes) || !Number.isFinite(breakMinutes) || !Number.isFinite(cycleCount)) {
+      return null
+    }
+    return {
+      work_minutes: Math.min(180, Math.max(1, Math.round(workMinutes))),
+      break_minutes: Math.min(60, Math.max(1, Math.round(breakMinutes))),
+      cycle_count: Math.min(24, Math.max(1, Math.round(cycleCount))),
+    }
+  } catch {
+    return null
+  }
+}
+
+function writeRememberedPomodoroSettings(settings: RememberedPomodoroSettings) {
+  window.localStorage.setItem(pomodoroSettingsStorageKey, JSON.stringify(settings))
+}
+
+function shouldApplyRememberedPomodoroSettings(state: PomodoroState, settings: RememberedPomodoroSettings) {
+  if (state.is_running || state.phase !== 'work' || state.current_cycle !== 1) return false
+  if (state.remaining_seconds !== state.work_minutes * 60) return false
+  return (
+    state.work_minutes !== settings.work_minutes ||
+    state.break_minutes !== settings.break_minutes ||
+    state.cycle_count !== settings.cycle_count
+  )
+}
+
+function initialPomodoroState(): PomodoroState {
+  return {
+    work_minutes: 25,
+    break_minutes: 5,
+    cycle_count: 4,
+    phase: 'work',
+    current_cycle: 1,
+    is_running: false,
+    remaining_seconds: 25 * 60,
+    total_seconds: 25 * 60,
+    phase_ends_at_epoch_ms: null,
+    updated_at_epoch_ms: Date.now(),
+    version: 1,
+  }
+}
+
+type PomodoroWorkerEvent = { type: 'tick' } | { type: 'sync' }
+
+function displayRemainingSeconds(state: PomodoroState) {
+  if (!state.is_running || state.phase === 'done' || state.phase_ends_at_epoch_ms === null) {
+    return state.remaining_seconds
+  }
+  return Math.max(0, Math.ceil((state.phase_ends_at_epoch_ms - Date.now()) / 1000))
+}
 
 function PomodoroView() {
+  const [state, setState] = useState<PomodoroState>(initialPomodoroState)
   const [workMinutes, setWorkMinutes] = useState(25)
   const [breakMinutes, setBreakMinutes] = useState(5)
   const [cycleCount, setCycleCount] = useState(4)
-  const [phase, setPhase] = useState<PomodoroPhase>('work')
-  const [currentCycle, setCurrentCycle] = useState(1)
-  const [remainingSeconds, setRemainingSeconds] = useState(25 * 60)
-  const [isRunning, setIsRunning] = useState(false)
+  const [displayTick, setDisplayTick] = useState(0)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+  const isSettingsOpenRef = useRef(false)
   const bellAudioRef = useRef<HTMLAudioElement | null>(null)
+  const lastTransitionRef = useRef<{ phase: PomodoroState['phase']; cycle: number; version: number } | null>(null)
 
-  const totalSeconds = phase === 'break' ? breakMinutes * 60 : workMinutes * 60
+  const remainingSeconds = displayRemainingSeconds(state)
+  const totalSeconds = state.total_seconds
   const progress =
-    phase === 'done' || totalSeconds <= 0
+    state.phase === 'done' || totalSeconds <= 0
       ? 1
       : Math.min(1, Math.max(0, (totalSeconds - remainingSeconds) / totalSeconds))
   const minutes = Math.floor(remainingSeconds / 60)
   const seconds = remainingSeconds % 60
   const timeLabel = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
 
-  useEffect(() => {
-    if (!isRunning || phase === 'done') {
-      return undefined
+  function applyState(nextState: PomodoroState, playBell = true) {
+    const previous = lastTransitionRef.current
+    const changedPhase = previous !== null && (
+      previous.phase !== nextState.phase || previous.cycle !== nextState.current_cycle
+    )
+    lastTransitionRef.current = {
+      phase: nextState.phase,
+      cycle: nextState.current_cycle,
+      version: nextState.version,
     }
+    setState(nextState)
+    if (!isSettingsOpenRef.current) {
+      setWorkMinutes(nextState.work_minutes)
+      setBreakMinutes(nextState.break_minutes)
+      setCycleCount(nextState.cycle_count)
+    }
+    if (playBell && changedPhase) {
+      playTransitionBell()
+    }
+  }
 
-    const timerId = window.setInterval(() => {
-      setRemainingSeconds((current) => Math.max(0, current - 1))
-    }, 1000)
-    return () => window.clearInterval(timerId)
-  }, [isRunning, phase])
+  async function refreshState(playBell = true) {
+    const nextState = await readPomodoroState()
+    applyState(nextState, playBell)
+  }
+
+  useEffect(() => {
+    isSettingsOpenRef.current = isSettingsOpen
+    if (isSettingsOpen) {
+      setWorkMinutes(state.work_minutes)
+      setBreakMinutes(state.break_minutes)
+      setCycleCount(state.cycle_count)
+    }
+  }, [isSettingsOpen, state.break_minutes, state.cycle_count, state.work_minutes])
+
+  useEffect(() => {
+    let isActive = true
+    void readPomodoroState()
+      .then(async (nextState) => {
+        if (!isActive) return
+        const rememberedSettings = readRememberedPomodoroSettings()
+        if (
+          rememberedSettings !== null &&
+          shouldApplyRememberedPomodoroSettings(nextState, rememberedSettings)
+        ) {
+          const rememberedState = await updatePomodoroSettings(rememberedSettings)
+          if (!isActive) return
+          applyState(rememberedState, false)
+          return
+        }
+        applyState(nextState, false)
+      })
+      .catch(() => undefined)
+    return () => {
+      isActive = false
+    }
+  }, [])
+
+  useEffect(() => {
+    const worker = new Worker(new URL('./pomodoroWorker.ts', import.meta.url), { type: 'module' })
+    worker.addEventListener('message', (event: MessageEvent<PomodoroWorkerEvent>) => {
+      if (event.data.type === 'tick') {
+        setDisplayTick((tick) => tick + 1)
+        return
+      }
+      if (event.data.type === 'sync') {
+        void refreshState(true).catch(() => undefined)
+      }
+    })
+    worker.postMessage({ type: 'start', intervalMs: 1000 })
+    return () => {
+      worker.postMessage({ type: 'stop' })
+      worker.terminate()
+    }
+  }, [])
+
+  useEffect(() => {
+    function handleVisibilityChange() {
+      if (document.visibilityState === 'visible') {
+        void refreshState(true).catch(() => undefined)
+      }
+    }
+    window.addEventListener('focus', handleVisibilityChange)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => {
+      window.removeEventListener('focus', handleVisibilityChange)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+  }, [])
+
+  void displayTick
 
   function bellAudio() {
     const audio = bellAudioRef.current ?? new Audio(pomodoroBellUrl)
@@ -718,48 +875,37 @@ function PomodoroView() {
     void audio.play().catch(() => undefined)
   }
 
-  useEffect(() => {
-    if (remainingSeconds > 0 || phase === 'done') {
-      return
-    }
-    playTransitionBell()
-    if (phase === 'work') {
-      setPhase('break')
-      setRemainingSeconds(breakMinutes * 60)
-      return
-    }
-    if (currentCycle >= cycleCount) {
-      setPhase('done')
-      setIsRunning(false)
-      setRemainingSeconds(0)
-      return
-    }
-    setCurrentCycle((cycle) => cycle + 1)
-    setPhase('work')
-    setRemainingSeconds(workMinutes * 60)
-  }, [breakMinutes, currentCycle, cycleCount, phase, remainingSeconds, workMinutes])
-
-  function resetTimer(nextWorkMinutes = workMinutes) {
-    setIsRunning(false)
-    setPhase('work')
-    setCurrentCycle(1)
-    setRemainingSeconds(nextWorkMinutes * 60)
-  }
-
-  function handleSettingsSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSettingsSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    const normalizedWorkMinutes = Math.min(180, Math.max(1, Math.round(workMinutes)))
-    const normalizedBreakMinutes = Math.min(60, Math.max(1, Math.round(breakMinutes)))
-    const normalizedCycleCount = Math.min(24, Math.max(1, Math.round(cycleCount)))
-    setWorkMinutes(normalizedWorkMinutes)
-    setBreakMinutes(normalizedBreakMinutes)
-    setCycleCount(normalizedCycleCount)
+    const nextSettings = {
+      work_minutes: workMinutes,
+      break_minutes: breakMinutes,
+      cycle_count: cycleCount,
+    }
+    const nextState = await updatePomodoroSettings(nextSettings)
+    writeRememberedPomodoroSettings({
+      work_minutes: nextState.work_minutes,
+      break_minutes: nextState.break_minutes,
+      cycle_count: nextState.cycle_count,
+    })
     setIsSettingsOpen(false)
-    resetTimer(normalizedWorkMinutes)
+    applyState(nextState, false)
   }
 
-  function skipPhase() {
-    setRemainingSeconds(0)
+  async function handleStartPause() {
+    prepareTransitionBell()
+    const nextState = state.is_running ? await pausePomodoro() : await startPomodoro()
+    applyState(nextState, false)
+  }
+
+  async function handleReset() {
+    const nextState = await resetPomodoro()
+    applyState(nextState, false)
+  }
+
+  async function handleSkipPhase() {
+    const nextState = await skipPomodoro()
+    applyState(nextState, true)
   }
 
   return (
@@ -786,8 +932,8 @@ function PomodoroView() {
 
         <section className="pomodoro-panel">
           <div className="pomodoro-status-row">
-            <span>{phase === 'done' ? t('pomodoro.done') : phase === 'work' ? t('pomodoro.work') : t('pomodoro.break')}</span>
-            <strong>{t('pomodoro.cycle', { current: String(currentCycle), total: String(cycleCount) })}</strong>
+            <span>{state.phase === 'done' ? t('pomodoro.done') : state.phase === 'work' ? t('pomodoro.work') : t('pomodoro.break')}</span>
+            <strong>{t('pomodoro.cycle', { current: String(state.current_cycle), total: String(state.cycle_count) })}</strong>
           </div>
 
           <div
@@ -796,24 +942,21 @@ function PomodoroView() {
             style={{ '--pomodoro-progress': `${progress * 360}deg` } as CSSProperties}
           >
             <strong>{timeLabel}</strong>
-            <span>{phase === 'done' ? t('pomodoro.completed') : t('pomodoro.remaining')}</span>
+            <span>{state.phase === 'done' ? t('pomodoro.completed') : t('pomodoro.remaining')}</span>
           </div>
 
           <div className="pomodoro-controls">
             <button
-              disabled={phase === 'done'}
-              onClick={() => {
-                prepareTransitionBell()
-                setIsRunning((running) => !running)
-              }}
+              disabled={state.phase === 'done'}
+              onClick={() => { void handleStartPause() }}
               type="button"
             >
-              {isRunning ? t('pomodoro.pause') : t('pomodoro.start')}
+              {state.is_running ? t('pomodoro.pause') : t('pomodoro.start')}
             </button>
-            <button onClick={() => resetTimer()} type="button">
+            <button onClick={() => { void handleReset() }} type="button">
               {t('pomodoro.reset')}
             </button>
-            <button disabled={phase === 'done'} onClick={skipPhase} type="button">
+            <button disabled={state.phase === 'done'} onClick={() => { void handleSkipPhase() }} type="button">
               {t('pomodoro.skip')}
             </button>
           </div>

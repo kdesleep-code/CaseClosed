@@ -2318,7 +2318,14 @@ def generate_mail_draft(
         generation_language=selected_generation_language,
     )
     related_case_summaries = payload.related_case_summaries or []
-    provider = build_mail_draft_generation_provider(function_type)
+    try:
+        provider = build_mail_draft_generation_provider(function_type)
+    except OpenAIProviderError as error:
+        raise json_error(
+            502,
+            "LLM_PROVIDER_ERROR",
+            f"Mail draft generation failed: {error}",
+        ) from error
     input_payload = {
         "instruction": payload.instruction or "",
         "standard_prompt": payload.standard_prompt or "",

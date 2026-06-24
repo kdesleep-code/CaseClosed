@@ -1875,6 +1875,40 @@ def test_mail_draft_generation_standard_prompt_is_saved_in_app_settings(
     assert language_row == ('"english"',)
 
 
+def test_generate_mail_draft_provider_build_error_returns_json_error(
+    client, monkeypatch
+) -> None:
+    import importlib
+
+    mails_module = importlib.import_module("caseclosed.mails")
+    provider_module = importlib.import_module("caseclosed.services.llm_provider")
+
+    def fail_provider(_function_type):
+        raise provider_module.OpenAIProviderError("OpenAI API key is not configured.")
+
+    monkeypatch.setattr(
+        mails_module,
+        "build_mail_draft_generation_provider",
+        fail_provider,
+    )
+
+    response = client.post(
+        f"{MAILS_URL}/generate-draft",
+        json={
+            "to_addresses": ["recipient@example.com"],
+            "cc_addresses": [],
+            "bcc_addresses": [],
+            "subject": "Draft request",
+            "body_text": "",
+            "auto_body_text": "",
+            "instruction": "Write a short message.",
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "LLM_PROVIDER_ERROR"
+    assert "OpenAI API key is not configured" in response.json()["error"]["message"]
+
 def test_generate_reply_draft_uses_language_policy_without_auto_retry(
     client,
     database_path,

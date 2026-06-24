@@ -32,6 +32,7 @@ from caseclosed.mail_drafts import bootstrap_mail_drafts_database
 from caseclosed.mail_drafts import router as mail_drafts_router
 from caseclosed.mails import router as mails_router
 from caseclosed.maintenance import router as maintenance_router
+from caseclosed.pomodoro import router as pomodoro_router
 from caseclosed.profile import router as profile_router
 from caseclosed.services.background_worker import BackgroundWorkerSupervisor
 from caseclosed.services.calendar_auto_sync import CalendarAutoSyncSupervisor
@@ -88,6 +89,7 @@ app.include_router(maintenance_router)
 app.include_router(logs_router)
 app.include_router(mail_drafts_router)
 app.include_router(mails_router)
+app.include_router(pomodoro_router)
 app.include_router(profile_router)
 app.include_router(storage_router)
 app.include_router(tasks_router)

@@ -63,6 +63,8 @@ export type CaseGenre = {
   title: string
   color_hex: string
   sort_order: number
+  template_extension_id: string | null
+  template_context: Record<string, unknown> | null
   created_at: string
   updated_at: string
   version: number
@@ -292,6 +294,8 @@ export function prefillCase(payload: {
 export async function createCaseGenre(payload: {
   title: string
   color_hex: string
+  template_extension_id?: string | null
+  template_context?: Record<string, unknown> | null
 }): Promise<CaseGenre> {
   const data = await request<{ genre: CaseGenre }>('/api/v1/cases/genres', {
     method: 'POST',
@@ -303,7 +307,12 @@ export async function createCaseGenre(payload: {
 
 export async function updateCaseGenre(
   genreId: string,
-  payload: { title?: string; color_hex?: string },
+  payload: {
+    title?: string
+    color_hex?: string
+    template_extension_id?: string | null
+    template_context?: Record<string, unknown> | null
+  },
 ): Promise<CaseGenre> {
   const data = await request<{ genre: CaseGenre }>(
     `/api/v1/cases/genres/${encodeURIComponent(genreId)}`,

@@ -53,6 +53,8 @@ class CaseGenre(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     color_hex: Mapped[str] = mapped_column(Text, nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    template_extension_id: Mapped[str | None] = mapped_column(ForeignKey("extension_definitions.id"))
+    template_context_json: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)

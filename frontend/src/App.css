@@ -6356,6 +6356,22 @@
   background: rgba(255, 250, 241, 0.46);
 }
 
+.extensions-template-form {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.extensions-template-form button {
+  align-self: end;
+}
+
+.extensions-template-form input[type='color'] {
+  padding: 4px 6px;
+}
+
+.extension-genre-links span {
+  background: rgba(200, 230, 218, 0.62);
+}
+
 .extensions-register-form label,
 .extension-start-row label {
   min-width: 0;
@@ -6372,6 +6388,7 @@
 }
 
 .extensions-register-form input,
+.extensions-register-form select,
 .extensions-settings input,
 .extension-start-row input,
 .extension-start-row select {

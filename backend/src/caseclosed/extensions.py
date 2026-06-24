@@ -19,16 +19,28 @@ from fastapi import Depends
 from fastapi import Header
 from fastapi import Query
 from pydantic import BaseModel
+from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DatabaseSession
 
 from caseclosed.auth import json_error
+from caseclosed.cases import CASE_PROGRESS_STATUSES
+from caseclosed.cases import case_data
 from caseclosed.cases import case_root_visible_storage_objects
 from caseclosed.cases import case_storage_directory_ids
 from caseclosed.cases import ensure_case_exists
+from caseclosed.cases import genre_data
+from caseclosed.cases import normalized_optional_date as normalized_case_date
+from caseclosed.cases import normalized_optional_text as normalized_case_text
+from caseclosed.cases import normalize_case_tags
 from caseclosed.db.models import AuditLog
+from caseclosed.db.models import Case
+from caseclosed.db.models import CaseEvent
 from caseclosed.db.models import CaseGenre
 from caseclosed.db.models import CaseMailLink
+from caseclosed.db.models import Contact
+from caseclosed.db.models import ContactEmailAddress
+from caseclosed.db.models import ContactTag
 from caseclosed.db.models import ExtensionDefinition
 from caseclosed.db.models import ExtensionInstance
 from caseclosed.db.models import GmailMessage
@@ -37,6 +49,7 @@ from caseclosed.db.models import MailUserState
 from caseclosed.db.models import StorageDirectory
 from caseclosed.db.models import StorageObject
 from caseclosed.db.runtime import case_storage_directory_id
+from caseclosed.db.runtime import ensure_case_storage_directory
 from caseclosed.db.runtime import get_session
 from caseclosed.db.runtime import jst_iso
 from caseclosed.db import runtime as db_runtime
@@ -79,6 +92,17 @@ class ExtensionOutputUpload(BaseModel):
     content_type: str | None = None
     data_base64: str
     directory_id: str | None = None
+
+
+class ExtensionCaseCreate(BaseModel):
+    name: str
+    description: str | None = None
+    open_when_date: str | None = None
+    open_when_text: str | None = None
+    closed_when_text: str | None = None
+    progress_status: str = "not_started"
+    genre_id: str | None = None
+    tags: list[str] | None = None
 
 
 class BytesUpload:
@@ -441,6 +465,45 @@ def json_list(value: str | None) -> list[object]:
     return loaded if isinstance(loaded, list) else []
 
 
+def extension_contact_data(contact: Contact, session: DatabaseSession) -> dict[str, object]:
+    email_addresses = session.scalars(
+        select(ContactEmailAddress)
+        .where(ContactEmailAddress.contact_id == contact.id)
+        .where(ContactEmailAddress.deleted_at.is_(None))
+        .order_by(
+            ContactEmailAddress.is_primary.desc(),
+            ContactEmailAddress.status.asc(),
+            ContactEmailAddress.email_address.asc(),
+        )
+    ).all()
+    tags = session.scalars(
+        select(ContactTag.tag)
+        .where(ContactTag.contact_id == contact.id)
+        .order_by(ContactTag.tag.asc())
+    ).all()
+    return {
+        "id": contact.id,
+        "display_name": contact.display_name,
+        "avatar_url": contact.avatar_url,
+        "status": contact.status,
+        "kind": contact.kind,
+        "tags": [] if contact.kind == "mailing_list" else list(tags),
+        "email_addresses": [
+            {
+                "id": email_address.id,
+                "email_address": email_address.email_address,
+                "normalized_email_address": email_address.normalized_email_address,
+                "status": email_address.status,
+                "is_primary": bool(email_address.is_primary),
+            }
+            for email_address in email_addresses
+        ],
+        "inbound_message_count": contact.inbound_message_count,
+        "latest_received_at": contact.latest_received_at,
+        "updated_at": contact.updated_at,
+    }
+
+
 def extension_mail_data(
     message: GmailMessage,
     user_state: MailUserState | None,
@@ -511,6 +574,7 @@ def require_extension_instance(
 @router.get("")
 def list_extensions(session: DatabaseSession = Depends(get_session)) -> dict[str, object]:
     stop_idle_extension_instances(session)
+    bootstrap_default_extensions(session)
     extensions = session.scalars(
         select(ExtensionDefinition).order_by(
             ExtensionDefinition.name.asc(),
@@ -782,6 +846,268 @@ def get_extension_case(
                 "progress_status": case.progress_status,
                 "tags": json.loads(case.tags_json) if case.tags_json else [],
                 "updated_at": case.updated_at,
+            },
+        },
+    }
+
+
+@extension_api_router.get("/cases")
+def list_extension_cases(
+    q: str | None = Query(default=None),
+    status: str = Query(default="open"),
+    genre_id: str | None = Query(default=None),
+    tag: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    instance: ExtensionInstance = Depends(require_extension_instance),
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    normalized_status = status.strip().casefold()
+    if normalized_status not in {"open", "closed", "archived", "all"}:
+        raise json_error(422, "VALIDATION_ERROR", "Case status must be open, closed, archived, or all.")
+    statement = select(Case)
+    if normalized_status == "open":
+        statement = statement.where(Case.closed_at.is_(None)).where(Case.archived_at.is_(None))
+    elif normalized_status == "closed":
+        statement = statement.where(Case.closed_at.is_not(None)).where(Case.archived_at.is_(None))
+    elif normalized_status == "archived":
+        statement = statement.where(Case.archived_at.is_not(None))
+    if genre_id is not None and genre_id.strip() != "":
+        statement = statement.where(Case.genre_id == genre_id.strip())
+    if q is not None and q.strip() != "":
+        pattern = f"%{q.strip()}%"
+        statement = statement.where(
+            Case.name.ilike(pattern)
+            | Case.description.ilike(pattern)
+            | Case.closed_when_text.ilike(pattern)
+        )
+    rows = session.scalars(
+        statement.order_by(Case.updated_at.desc(), Case.created_at.desc()).limit(limit * 3)
+    ).all()
+    if tag is not None and tag.strip() != "":
+        normalized_tag = tag.strip().casefold()
+        rows = [
+            case
+            for case in rows
+            if normalized_tag in {str(case_tag).casefold() for case_tag in json_list(case.tags_json)}
+        ]
+    rows = rows[:limit]
+    extension = session.get(ExtensionDefinition, instance.extension_id)
+    write_extension_audit_log(
+        session,
+        action_type="extension.cases_listed",
+        target_type="cases",
+        target_id=None,
+        metadata={
+            "extension_instance_id": instance.id,
+            "extension_id": instance.extension_id,
+            "slug": extension.slug if extension is not None else None,
+            "q": q,
+            "status": normalized_status,
+            "genre_id": genre_id,
+            "tag": tag,
+            "limit": limit,
+            "result_count": len(rows),
+        },
+    )
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "items": [case_data(case, session) for case in rows],
+            "filters": {
+                "q": q,
+                "status": normalized_status,
+                "genre_id": genre_id,
+                "tag": tag,
+                "limit": limit,
+            },
+        },
+    }
+
+
+@extension_api_router.post("/cases")
+def create_extension_case(
+    payload: ExtensionCaseCreate,
+    instance: ExtensionInstance = Depends(require_extension_instance),
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    name = payload.name.strip()
+    if name == "":
+        raise json_error(422, "VALIDATION_ERROR", "Case name is required.")
+    if payload.progress_status not in CASE_PROGRESS_STATUSES:
+        raise json_error(422, "VALIDATION_ERROR", "Unsupported progress status.")
+    if payload.genre_id is not None and session.get(CaseGenre, payload.genre_id) is None:
+        raise json_error(422, "VALIDATION_ERROR", "Case genre not found.")
+
+    now = jst_iso()
+    case = Case(
+        id=new_id("case"),
+        genre_id=payload.genre_id,
+        name=name,
+        description=normalized_case_text(payload.description),
+        open_when_date=normalized_case_date(
+            payload.open_when_date
+            if payload.open_when_date is not None
+            else payload.open_when_text
+        ),
+        open_when_text=None,
+        closed_when_text=normalized_case_text(payload.closed_when_text),
+        tags_json=json.dumps(normalize_case_tags(payload.tags), ensure_ascii=False),
+        progress_status=payload.progress_status,
+        ball_status="none",
+        closed_at=None,
+        archived_at=None,
+        is_system_case=0,
+        system_case_key=None,
+        created_at=now,
+        updated_at=now,
+        version=1,
+    )
+    session.add(case)
+    ensure_case_storage_directory(session, case, now=now)
+    session.add(
+        CaseEvent(
+            id=new_id("case_event"),
+            case_id=case.id,
+            event_type="case_created",
+            title="Case created",
+            summary=None,
+            source_type="extension",
+            source_id=instance.id,
+            occurred_at=now,
+            created_at=now,
+            metadata_json=json.dumps(
+                {
+                    "extension_instance_id": instance.id,
+                    "extension_id": instance.extension_id,
+                },
+                ensure_ascii=False,
+            ),
+        )
+    )
+    extension = session.get(ExtensionDefinition, instance.extension_id)
+    write_extension_audit_log(
+        session,
+        action_type="extension.case_created",
+        target_type="case",
+        target_id=case.id,
+        case_id=case.id,
+        metadata={
+            "extension_instance_id": instance.id,
+            "extension_id": instance.extension_id,
+            "slug": extension.slug if extension is not None else None,
+            "name": case.name,
+            "genre_id": case.genre_id,
+            "progress_status": case.progress_status,
+        },
+    )
+    session.commit()
+    return {"ok": True, "data": {"case": case_data(case, session)}}
+
+
+@extension_api_router.get("/cases/genres")
+def list_extension_case_genres(
+    instance: ExtensionInstance = Depends(require_extension_instance),
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    genres = session.scalars(
+        select(CaseGenre).order_by(
+            CaseGenre.sort_order.asc(),
+            CaseGenre.title.asc(),
+            CaseGenre.created_at.asc(),
+        )
+    ).all()
+    extension = session.get(ExtensionDefinition, instance.extension_id)
+    write_extension_audit_log(
+        session,
+        action_type="extension.case_genres_listed",
+        target_type="case_genres",
+        target_id=None,
+        metadata={
+            "extension_instance_id": instance.id,
+            "extension_id": instance.extension_id,
+            "slug": extension.slug if extension is not None else None,
+            "result_count": len(genres),
+        },
+    )
+    session.commit()
+    return {"ok": True, "data": {"items": [genre_data(genre) for genre in genres]}}
+
+
+@extension_api_router.get("/contacts")
+def search_extension_contacts(
+    q: str | None = Query(default=None),
+    status: str = Query(default="active"),
+    kind: str | None = Query(default=None),
+    tag: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    instance: ExtensionInstance = Depends(require_extension_instance),
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    normalized_status = status.strip().casefold()
+    if normalized_status not in {"active", "skipped", "spam", "archived", "all"}:
+        raise json_error(422, "VALIDATION_ERROR", "Contact status is invalid.")
+    normalized_kind = kind.strip().casefold() if kind is not None and kind.strip() != "" else None
+    if normalized_kind is not None and normalized_kind not in {"person", "mailing_list", "service"}:
+        raise json_error(422, "VALIDATION_ERROR", "Contact kind is invalid.")
+
+    statement = select(Contact).where(Contact.deleted_at.is_(None))
+    if normalized_status != "all":
+        statement = statement.where(Contact.status == normalized_status)
+    if normalized_kind is not None:
+        statement = statement.where(Contact.kind == normalized_kind)
+    if q is not None and q.strip() != "":
+        pattern = f"%{q.strip()}%"
+        matching_email_contact_ids = select(ContactEmailAddress.contact_id).where(
+            ContactEmailAddress.deleted_at.is_(None),
+            ContactEmailAddress.email_address.ilike(pattern),
+        )
+        matching_tag_contact_ids = select(ContactTag.contact_id).where(ContactTag.tag.ilike(pattern))
+        statement = statement.where(
+            or_(
+                Contact.display_name.ilike(pattern),
+                Contact.user_memo.ilike(pattern),
+                Contact.ai_memo.ilike(pattern),
+                Contact.id.in_(matching_email_contact_ids),
+                Contact.id.in_(matching_tag_contact_ids),
+            )
+        )
+    if tag is not None and tag.strip() != "":
+        statement = statement.where(
+            Contact.id.in_(select(ContactTag.contact_id).where(ContactTag.tag == tag.strip()))
+        )
+    contacts = session.scalars(
+        statement.order_by(Contact.display_name.asc(), Contact.id.asc()).limit(limit)
+    ).all()
+    extension = session.get(ExtensionDefinition, instance.extension_id)
+    write_extension_audit_log(
+        session,
+        action_type="extension.contacts_searched",
+        target_type="contacts",
+        target_id=None,
+        metadata={
+            "extension_instance_id": instance.id,
+            "extension_id": instance.extension_id,
+            "slug": extension.slug if extension is not None else None,
+            "q": q,
+            "status": normalized_status,
+            "kind": normalized_kind,
+            "tag": tag,
+            "limit": limit,
+            "result_count": len(contacts),
+        },
+    )
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "items": [extension_contact_data(contact, session) for contact in contacts],
+            "filters": {
+                "q": q,
+                "status": normalized_status,
+                "kind": normalized_kind,
+                "tag": tag,
+                "limit": limit,
             },
         },
     }

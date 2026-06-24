@@ -29,6 +29,7 @@ from caseclosed.db.models import CaseMailLink
 from caseclosed.db.models import CaseStakeholder
 from caseclosed.db.models import CaseToolIconSetting
 from caseclosed.db.models import CaseToolLink
+from caseclosed.db.models import ExtensionDefinition
 from caseclosed.db.models import Contact
 from caseclosed.db.models import ContactEmailAddress
 from caseclosed.db.models import FileLink
@@ -98,11 +99,15 @@ class CaseUpdate(BaseModel):
 class CaseGenreCreate(BaseModel):
     title: str
     color_hex: str = Field(default="#ffffff")
+    template_extension_id: str | None = None
+    template_context: dict[str, object] | None = None
 
 
 class CaseGenreUpdate(BaseModel):
     title: str | None = None
     color_hex: str | None = None
+    template_extension_id: str | None = None
+    template_context: dict[str, object] | None = None
 
 
 class CaseGenreReorder(BaseModel):
@@ -313,12 +318,39 @@ def case_tags(case: Case) -> list[str]:
     return [str(tag) for tag in parsed if str(tag).strip() != ""]
 
 
+def genre_template_context(genre: CaseGenre) -> dict[str, object] | None:
+    if genre.template_context_json is None:
+        return None
+    try:
+        loaded = json.loads(genre.template_context_json)
+    except json.JSONDecodeError:
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def validate_genre_template_extension(
+    session: DatabaseSession,
+    extension_id: str | None,
+) -> str | None:
+    if extension_id is None:
+        return None
+    normalized = extension_id.strip()
+    if normalized == "":
+        return None
+    extension = session.get(ExtensionDefinition, normalized)
+    if extension is None:
+        raise json_error(422, "VALIDATION_ERROR", "Case template Extension not found.")
+    return normalized
+
+
 def genre_data(genre: CaseGenre) -> dict[str, object]:
     return {
         "id": genre.id,
         "title": genre.title,
         "color_hex": genre.color_hex,
         "sort_order": genre.sort_order,
+        "template_extension_id": genre.template_extension_id,
+        "template_context": genre_template_context(genre),
         "created_at": genre.created_at,
         "updated_at": genre.updated_at,
         "version": genre.version,
@@ -1374,11 +1406,18 @@ def create_case_genre(
     max_sort_order = session.scalar(
         select(CaseGenre.sort_order).order_by(CaseGenre.sort_order.desc())
     )
+    template_extension_id = validate_genre_template_extension(session, payload.template_extension_id)
     genre = CaseGenre(
         id=new_id("case_genre"),
         title=title,
         color_hex=normalize_genre_color(payload.color_hex),
         sort_order=(max_sort_order if max_sort_order is not None else -1) + 1,
+        template_extension_id=template_extension_id,
+        template_context_json=(
+            json.dumps(payload.template_context, ensure_ascii=False)
+            if payload.template_context is not None
+            else None
+        ),
         created_at=now,
         updated_at=now,
         version=1,
@@ -1449,6 +1488,17 @@ def update_case_genre(
         genre.title = title
     if payload.color_hex is not None:
         genre.color_hex = normalize_genre_color(payload.color_hex)
+    if "template_extension_id" in payload.model_fields_set:
+        genre.template_extension_id = validate_genre_template_extension(
+            session,
+            payload.template_extension_id,
+        )
+    if "template_context" in payload.model_fields_set:
+        genre.template_context_json = (
+            json.dumps(payload.template_context, ensure_ascii=False)
+            if payload.template_context is not None
+            else None
+        )
 
     genre.updated_at = jst_iso()
     genre.version += 1

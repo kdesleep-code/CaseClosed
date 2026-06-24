@@ -103,6 +103,10 @@ def ensure_runtime_schema() -> None:
                 connection.execute(
                     text("ALTER TABLE case_genres ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
                 )
+            if "template_extension_id" not in genre_columns:
+                connection.execute(text("ALTER TABLE case_genres ADD COLUMN template_extension_id TEXT"))
+            if "template_context_json" not in genre_columns:
+                connection.execute(text("ALTER TABLE case_genres ADD COLUMN template_context_json TEXT"))
     if "case_stakeholders" not in table_names and "cases" in table_names and "contacts" in table_names:
         with engine.begin() as connection:
             connection.execute(

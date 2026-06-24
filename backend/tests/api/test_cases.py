@@ -950,7 +950,6 @@ def test_case_genres_can_be_managed(client, database_path) -> None:
             is None
         )
 
-
 def test_case_can_be_created_with_case_storage_directory(client, app, database_path) -> None:
     response = client.post(
         "/api/v1/cases",

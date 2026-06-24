@@ -51,6 +51,42 @@ def test_default_extension_template_is_registered(client) -> None:
     assert template["source"] == "default"
 
 
+def test_case_template_extension_can_be_linked_to_genre(client, tmp_path: Path) -> None:
+    manifest = {
+        "slug": "genre-template-test",
+        "name": "Genre Template Test",
+        "command": [sys.executable, "-c", "import time; time.sleep(60)"],
+        "tags": ["case-template"],
+    }
+    register_response = client.post(
+        "/api/v1/extensions/register",
+        json={"root_path": str(tmp_path), "manifest": manifest},
+    )
+    assert register_response.status_code == 200
+    extension = register_response.json()["data"]["extension"]
+
+    create_response = client.post(
+        "/api/v1/cases/genres",
+        json={
+            "title": "Template Genre",
+            "color_hex": "#88ccff",
+            "template_extension_id": extension["id"],
+            "template_context": {"mode": "case_template"},
+        },
+    )
+    assert create_response.status_code == 200
+    genre = create_response.json()["data"]["genre"]
+    assert genre["template_extension_id"] == extension["id"]
+    assert genre["template_context"] == {"mode": "case_template"}
+
+    update_response = client.patch(
+        f"/api/v1/cases/genres/{genre['id']}",
+        json={"template_extension_id": None},
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["data"]["genre"]["template_extension_id"] is None
+
+
 def test_extension_can_register_start_use_case_api_and_stop(client, tmp_path: Path) -> None:
     case = create_case(client)
     message_id = ingest_mail(
@@ -226,4 +262,112 @@ def test_extension_can_register_start_use_case_api_and_stop(client, tmp_path: Pa
         "extension.case_file_version_added",
         "extension.case_file_upload_skipped",
         "extension.stopped",
+    } <= action_types
+
+
+def test_extension_api_can_create_cases_and_search_contacts_without_case_context(client, tmp_path: Path) -> None:
+    genre_response = client.post(
+        "/api/v1/cases/genres",
+        json={"title": "Template Genre", "color_hex": "#88ccff"},
+    )
+    assert genre_response.status_code == 200
+    genre = genre_response.json()["data"]["genre"]
+
+    contact_response = client.post(
+        "/api/v1/contacts",
+        json={
+            "display_name": "Ada Lovelace",
+            "kind": "person",
+            "status": "active",
+            "tags": ["template-contact"],
+            "email_addresses": [
+                {"email_address": "ada@example.com", "is_primary": True},
+            ],
+        },
+    )
+    assert contact_response.status_code == 200
+
+    manifest = {
+        "slug": "case-template-extension-test",
+        "name": "Case Template Extension Test",
+        "description": "Test extension for case template APIs.",
+        "command": [
+            sys.executable,
+            "-c",
+            "import time; time.sleep(60)",
+        ],
+        "url_path": "/",
+        "tags": ["templates"],
+    }
+    register_response = client.post(
+        "/api/v1/extensions/register",
+        json={"root_path": str(tmp_path), "manifest": manifest},
+    )
+    assert register_response.status_code == 200
+    extension = register_response.json()["data"]["extension"]
+
+    start_response = client.post(
+        f"/api/v1/extensions/{extension['id']}/start",
+        json={"context": {"mode": "case-template"}},
+    )
+    assert start_response.status_code == 200
+    start_data = start_response.json()["data"]
+    instance = start_data["instance"]
+    token = start_data["extension_token"]
+    assert instance["case_id"] is None
+    headers = {"X-CaseClosed-Extension-Token": token}
+
+    genres_response = client.get("/api/v1/extension-api/cases/genres", headers=headers)
+    assert genres_response.status_code == 200
+    assert any(item["id"] == genre["id"] for item in genres_response.json()["data"]["items"])
+
+    create_response = client.post(
+        "/api/v1/extension-api/cases",
+        headers=headers,
+        json={
+            "name": "Generated Case From Template",
+            "description": "Created through the background extension API.",
+            "genre_id": genre["id"],
+            "progress_status": "not_started",
+            "tags": ["from-template"],
+        },
+    )
+    assert create_response.status_code == 200
+    created_case = create_response.json()["data"]["case"]
+    assert created_case["name"] == "Generated Case From Template"
+    assert created_case["genre_id"] == genre["id"]
+    assert created_case["tags"] == ["from-template"]
+
+    cases_response = client.get(
+        "/api/v1/extension-api/cases?q=Generated&tag=from-template",
+        headers=headers,
+    )
+    assert cases_response.status_code == 200
+    cases = cases_response.json()["data"]["items"]
+    assert [item["id"] for item in cases] == [created_case["id"]]
+
+    contacts_response = client.get(
+        "/api/v1/extension-api/contacts?q=ada@example.com&tag=template-contact",
+        headers=headers,
+    )
+    assert contacts_response.status_code == 200
+    contacts = contacts_response.json()["data"]["items"]
+    assert len(contacts) == 1
+    assert contacts[0]["display_name"] == "Ada Lovelace"
+    assert contacts[0]["email_addresses"][0]["email_address"] == "ada@example.com"
+
+    no_context_case_response = client.get("/api/v1/extension-api/case", headers=headers)
+    assert no_context_case_response.status_code == 409
+
+    stop_response = client.post(f"/api/v1/extensions/instances/{instance['id']}/stop")
+    assert stop_response.status_code == 200
+
+    logs_response = client.get("/api/v1/logs?q=extension&types=audit")
+    assert logs_response.status_code == 200
+    action_types = {item["category"] for item in logs_response.json()["data"]["items"]}
+    assert {
+        "extension.case_genres_listed",
+        "extension.case_created",
+        "extension.cases_listed",
+        "extension.contacts_searched",
     } <= action_types

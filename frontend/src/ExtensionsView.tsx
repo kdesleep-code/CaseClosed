@@ -13,10 +13,14 @@ import {
 } from './ExtensionLaunchView'
 import { t } from './i18n'
 import { AppLink, TopNav } from './navigation'
-import { listCases } from './phase7Api'
-import type { CaseItem } from './phase7Api'
+import { createCaseGenre, listCaseGenres, listCases, updateCaseGenre } from './phase7Api'
+import type { CaseGenre, CaseItem } from './phase7Api'
 
 const sampleManifestPath = 'extensions/user-extensions/information-literacy-report-1-1/caseclosed-extension.json'
+const caseTemplateTag = 'case-template'
+
+type RegisterFormType = 'tool' | 'case-template'
+type TemplateGenreMode = 'new' | 'existing'
 
 function initialIdleTimeoutMinutesByExtension() {
   try {
@@ -64,38 +68,63 @@ function extensionLaunchTarget(extensionId: string) {
   return `caseclosed_extension_${extensionId}_no_case`.replace(/[^a-zA-Z0-9_]/g, '_')
 }
 
+
+function extensionIsCaseTemplate(extension: ExtensionDefinition, genres: CaseGenre[]) {
+  if (extension.tags.some((tag) => tag.trim().toLowerCase() === caseTemplateTag)) return true
+  return genres.some((genre) => genre.template_extension_id === extension.id)
+}
+
+function extensionTemplateGenreNames(extension: ExtensionDefinition, genres: CaseGenre[]) {
+  return genres
+    .filter((genre) => genre.template_extension_id === extension.id)
+    .map((genre) => genre.title)
+}
+
 export default function ExtensionsView() {
   const [extensions, setExtensions] = useState<ExtensionDefinition[]>([])
   const [instances, setInstances] = useState<ExtensionInstance[]>([])
   const [cases, setCases] = useState<CaseItem[]>([])
+  const [genres, setGenres] = useState<CaseGenre[]>([])
   const [manifestPath, setManifestPath] = useState(sampleManifestPath)
   const [rootPath, setRootPath] = useState('')
+  const [templateManifestPath, setTemplateManifestPath] = useState(sampleManifestPath)
+  const [templateRootPath, setTemplateRootPath] = useState('')
+  const [templateGenreMode, setTemplateGenreMode] = useState<TemplateGenreMode>('new')
+  const [templateGenreTitle, setTemplateGenreTitle] = useState('')
+  const [templateGenreColor, setTemplateGenreColor] = useState('#88ccff')
+  const [templateExistingGenreId, setTemplateExistingGenreId] = useState('')
   const [idleTimeoutMinutesByExtension, setIdleTimeoutMinutesByExtension] = useState<Record<string, string>>(
     initialIdleTimeoutMinutesByExtension,
   )
   const [isLoading, setIsLoading] = useState(true)
-  const [isFormOpen, setIsFormOpen] = useState(false)
+  const [openForm, setOpenForm] = useState<RegisterFormType | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
 
   async function refresh() {
     setError(null)
-    const [extensionList, caseList] = await Promise.all([listExtensions(), listCases('all')])
+    const [extensionList, caseList, genreList] = await Promise.all([
+      listExtensions(),
+      listCases('all'),
+      listCaseGenres(),
+    ])
     setExtensions(extensionList.items)
     setInstances(extensionList.running_instances)
     setCases(caseList)
+    setGenres(genreList)
   }
 
   useEffect(() => {
     let isActive = true
     setIsLoading(true)
-    void Promise.all([listExtensions(), listCases('all')])
-      .then(([extensionList, caseList]) => {
+    void Promise.all([listExtensions(), listCases('all'), listCaseGenres()])
+      .then(([extensionList, caseList, genreList]) => {
         if (!isActive) return
         setExtensions(extensionList.items)
         setInstances(extensionList.running_instances)
         setCases(caseList)
+        setGenres(genreList)
       })
       .catch((requestError) => {
         if (!isActive) return
@@ -152,13 +181,21 @@ export default function ExtensionsView() {
     return grouped
   }, [instances])
 
+  const caseTemplateExtensions = useMemo(
+    () => extensions.filter((extension) => extensionIsCaseTemplate(extension, genres)),
+    [extensions, genres],
+  )
+  const toolExtensions = useMemo(
+    () => extensions.filter((extension) => !extensionIsCaseTemplate(extension, genres)),
+    [extensions, genres],
+  )
   const defaultExtensions = useMemo(
-    () => extensions.filter((extension) => extension.source === 'default'),
-    [extensions],
+    () => toolExtensions.filter((extension) => extension.source === 'default'),
+    [toolExtensions],
   )
   const userExtensions = useMemo(
-    () => extensions.filter((extension) => extension.source !== 'default'),
-    [extensions],
+    () => toolExtensions.filter((extension) => extension.source !== 'default'),
+    [toolExtensions],
   )
 
   async function handleRefresh() {
@@ -184,7 +221,46 @@ export default function ExtensionsView() {
         root_path: rootPath.trim() === '' ? null : rootPath.trim(),
       })
       setNotice(t('extensions.registered', { name: extension.name }))
-      setIsFormOpen(false)
+      setOpenForm(null)
+      await refresh()
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : t('extensions.requestFailed'))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function handleRegisterCaseTemplate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (templateManifestPath.trim() === '' && templateRootPath.trim() === '') return
+    if (templateGenreMode === 'new' && templateGenreTitle.trim() === '') return
+    if (templateGenreMode === 'existing' && templateExistingGenreId.trim() === '') return
+    setBusyId('register-case-template')
+    setError(null)
+    setNotice(null)
+    try {
+      const extension = await registerExtension({
+        manifest_path: templateManifestPath.trim() === '' ? null : templateManifestPath.trim(),
+        root_path: templateRootPath.trim() === '' ? null : templateRootPath.trim(),
+      })
+      const templateContext = { mode: 'case_template' }
+      if (templateGenreMode === 'new') {
+        await createCaseGenre({
+          title: templateGenreTitle.trim(),
+          color_hex: templateGenreColor,
+          template_extension_id: extension.id,
+          template_context: templateContext,
+        })
+      } else {
+        await updateCaseGenre(templateExistingGenreId, {
+          template_extension_id: extension.id,
+          template_context: templateContext,
+        })
+      }
+      setNotice(t('extensions.caseTemplateRegistered', { name: extension.name }))
+      setOpenForm(null)
+      setTemplateGenreTitle('')
+      setTemplateExistingGenreId('')
       await refresh()
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : t('extensions.requestFailed'))
@@ -250,8 +326,11 @@ export default function ExtensionsView() {
               </div>
               <div className="extensions-actions">
                 <AppLink href="/extensions/help">{t('extensions.guide')}</AppLink>
-                <button onClick={() => setIsFormOpen((current) => !current)} type="button">
-                  {isFormOpen ? t('common.cancel') : t('extensions.register')}
+                <button onClick={() => setOpenForm((current) => (current === 'tool' ? null : 'tool'))} type="button">
+                  {openForm === 'tool' ? t('common.cancel') : t('extensions.registerTool')}
+                </button>
+                <button onClick={() => setOpenForm((current) => (current === 'case-template' ? null : 'case-template'))} type="button">
+                  {openForm === 'case-template' ? t('common.cancel') : t('extensions.registerCaseTemplate')}
                 </button>
                 <button disabled={busyId === 'refresh'} onClick={() => { void handleRefresh() }} type="button">
                   {t('extensions.refresh')}
@@ -259,7 +338,7 @@ export default function ExtensionsView() {
               </div>
             </div>
 
-            {isFormOpen && (
+            {openForm === 'tool' && (
               <form className="extensions-register-form" onSubmit={handleRegister}>
                 <label>
                   <span>{t('extensions.manifestPath')}</span>
@@ -270,7 +349,58 @@ export default function ExtensionsView() {
                   <input onChange={(event) => setRootPath(event.target.value)} value={rootPath} />
                 </label>
                 <button className={`button-loading-dot${busyId === 'register' ? ' is-loading' : ''}`} disabled={busyId !== null} type="submit">
-                  {t('extensions.register')}
+                  {t('extensions.registerTool')}
+                </button>
+              </form>
+            )}
+
+            {openForm === 'case-template' && (
+              <form className="extensions-register-form extensions-template-form" onSubmit={handleRegisterCaseTemplate}>
+                <label>
+                  <span>{t('extensions.manifestPath')}</span>
+                  <input onChange={(event) => setTemplateManifestPath(event.target.value)} value={templateManifestPath} />
+                </label>
+                <label>
+                  <span>{t('extensions.rootPath')}</span>
+                  <input onChange={(event) => setTemplateRootPath(event.target.value)} value={templateRootPath} />
+                </label>
+                <label>
+                  <span>{t('extensions.templateGenreMode')}</span>
+                  <select
+                    onChange={(event) => setTemplateGenreMode(event.target.value as TemplateGenreMode)}
+                    value={templateGenreMode}
+                  >
+                    <option value="new">{t('extensions.templateGenreNew')}</option>
+                    <option value="existing">{t('extensions.templateGenreExisting')}</option>
+                  </select>
+                </label>
+                {templateGenreMode === 'new' ? (
+                  <>
+                    <label>
+                      <span>{t('extensions.templateGenreTitle')}</span>
+                      <input onChange={(event) => setTemplateGenreTitle(event.target.value)} value={templateGenreTitle} />
+                    </label>
+                    <label>
+                      <span>{t('extensions.templateGenreColor')}</span>
+                      <input onChange={(event) => setTemplateGenreColor(event.target.value)} type="color" value={templateGenreColor} />
+                    </label>
+                  </>
+                ) : (
+                  <label>
+                    <span>{t('extensions.templateGenreExisting')}</span>
+                    <select
+                      onChange={(event) => setTemplateExistingGenreId(event.target.value)}
+                      value={templateExistingGenreId}
+                    >
+                      <option value="">{t('common.none')}</option>
+                      {genres.map((genre) => (
+                        <option key={genre.id} value={genre.id}>{genre.title}</option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                <button className={`button-loading-dot${busyId === 'register-case-template' ? ' is-loading' : ''}`} disabled={busyId !== null} type="submit">
+                  {t('extensions.registerCaseTemplate')}
                 </button>
               </form>
             )}
@@ -284,7 +414,19 @@ export default function ExtensionsView() {
                 <ExtensionGroup
                   busyId={busyId}
                   cases={cases}
+                  extensions={caseTemplateExtensions}
+                  genres={genres}
+                  idleTimeoutMinutesByExtension={idleTimeoutMinutesByExtension}
+                  instancesByExtensionId={instancesByExtensionId}
+                  onIdleTimeoutChange={handleIdleTimeoutChange}
+                  onStop={handleStop}
+                  title={t('extensions.caseTemplateGroup')}
+                />
+                <ExtensionGroup
+                  busyId={busyId}
+                  cases={cases}
                   extensions={defaultExtensions}
+                  genres={genres}
                   idleTimeoutMinutesByExtension={idleTimeoutMinutesByExtension}
                   instancesByExtensionId={instancesByExtensionId}
                   onIdleTimeoutChange={handleIdleTimeoutChange}
@@ -295,6 +437,7 @@ export default function ExtensionsView() {
                   busyId={busyId}
                   cases={cases}
                   extensions={userExtensions}
+                  genres={genres}
                   idleTimeoutMinutesByExtension={idleTimeoutMinutesByExtension}
                   instancesByExtensionId={instancesByExtensionId}
                   onIdleTimeoutChange={handleIdleTimeoutChange}
@@ -314,6 +457,7 @@ function ExtensionGroup({
   busyId,
   cases,
   extensions,
+  genres,
   idleTimeoutMinutesByExtension,
   instancesByExtensionId,
   onIdleTimeoutChange,
@@ -323,6 +467,7 @@ function ExtensionGroup({
   busyId: string | null
   cases: CaseItem[]
   extensions: ExtensionDefinition[]
+  genres: CaseGenre[]
   idleTimeoutMinutesByExtension: Record<string, string>
   instancesByExtensionId: Map<string, ExtensionInstance[]>
   onIdleTimeoutChange: (extensionId: string, value: string) => void
@@ -376,6 +521,13 @@ function ExtensionGroup({
               {extension.tags.length > 0 && (
                 <div className="extension-tags">
                   {extension.tags.map((tag) => <span key={tag}>{tag}</span>)}
+                </div>
+              )}
+              {extensionTemplateGenreNames(extension, genres).length > 0 && (
+                <div className="extension-tags extension-genre-links">
+                  {extensionTemplateGenreNames(extension, genres).map((genreName) => (
+                    <span key={genreName}>{genreName}</span>
+                  ))}
                 </div>
               )}
               {extensionInstances.length > 0 && (
