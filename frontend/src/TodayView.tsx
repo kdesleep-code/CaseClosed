@@ -19,6 +19,19 @@ type TodayData = {
   events: GoogleCalendarEvent[]
 }
 
+type PositionedTodayCalendarEvent = {
+  event: GoogleCalendarEvent
+  top: number
+  height: number
+  startMinute: number
+  endMinute: number
+  lane: number
+  laneCount: number
+  laneOffsetRatio: number
+  laneWidthRatio: number
+  isShort: boolean
+}
+
 const CALENDAR_START_HOUR = 7
 const CALENDAR_END_HOUR = 22
 const CALENDAR_HOUR_HEIGHT = 87
@@ -209,19 +222,110 @@ function calendarEventEndMinutes(event: GoogleCalendarEvent) {
   return hour * 60 + minute
 }
 
-function calendarEventStyle(event: GoogleCalendarEvent) {
+function isCalendarEventAttendanceOptional(event: GoogleCalendarEvent) {
+  const value = (event.attendance_requirement ?? '').toLowerCase().trim()
+  return ['optional', 'not_required', 'unnecessary', 'no_attendance'].includes(value)
+}
+
+function calendarEventBasePosition(event: GoogleCalendarEvent) {
   const startMinutes = calendarEventStartMinutes(event)
   const endMinutes = calendarEventEndMinutes(event)
   if (startMinutes === null) {
-    return undefined
+    return null
   }
   const dayStart = CALENDAR_START_HOUR * 60
   const dayEnd = CALENDAR_END_HOUR * 60
-  const clampedStart = Math.max(dayStart, Math.min(dayEnd, startMinutes))
-  const clampedEnd = Math.max(clampedStart + 30, Math.min(dayEnd, endMinutes ?? startMinutes + 60))
+  const rawEnd = endMinutes ?? startMinutes + 60
+  if (rawEnd <= dayStart || startMinutes >= dayEnd) {
+    return null
+  }
+  const clampedStart = Math.max(dayStart, startMinutes)
+  const clampedEnd = Math.min(Math.max(rawEnd, startMinutes + 15), dayEnd)
   return {
-    top: `${((clampedStart - dayStart) / 60) * CALENDAR_HOUR_HEIGHT}px`,
-    height: `${Math.max(34, ((clampedEnd - clampedStart) / 60) * CALENDAR_HOUR_HEIGHT - 4)}px`,
+    top: ((clampedStart - dayStart) / 60) * CALENDAR_HOUR_HEIGHT,
+    height: Math.max(34, ((clampedEnd - clampedStart) / 60) * CALENDAR_HOUR_HEIGHT - 4),
+    startMinute: clampedStart,
+    endMinute: clampedEnd,
+    isShort: clampedEnd - clampedStart < 60,
+  }
+}
+
+function calendarEventStyle(event: GoogleCalendarEvent) {
+  const position = calendarEventBasePosition(event)
+  if (position === null) return undefined
+  return {
+    top: `${position.top}px`,
+    height: `${position.height}px`,
+  }
+}
+
+function positionedCalendarEvents(events: GoogleCalendarEvent[]): PositionedTodayCalendarEvent[] {
+  const dayEvents = events
+    .map((event) => {
+      const position = calendarEventBasePosition(event)
+      return position === null ? null : { event, ...position }
+    })
+    .filter((item): item is NonNullable<typeof item> => item !== null)
+    .sort(
+      (left, right) =>
+        left.startMinute - right.startMinute ||
+        right.endMinute - right.startMinute - (left.endMinute - left.startMinute),
+    )
+  const clusters: typeof dayEvents[] = []
+  dayEvents.forEach((item) => {
+    const activeCluster = clusters.at(-1)
+    if (
+      activeCluster === undefined ||
+      item.startMinute >= Math.max(...activeCluster.map((event) => event.endMinute))
+    ) {
+      clusters.push([item])
+    } else {
+      activeCluster.push(item)
+    }
+  })
+
+  return clusters.flatMap((cluster) => {
+    const laneEnds: number[] = []
+    const withLanes = cluster.map((item) => {
+      let lane = laneEnds.findIndex((endMinute) => endMinute <= item.startMinute)
+      if (lane < 0) {
+        lane = laneEnds.length
+      }
+      laneEnds[lane] = item.endMinute
+      return { ...item, lane }
+    })
+    const laneCount = Math.max(1, laneEnds.length)
+    const hasOptional = withLanes.some((item) => isCalendarEventAttendanceOptional(item.event))
+    const hasRequired = withLanes.some((item) => !isCalendarEventAttendanceOptional(item.event))
+    const laneHasRequired = Array.from({ length: laneCount }, (_, lane) =>
+      withLanes.some(
+        (item) => item.lane === lane && !isCalendarEventAttendanceOptional(item.event),
+      ),
+    )
+    const laneWeights =
+      laneCount === 2 && hasOptional && hasRequired
+        ? laneHasRequired.map((hasRequiredEvent) => (hasRequiredEvent ? 3 : 1))
+        : Array.from({ length: laneCount }, () => 1)
+    const totalWeight = laneWeights.reduce((sum, value) => sum + value, 0)
+    const laneOffsets = laneWeights.map((_, lane) =>
+      laneWeights.slice(0, lane).reduce((sum, value) => sum + value, 0),
+    )
+    return withLanes.map((item) => ({
+      ...item,
+      laneCount,
+      laneOffsetRatio: laneOffsets[item.lane] / totalWeight,
+      laneWidthRatio: laneWeights[item.lane] / totalWeight,
+    }))
+  })
+}
+
+function positionedCalendarEventStyle(item: PositionedTodayCalendarEvent): CSSProperties {
+  return {
+    top: `${item.top}px`,
+    height: `${item.height}px`,
+    left: `calc(8px + (100% - 16px) * ${item.laneOffsetRatio})`,
+    right: 'auto',
+    width: `calc((100% - 16px) * ${item.laneWidthRatio} - 2px)`,
   }
 }
 
@@ -278,7 +382,9 @@ function calendarTrackStyle(today: string, now: Date, nowLineTop: { top: number 
 
 function calendarBoardStyle(today: string, now: Date, nowLineTop: { top: number } | null): CSSProperties {
   if (today !== jstDateToday()) {
-    return {}
+    return {
+      height: `${CALENDAR_CONTENT_BOTTOM}px`,
+    }
   }
   const minutes = currentJstMinutes(now)
   const dayStart = CALENDAR_START_HOUR * 60
@@ -360,8 +466,15 @@ function TodayView({ dayOffset = 0 }: { dayOffset?: 0 | 1 }) {
     () => data.events.filter((event) => calendarEventStyle(event) !== undefined),
     [data.events],
   )
+  const positionedTimedEvents = useMemo(() => positionedCalendarEvents(timedEvents), [timedEvents])
   const locationEvents = useMemo(
-    () => data.events.filter((event) => event.location !== null && event.location.trim() !== ''),
+    () =>
+      data.events.filter(
+        (event) =>
+          event.location !== null &&
+          event.location.trim() !== '' &&
+          !isCalendarEventAttendanceOptional(event),
+      ),
     [data.events],
   )
   const allDayLocationEvents = useMemo(
@@ -371,6 +484,10 @@ function TodayView({ dayOffset = 0 }: { dayOffset?: 0 | 1 }) {
   const timedLocationEvents = useMemo(
     () => locationEvents.filter((event) => calendarEventStyle(event) !== undefined),
     [locationEvents],
+  )
+  const positionedTimedLocationEvents = useMemo(
+    () => positionedCalendarEvents(timedLocationEvents),
+    [timedLocationEvents],
   )
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -555,14 +672,16 @@ function TodayView({ dayOffset = 0 }: { dayOffset?: 0 | 1 }) {
                         {data.events.length === 0 && (
                           <p className="today-calendar-empty-label">{t('today.calendar.empty')}</p>
                         )}
-                        {timedEvents.map((event) => {
-                          const eventStyle = calendarEventStyle(event)
+                        {positionedTimedEvents.map((item) => {
+                          const event = item.event
                           return (
                             <AppLink
-                              className="today-calendar-event-card"
+                              className={`today-calendar-event-card${
+                                item.laneCount > 1 || item.isShort ? ' today-calendar-event-narrow' : ''
+                              }${isCalendarEventAttendanceOptional(event) ? ' today-calendar-event-optional' : ''}`}
                               href={eventDetailHref(event, returnPath)}
-                              key={event.id ?? `${event.summary}-${calendarEventTime(event)}`}
-                              style={eventStyle}
+                              key={`${item.lane}-${event.id ?? `${event.summary}-${calendarEventTime(event)}`}`}
+                              style={positionedCalendarEventStyle(item)}
                             >
                               <time>{calendarEventTime(event)}</time>
                               <strong>{event.summary || t('calendar.noTitle')}</strong>
@@ -584,14 +703,16 @@ function TodayView({ dayOffset = 0 }: { dayOffset?: 0 | 1 }) {
                         {locationEvents.length === 0 && (
                           <p className="today-calendar-empty-label">{t('today.calendarWindow.empty')}</p>
                         )}
-                        {timedLocationEvents.map((event) => {
-                          const eventStyle = calendarEventStyle(event)
+                        {positionedTimedLocationEvents.map((item) => {
+                          const event = item.event
                           return (
                             <AppLink
-                              className="today-calendar-event-card today-location-card"
+                              className={`today-calendar-event-card today-location-card${
+                                item.laneCount > 1 || item.isShort ? ' today-calendar-event-narrow' : ''
+                              }${isCalendarEventAttendanceOptional(event) ? ' today-calendar-event-optional' : ''}`}
                               href={eventDetailHref(event, returnPath)}
-                              key={`location-${event.id ?? `${event.location}-${calendarEventTime(event)}`}`}
-                              style={eventStyle}
+                              key={`location-${item.lane}-${event.id ?? `${event.location}-${calendarEventTime(event)}`}`}
+                              style={positionedCalendarEventStyle(item)}
                             >
                               <time>{calendarEventTime(event)}</time>
                               <strong>{event.location}</strong>

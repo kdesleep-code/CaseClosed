@@ -410,6 +410,16 @@ GET /maintenance/status
 
 ---
 
+# 3.5 共通キーボードショートカット
+
+- `Esc` は詳細画面・作成画面から戻る操作として扱う。
+- 入力欄、textarea、select、contenteditableにフォーカスがある場合、`Esc` はグローバルショートカットとして扱わない。
+- URLに安全な同一originの `return_to` がある場合はそこへ戻る。
+- `return_to` がない場合、Mail詳細はMail一覧、Calendar Event詳細と新規Calendar EventはCalendar、Task詳細/新規はTask一覧、Case詳細/新規はCase一覧、File詳細はFilesへ戻る。
+- 上記の自然な戻り先もない場合はブラウザ標準の `history.back()` を使う。
+
+---
+
 # 4. Mail一覧画面
 
 ## 4.1 目的
@@ -708,10 +718,8 @@ audit_exposure_items
 - processed_status
 - Pending理由
 - 関連Case一覧
-- primary Case
-- copy Case
-- 関連Task
-- 関連Calendar Event
+- 関連Task一覧
+- 関連Calendar Event一覧
 - LLM要約
 - LLM次アクション
 - 返信草案
@@ -724,6 +732,14 @@ API:
 GET /mails/{message_id}
 GET /mails/{message_id}/thread
 ```
+
+現行画面仕様:
+
+- メール詳細上部には、関連Case / 関連Task / 関連Calendar Eventを同じバッジ系UIで横並び表示する。
+- 関連がないグループも非表示にはせず、弱い表示の `No case` / `No task` / `No event` バッジを出す。
+- CaseバッジはCase詳細へ、TaskバッジはTask詳細へ、CalendarバッジはCalendar Event詳細へ遷移する。
+- Case割当編集ボタンはCaseグループに付属し、Assign解除中はCaseバッジ内に解除操作を表示する。
+- 右上のMailボタンは `return_to` ではなく、フォーカス中メールの日付・タブに対応するMail一覧へ戻す。
 
 ## 4.3 必須操作
 
@@ -972,7 +988,7 @@ GET /cases
 - Case詳細を開く
 - 新規Case作成
 - Case編集
-- CaseをClosedにする
+- CaseをCompletedにする
 - Archiveする
 - タグ編集
 - System Caseを開く
@@ -1119,7 +1135,7 @@ GET /cases/{case_id}/events
 ## 7.3 必須操作
 
 - Case編集
-- CaseをClosedにする
+- CaseをCompletedにする
 - Archiveする
 - メールを追加
 - メールを別Caseへコピー
@@ -1133,9 +1149,9 @@ GET /cases/{case_id}/events
 - 引継ぎログ生成
 - Gmailで関連メールを開く
 
-## 7.4 Closed条件
+## 7.4 Completed条件
 
-CaseをClosedにする場合、未完了Taskが残っていてはならない。
+CaseをCompletedにする場合、未完了Taskが残っていてはならない。
 
 閉じた状態とみなすTask:
 
@@ -1144,11 +1160,11 @@ completed
 canceled
 ```
 
-未完了Taskがある場合は、Closed操作時に一覧表示し、完了またはCancelを促す。
+未完了Taskがある場合は、Complete操作時に一覧表示し、完了またはCancelを促す。
 
 ## 7.5 System Case
 
-以下のSystem Caseは削除不可・Archive不可・Closed不可または原則非推奨とする。
+以下のSystem Caseは削除不可・Archive不可・Completed不可または原則非推奨とする。
 
 - Inbox
 - システムメンテナンス
@@ -1290,6 +1306,13 @@ API:
 GET /calendar/events
 ```
 
+## 10.2.1 現行画面仕様
+
+- Calendar Sourceの選択状態はブラウザlocalStorageだけでなく、Google Calendar自動同期設定の `calendar_ids` としてバックエンドへ保存する。ログインや再読み込み後もPrimaryだけへ戻さない。
+- 既存localStorageにPrimary以外の選択があり、サーバー側が初期Primaryのみの場合は、初回読み込み時にlocalStorage側の選択を移行対象として扱う。
+- 週表示で同一日に全日予定が複数ある場合、時間付き予定と同じlane計算を使い、日セル内で横分割して重なりを避ける。
+- 週次/隔週の新規予定作成では、選択曜日と開始日が一致しない場合、最初に到来する選択曜日へ開始日・終了日を前方シフトして作成する。
+
 ## 10.3 必須操作
 
 - 予定詳細を開く
@@ -1352,6 +1375,8 @@ GET /contacts
 - 最近追加
 
 通常Contact用の `All` / `active` / `skipped` / `archived` / カスタムタブには `kind = mailing_list` を表示しない。Mailing List専用タブでは `kind = mailing_list` のみ表示する。
+
+通常Contactのタグフィルタには予約タブ `No tag` を持つ。`No tag` は、activeかつspamではなく、通常タグを持たないContactを表示する。
 
 ## 11.4 必須操作
 

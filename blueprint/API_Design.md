@@ -11,12 +11,14 @@ Version: 0.3
 
 本書は、CaseClosed のAPI詳細設計書である。
 
-概要設計・詳細設計・DB詳細設計で定義した概念を、Web UI、Worker、Single DB Writer、Audit Log Writer、External Operation が利用するAPIとして具体化する。
+概要設計・詳細設計・DB詳細設計で定義した概念を、Web UI、Worker、Audit Log Writer、External Operation が利用するAPIとして具体化する。
+
+現行実装では、通常の業務DB更新はAPI/WorkerがリクエストまたはJob単位のトランザクション内で直接反映する。`write_requests` / Single DB Writer は将来の同時書き込み負荷対策として残る設計候補であり、現行APIの必須経路ではない。
 
 本書は以下を目的とする。
 
 - 画面実装者が必要なAPIを把握できること
-- DB更新がSingle DB Writerを経由する原則を崩さないこと
+- DB更新がユーザー確定値を不用意に上書きしないこと
 - 外部副作用を二重実行しないこと
 - ユーザー操作由来の状態とLLM/System由来の状態を混同しないこと
 - 必要なボタン・操作に対応するAPIを欠落させないこと
@@ -31,7 +33,7 @@ Version: 0.3
 
 1. API名は英語で統一する。
 2. Read API は原則としてSQLiteを直接読む。
-3. 業務DB更新は原則として `write_requests` を作成し、Single DB Writer が反映する。
+3. 業務DB更新は、現行実装ではAPI/WorkerがDBトランザクション内で直接反映する。
 4. Audit Log は Audit Log Writer へ送る。
 5. 外部副作用は `external_operations` 経由で実行する。
 6. 単純な属性編集は `PATCH` を使う。
@@ -48,7 +50,7 @@ Read API:
   画面表示・検索・詳細取得
 
 Command API:
-  ユーザー操作をWrite Request / Job / External Operationへ変換
+  ユーザー操作をDB Transaction / Job / External Operationへ変換
 
 Job Control API:
   Job状態の確認、再実行、停止、保守画面用
@@ -64,10 +66,11 @@ Maintenance API:
 ```text
 Browser UI
   -> Web/API Process
-  -> write_requests INSERT
-  -> Single DB Writer
-  -> business tables UPDATE/INSERT
+  -> Validate / authorize / conflict check
+  -> business tables UPDATE/INSERT in one DB transaction
 ```
+
+SQLiteの書き込み競合が実運用上問題になる場合は、同じCommand API境界を保ったまま `write_requests` / Single DB Writer に置き換えられるようにする。
 
 ### LLM処理
 
@@ -77,8 +80,7 @@ Browser UI or System Trigger
   -> Orchestrator
   -> LLM Worker
   -> llm_runs INSERT
-  -> write_requests INSERT
-  -> Single DB Writer
+  -> business tables UPDATE/INSERT in one DB transaction
 ```
 
 ### Gmail送信 / Gmailスター / Calendar作成
@@ -89,7 +91,7 @@ Browser UI
   -> external_operations INSERT
   -> External Operation Worker
   -> Gmail / Calendar API
-  -> write_requests INSERT for local reflection
+  -> local reflection in DB transaction
 ```
 
 ### Audit Log
@@ -265,7 +267,7 @@ sort=updated_at_desc
 }
 ```
 
-Single DB Writer は現在versionと比較し、競合時は安全側に倒す。
+更新APIは現在versionと比較し、競合時は安全側に倒す。
 
 ## 2.9 optimistic_state
 
@@ -591,9 +593,9 @@ Request:
 仕様:
 
 - 未完了Taskが残っている場合は `CONFLICT`。
-- `completed` / `canceled` TaskのみならClosed可能。
+- `completed` / `canceled` TaskのみならCompleted可能。
 - `closed_at` を設定する。
-- system case のうち Inbox / システムメンテナンスはClosed不可。
+- system case のうち Inbox / システムメンテナンスはCompleted不可。
 
 ## 6.6 Caseを再オープンする
 
@@ -830,6 +832,14 @@ Phase 4初期では、本文、主要ヘッダ、同一スレッド内メール�
 
 ## 7.2 メール詳細
 
+現行仕様補足:
+
+- メールをCaseへ手動Assignした場合、そのThread内メールの送信者は対象CaseのStakeholder候補として扱う。
+- 既存Contactに解決でき、まだ対象CaseのStakeholderでない送信者は、`role = mail_sender` のStakeholderとして追加する。
+- 明示Auto Assign RuleでCaseリンクが作られた場合も同じ同期を行う。
+- 既存リンク全体を同期する保守APIとして `POST /api/v1/cases/sync-mail-sender-stakeholders` を持ち、戻り値は `{ added_count }` とする。
+
+
 ```http
 GET /api/v1/mails/{message_id}
 ```
@@ -844,11 +854,15 @@ Response data:
   "auto_state": {},
   "summary": {},
   "case_links": [],
+  "task_links": [],
+  "calendar_event_links": [],
   "attachments": [],
   "drafts": [],
   "available_actions": []
 }
 ```
+
+現行実装では、メール詳細は関連Caseに加えて、同一Thread内メールを起点に作られたTaskと、同一Thread内メールにリンクされたCalendar Eventを返す。Taskは `tasks.source_type = mail` / `source_id in thread_message_ids`、Calendar Eventは `calendar_event_links.linked_type in (mail, gmail_message)` / `linked_id in thread_message_ids` で抽出する。削除済みTask、missing同期Event、Google側cancelled Eventは表示対象外とする。
 
 Phase 4 send-request detail:
 
@@ -1703,6 +1717,8 @@ Google Calendarへ送る時は、`dateTime` をoffset付きISO文字列へ正規
 同時に `timeZone` を設定する。これによりアプリ内部・APIテスト・外部API
 送信の表現を揃える。
 
+週次または隔週の繰り返し予定で `RRULE:FREQ=WEEKLY;BYDAY=...` が指定され、入力された開始日が選択曜日と一致しない場合、作成APIは開始・終了日時を最初に到来する選択曜日へ同じ日数だけ前方シフトしてからGoogle Calendarへ送る。これにより、繰り返し初日ではない入力日へ単発の余計な予定が作られることを防ぐ。
+
 ## 11.2 作業ブロック候補取得
 
 ```http
@@ -1922,7 +1938,9 @@ GET /api/v1/storage/objects/{storage_object_id}/download
 
 - `content` はプレビュー用inline表示。
 - `download` はattachment表示。
-- 表示・ダウンロードは `storage_operation_history` に `viewed` / `downloaded` として記録する。
+- managed Storage objectの表示・ダウンロードは `storage_operation_history` に `viewed` / `downloaded` として記録する。
+- `scope != managed` の補助画像ファイルはプレビュー時に `Cache-Control: private, max-age=604800, immutable` を返し、表示履歴を記録しない。
+- managed Storage objectのcontentは引き続き `Cache-Control: no-store` を返す。
 
 ## 13.6 バージョン一覧・旧版表示
 
@@ -2839,7 +2857,7 @@ API実装時に迷った場合は、以下を優先する。
 ```text
 1. ユーザー操作を待たせない。
 2. ユーザー操作をLLMや自動処理で上書きしない。
-3. 業務DB更新はSingle DB Writer経由にする。
+3. 業務DB更新はAPI/WorkerのDBトランザクション内で反映し、ユーザー確定値を自動処理で上書きしない。
 4. 外部副作用はexternal_operations経由にする。
 5. Gmail送信などの外部副作用は二重実行しない。
 6. unknown状態は自動再実行しない。

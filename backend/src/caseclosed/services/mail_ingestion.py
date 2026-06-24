@@ -23,6 +23,7 @@ from caseclosed.db.models import MailLlmBlockFilter
 from caseclosed.db.models import MailUserState
 from caseclosed.db.runtime import jst_iso
 from caseclosed.email_addressing import normalize_email_address
+from caseclosed.services.case_mail_stakeholders import ensure_case_stakeholders_for_mail_senders
 from caseclosed.services.contact_ai_memo_update import (
     enqueue_contact_ai_memo_update_job,
 )
@@ -396,6 +397,7 @@ def apply_case_auto_assign_rules(
             )
             added = True
         if added:
+            ensure_case_stakeholders_for_mail_senders(session, case, thread_messages, now=now)
             case.updated_at = now
             case.version += 1
 

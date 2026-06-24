@@ -2,7 +2,7 @@ import type { AnchorHTMLAttributes, MouseEvent } from 'react'
 import { t, type MessageKey } from './i18n'
 
 function currentBrowserPath() {
-  return `${window.location.pathname}${window.location.search}${window.location.hash}`
+  return window.location.pathname + window.location.search + window.location.hash
 }
 
 function shouldAttachReturnTo(nextUrl: URL) {
@@ -70,6 +70,45 @@ export function navigateTo(href: string, replace = false) {
     window.history.pushState({}, '', nextPath)
   }
   window.dispatchEvent(new Event('popstate'))
+}
+
+export function returnToFromLocation() {
+  const returnTo = new URLSearchParams(window.location.search).get('return_to')
+  if (returnTo === null || returnTo.trim() === '') {
+    return null
+  }
+  try {
+    const destination = new URL(returnTo, window.location.origin)
+    if (
+      destination.origin !== window.location.origin ||
+      destination.pathname === window.location.pathname
+    ) {
+      return null
+    }
+    return destination.pathname + destination.search + destination.hash
+  } catch {
+    return null
+  }
+}
+
+export function naturalReturnTargetFromLocation() {
+  const pathname = window.location.pathname
+  if (pathname === '/mail/compose' || (pathname.startsWith('/mail/') && pathname !== '/mail/action-needed')) {
+    return '/mail'
+  }
+  if (pathname === '/calendar/new' || pathname.startsWith('/calendar/events/')) {
+    return '/calendar'
+  }
+  if (pathname === '/tasks/new' || pathname.startsWith('/tasks/')) {
+    return '/tasks'
+  }
+  if (pathname === '/cases/new' || pathname.startsWith('/cases/')) {
+    return '/cases'
+  }
+  if (pathname.startsWith('/files/')) {
+    return '/files'
+  }
+  return null
 }
 
 export function returnToOrFallback(fallback: string) {

@@ -300,6 +300,195 @@
   font-weight: 700;
 }
 
+.pomodoro-placeholder p {
+  margin: 0;
+  color: var(--text-soft);
+  font-weight: 650;
+}
+
+.pomodoro-app {
+  min-height: 100vh;
+  padding: 0;
+  overflow: hidden;
+}
+
+.pomodoro-app::after {
+  display: none;
+}
+
+.pomodoro-shell {
+  width: 100%;
+  min-height: 100vh;
+  padding: 14px;
+  align-content: start;
+  gap: 10px;
+}
+
+.pomodoro-header {
+  align-items: center;
+  gap: 10px;
+}
+
+.pomodoro-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pomodoro-header h1 {
+  margin-top: 2px;
+  font-size: 1.08rem;
+}
+
+.pomodoro-header p {
+  font-size: 0.7rem;
+}
+
+.pomodoro-settings-toggle {
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  border: 1px solid rgba(145, 78, 43, 0.18);
+  border-radius: var(--radius-ui);
+  padding: 5px;
+  display: inline-grid;
+  place-items: center;
+  background: rgba(255, 250, 242, 0.82);
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+}
+
+.pomodoro-settings-toggle img {
+  width: 17px;
+  height: 17px;
+  opacity: 0.78;
+}
+
+.pomodoro-controls button,
+.pomodoro-settings button {
+  min-height: 34px;
+  border: 1px solid rgba(145, 78, 43, 0.18);
+  border-radius: var(--radius-ui);
+  padding: 7px 10px;
+  color: var(--text-strong);
+  background: rgba(255, 250, 242, 0.82);
+  box-shadow: var(--shadow-sm);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 760;
+  cursor: pointer;
+}
+
+.pomodoro-settings-toggle[aria-expanded='true'],
+.pomodoro-controls button:first-child {
+  border-color: rgba(143, 65, 45, 0.36);
+  background: rgba(255, 227, 190, 0.88);
+}
+
+.pomodoro-controls button:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.pomodoro-panel {
+  min-height: 0;
+  border: 1px solid var(--surface-warm-border);
+  border-radius: var(--radius-card);
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+  background: var(--surface-panel);
+  box-shadow: var(--shadow-lg);
+}
+
+.pomodoro-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 760;
+}
+
+.pomodoro-status-row span,
+.pomodoro-status-row strong {
+  border: 1px solid rgba(145, 78, 43, 0.14);
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: rgba(255, 250, 242, 0.72);
+}
+
+.pomodoro-dial {
+  width: min(224px, 66vw);
+  aspect-ratio: 1;
+  margin: 0 auto;
+  border-radius: 50%;
+  display: grid;
+  place-content: center;
+  gap: 4px;
+  text-align: center;
+  background:
+    radial-gradient(circle at center, #fffaf2 0 61%, transparent 62%),
+    conic-gradient(#b8493d var(--pomodoro-progress, 0deg), rgba(145, 78, 43, 0.12) 0);
+  box-shadow: inset 0 0 0 1px rgba(145, 78, 43, 0.12), var(--shadow-md);
+}
+
+.pomodoro-dial strong {
+  color: var(--text-heading);
+  font-size: 2.7rem;
+  line-height: 1;
+  letter-spacing: 0;
+}
+
+.pomodoro-dial span {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-weight: 720;
+}
+
+.pomodoro-controls {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.pomodoro-settings {
+  border-top: 1px solid rgba(145, 78, 43, 0.12);
+  padding-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.pomodoro-settings label {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.pomodoro-settings label span {
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  font-weight: 720;
+}
+
+.pomodoro-settings input {
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid var(--surface-warm-border);
+  border-radius: var(--radius-ui);
+  padding: 6px 8px;
+  color: var(--text-strong);
+  background: #fffaf4;
+  font: inherit;
+  font-weight: 720;
+}
+
+.pomodoro-settings button {
+  grid-column: 1 / -1;
+}
+
 .top-today-link .is-saturday {
   color: #4d6d9d;
 }
@@ -2153,12 +2342,21 @@
   display: block;
 }
 
+.mail-thread-related-badge-row {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  column-gap: 16px;
+  row-gap: 6px;
+  margin-top: 6px;
+}
+
 .mail-thread-case-links {
+  min-width: 0;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 5px;
-  margin-top: 6px;
   color: var(--text-muted);
   font-size: 0.75rem;
 }
@@ -2183,14 +2381,14 @@
 
 .mail-thread-case-badge,
 .mail-thread-case-empty {
-  border: 1px solid rgba(117, 88, 70, 0.16);
+  border: 1px solid rgba(145, 78, 43, 0.16);
   border-radius: 999px;
-  background: rgba(255, 250, 242, 0.34);
-  color: rgba(80, 48, 35, 0.58);
-  font-size: 0.72rem;
-  font-weight: 650;
+  background: rgba(255, 246, 232, 0.76);
+  color: var(--text-heading);
+  font-size: 0.76rem;
+  font-weight: 730;
   line-height: 1;
-  padding: 4px 7px;
+  padding: 4px 8px;
   text-decoration: none;
 }
 
@@ -2206,8 +2404,18 @@
 }
 
 .mail-thread-case-empty {
-  color: rgba(116, 93, 79, 0.42);
-  font-weight: 600;
+  border-color: rgba(145, 78, 43, 0.1);
+  background: rgba(255, 250, 242, 0.34);
+  color: rgba(116, 93, 79, 0.44);
+  font-weight: 620;
+}
+
+.mail-thread-task-badge,
+.mail-thread-calendar-badge {
+  max-width: min(320px, 100%);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mail-thread-case-settings {
@@ -2347,6 +2555,7 @@
 }
 
 .mail-thread-calendar-grid input,
+.mail-thread-calendar-grid select,
 .mail-thread-calendar-description textarea {
   min-width: 0;
   border: 1px solid rgba(117, 88, 70, 0.2);
@@ -2359,7 +2568,8 @@
 }
 
 .mail-thread-calendar-grid label:nth-child(5),
-.mail-thread-calendar-grid label:nth-child(6) {
+.mail-thread-calendar-grid label:nth-child(6),
+.mail-thread-calendar-grid label:nth-child(7) {
   grid-column: span 2;
 }
 
@@ -2419,7 +2629,8 @@
 
   .mail-thread-calendar-grid label:nth-child(1),
   .mail-thread-calendar-grid label:nth-child(5),
-  .mail-thread-calendar-grid label:nth-child(6) {
+  .mail-thread-calendar-grid label:nth-child(6),
+  .mail-thread-calendar-grid label:nth-child(7) {
     grid-column: 1 / -1;
   }
 }
@@ -4264,19 +4475,27 @@
   outline-offset: 2px;
 }
 
-.maintenance-header .mail-thread-case-badge {
+.maintenance-header .mail-thread-case-badge,
+.maintenance-header .mail-thread-case-empty {
   min-height: 0;
-  border: 1px solid rgba(117, 88, 70, 0.16);
+  border: 1px solid rgba(145, 78, 43, 0.16);
   border-radius: 999px;
-  background: rgba(255, 250, 242, 0.34);
+  background: rgba(255, 246, 232, 0.76);
   box-shadow: none;
-  color: rgba(80, 48, 35, 0.58);
+  color: var(--text-heading);
   display: inline-flex;
   align-items: center;
-  font-size: 0.72rem;
-  font-weight: 650;
+  font-size: 0.76rem;
+  font-weight: 730;
   line-height: 1;
-  padding: 4px 7px;
+  padding: 4px 8px;
+}
+
+.maintenance-header .mail-thread-case-empty {
+  border-color: rgba(145, 78, 43, 0.1);
+  background: rgba(255, 250, 242, 0.34);
+  color: rgba(116, 93, 79, 0.44);
+  font-weight: 620;
 }
 
 .maintenance-header .mail-thread-case-badge:hover {
@@ -8733,6 +8952,53 @@
   margin-inline: 12px;
 }
 
+.case-tag-filter-shell {
+  grid-column: 1 / -1;
+  padding: 0 calc(clamp(16px, 2.2vw, 24px) * var(--theme-density));
+}
+
+.case-tag-filter-toggle {
+  width: fit-content;
+  max-width: 100%;
+  min-height: 32px;
+  border: 1px solid rgba(145, 78, 43, 0.18);
+  border-radius: var(--radius-ui);
+  padding: 5px 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: #6e3428;
+  background: rgba(255, 250, 242, 0.72);
+  box-shadow: 0 8px 18px rgba(96, 48, 26, 0.08);
+  font: inherit;
+  font-size: 0.84rem;
+  cursor: pointer;
+}
+
+.case-tag-filter-toggle::after {
+  content: '▾';
+  color: rgba(84, 41, 31, 0.58);
+  font-size: 0.8rem;
+}
+
+.case-tag-filter-toggle[aria-expanded='true']::after {
+  transform: rotate(180deg);
+}
+
+.case-tag-filter-toggle span {
+  color: rgba(84, 41, 31, 0.62);
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.case-tag-filter-toggle strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 760;
+}
+
 .case-tag-filters {
   grid-column: 1 / -1;
   display: flex;
@@ -10532,6 +10798,25 @@
   left: 8px;
   right: 8px;
   z-index: 2;
+  overflow: hidden;
+}
+
+.today-calendar-event-layer .today-calendar-event-card.today-calendar-event-optional {
+  opacity: 0.58;
+  filter: saturate(0.72);
+  box-shadow: none;
+}
+
+.today-calendar-event-card.today-calendar-event-narrow {
+  padding-inline: 6px;
+}
+
+.today-calendar-event-card.today-calendar-event-narrow strong {
+  font-size: 0.76rem;
+}
+
+.today-calendar-event-card.today-calendar-event-narrow span {
+  font-size: 0.66rem;
 }
 
 .today-calendar-event-all-day {
@@ -11951,12 +12236,12 @@
 
 .calendar-event-basics-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(140px, 0.36fr) auto;
+  grid-template-columns: minmax(150px, 0.38fr) minmax(0, 1fr) minmax(180px, 0.44fr) auto;
   align-items: end;
 }
 
 .calendar-event-basics-row .calendar-event-link-field:first-child {
-  grid-column: 1 / 3;
+  grid-column: 1 / 4;
 }
 
 .calendar-event-basics-row .calendar-event-link-field:nth-child(2),
@@ -11966,8 +12251,8 @@
 }
 
 .calendar-event-basics-row > button {
-  grid-column: 3;
-  grid-row: 1 / 3;
+  grid-column: 4;
+  grid-row: 2;
   align-self: end;
 }
 
@@ -14704,9 +14989,14 @@ button.task-gadget-action:disabled {
   }
 
   .case-tools [role='search'],
-  .case-sort {
+  .case-sort,
+  .case-tag-filter-shell {
     grid-column: 1;
     margin-inline: calc(clamp(16px, 2.2vw, 24px) * var(--theme-density));
+  }
+
+  .case-tag-filter-shell {
+    padding: 0;
   }
 
   .case-gadget-column {
@@ -14729,6 +15019,15 @@ button.task-gadget-action:disabled {
   .calendar-event-basics-row,
   .calendar-event-datetime-row {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .calendar-event-basics-row .calendar-event-link-field:first-child,
+  .calendar-event-basics-row .calendar-event-link-field:nth-child(2),
+  .calendar-event-basics-row .calendar-event-link-field:nth-child(3),
+  .calendar-event-basics-row .calendar-event-link-field:nth-child(4),
+  .calendar-event-basics-row > button {
+    grid-column: 1;
+    grid-row: auto;
   }
 
   .calendar-event-meeting-row {
@@ -15000,9 +15299,14 @@ button.task-gadget-action:disabled {
   }
 
   .case-tools [role='search'],
-  .case-sort {
+  .case-sort,
+  .case-tag-filter-shell {
     grid-column: 1;
     margin-inline: calc(clamp(16px, 2.2vw, 24px) * var(--theme-density));
+  }
+
+  .case-tag-filter-shell {
+    padding: 0;
   }
 
   .case-tabs {

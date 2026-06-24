@@ -89,6 +89,19 @@ def test_mail_thread_can_be_assigned_to_case(client) -> None:
     )
     assert case_response.status_code == 200
     case_id = case_response.json()["data"]["case"]["id"]
+    contact_response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Assign Sender",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "assign.sender@example.com", "is_primary": True}
+            ],
+        },
+    )
+    assert contact_response.status_code == 200
+    sender_contact_id = contact_response.json()["data"]["id"]
+
     first_message_id = ingest_mail(
         client,
         gmail_message_id="gmail_case_assign_1",
@@ -124,6 +137,13 @@ def test_mail_thread_can_be_assigned_to_case(client) -> None:
     second_detail = client.get(f"{MAILS_URL}/{second_message_id}")
     assert second_detail.status_code == 200
     assert second_detail.json()["data"]["case_links"][0]["case_id"] == case_id
+
+    stakeholders_response = client.get(f"{CASES_URL}/{case_id}/stakeholders")
+    assert stakeholders_response.status_code == 200
+    assert [
+        (item["contact_id"], item["role"])
+        for item in stakeholders_response.json()["data"]["items"]
+    ] == [(sender_contact_id, "mail_sender")]
 
     unassign_response = client.delete(
         f"{MAILS_URL}/{second_message_id}/case-links/{case_id}",
@@ -173,6 +193,19 @@ def test_mail_ingestion_applies_case_auto_assign_rules(client) -> None:
     assert list_response.status_code == 200
     assert len(list_response.json()["data"]["items"]) == 1
 
+    contact_response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Paper Sender",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "papers@example.com", "is_primary": True}
+            ],
+        },
+    )
+    assert contact_response.status_code == 200
+    paper_sender_contact_id = contact_response.json()["data"]["id"]
+
     message_id = ingest_mail(
         client,
         gmail_message_id="gmail_case_auto_assign",
@@ -191,6 +224,24 @@ def test_mail_ingestion_applies_case_auto_assign_rules(client) -> None:
     assert case_ids["Rule Active Case"] in linked_case_ids
     assert case_ids["Rule Completed Case"] in linked_case_ids
     assert case_ids["Rule Archived Case"] not in linked_case_ids
+
+    active_stakeholders = client.get(
+        f"{CASES_URL}/{case_ids['Rule Active Case']}/stakeholders"
+    )
+    assert active_stakeholders.status_code == 200
+    assert [
+        (item["contact_id"], item["role"])
+        for item in active_stakeholders.json()["data"]["items"]
+    ] == [(paper_sender_contact_id, "mail_sender")]
+
+    completed_stakeholders = client.get(
+        f"{CASES_URL}/{case_ids['Rule Completed Case']}/stakeholders"
+    )
+    assert completed_stakeholders.status_code == 200
+    assert [
+        (item["contact_id"], item["role"])
+        for item in completed_stakeholders.json()["data"]["items"]
+    ] == [(paper_sender_contact_id, "mail_sender")]
 
     spam_subject_message_id = ingest_mail(
         client,
@@ -373,12 +424,96 @@ def patch_gmail_send_response(
     return sent_raw_messages
 
 
-def test_mail_detail_returns_message_state_and_available_actions(client) -> None:
+def test_mail_detail_returns_message_state_and_available_actions(client, database_path) -> None:
     message_id = create_known_sender_mail(
         client,
         subject="Detail API test",
         body_text="This body is stored for detail view.",
     )
+    case_response = client.post(
+        CASES_URL,
+        json={
+            "name": "Mail detail task case",
+            "description": None,
+            "progress_status": "in_progress",
+            "ball_status": "user",
+        },
+    )
+    assert case_response.status_code == 200
+    case_id = case_response.json()["data"]["case"]["id"]
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO tasks (
+              id, case_id, storage_directory_id, parent_task_id, title, description,
+              done_when_text, status, priority, start_at, due_at, estimate_minutes,
+              scheduled_minutes, worked_minutes, source_type, source_id,
+              completed_at, canceled_at, canceled_reason, deleted_at, deleted_reason,
+              created_at, updated_at, version
+            )
+            VALUES (
+              'task_mail_detail_related', ?, NULL, NULL, 'Follow up mail detail', NULL,
+              NULL, 'not_started', 'middle', '2026-05-23', NULL, NULL,
+              0, 0, 'mail', ?,
+              NULL, NULL, NULL, NULL, NULL,
+              '2026-05-23T13:05:00+09:00', '2026-05-23T13:05:00+09:00', 1
+            )
+            """,
+            (case_id, message_id),
+        )
+        connection.execute(
+            """
+            INSERT INTO tasks (
+              id, case_id, storage_directory_id, parent_task_id, title, description,
+              done_when_text, status, priority, start_at, due_at, estimate_minutes,
+              scheduled_minutes, worked_minutes, source_type, source_id,
+              completed_at, canceled_at, canceled_reason, deleted_at, deleted_reason,
+              created_at, updated_at, version
+            )
+            VALUES (
+              'task_mail_detail_manual_link', ?, NULL, NULL, 'Manual linked task', NULL,
+              NULL, 'in_progress', 'high', '2026-05-23', NULL, NULL,
+              0, 0, 'manual', NULL,
+              NULL, NULL, NULL, NULL, NULL,
+              '2026-05-23T13:06:00+09:00', '2026-05-23T13:06:00+09:00', 1
+            )
+            """,
+            (case_id,),
+        )
+        connection.execute(
+            """
+            INSERT INTO task_links (id, task_id, linked_type, linked_id, url, label, created_at)
+            VALUES (
+              'task_link_mail_detail_manual', 'task_mail_detail_manual_link',
+              'mail', ?, NULL, NULL, '2026-05-23T13:06:00+09:00'
+            )
+            """,
+            (message_id,),
+        )
+        connection.execute(
+            """
+            INSERT INTO calendar_events (
+              id, source, external_calendar_id, external_event_id, summary, start_at, end_at,
+              all_day, sync_status, attendance_requirement, created_at, updated_at, version
+            ) VALUES (
+              'calendar_event_mail_detail_related', 'google', 'primary', 'google_mail_detail_event',
+              'Mail detail meeting', '2026-05-24T10:00:00+09:00', '2026-05-24T11:00:00+09:00',
+              0, 'synced', 'unknown', '2026-05-23T13:10:00+09:00', '2026-05-23T13:10:00+09:00', 1
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO calendar_event_links (
+              id, calendar_event_id, linked_type, linked_id, role, created_at, updated_at, version
+            ) VALUES (
+              'calendar_event_link_mail_detail_related', 'calendar_event_mail_detail_related',
+              'mail', ?, 'related', '2026-05-23T13:10:00+09:00', '2026-05-23T13:10:00+09:00', 1
+            )
+            """,
+            (message_id,),
+        )
+        connection.commit()
 
     response = client.get(f"{MAILS_URL}/{message_id}")
 
@@ -412,6 +547,35 @@ def test_mail_detail_returns_message_state_and_available_actions(client) -> None
     assert data["thread_messages"][0]["body_text"] == "This body is stored for detail view."
     assert data["thread_messages"][0]["effective_importance"] == "unclassified"
     assert data["thread_messages"][0]["processed_status"] == "unprocessed"
+    assert data["task_links"] == [
+        {
+            "id": "task_mail_detail_manual_link",
+            "task_id": "task_mail_detail_manual_link",
+            "case_id": case_id,
+            "title": "Manual linked task",
+            "status": "in_progress",
+            "priority": "high",
+        },
+        {
+            "id": "task_mail_detail_related",
+            "task_id": "task_mail_detail_related",
+            "case_id": case_id,
+            "title": "Follow up mail detail",
+            "status": "not_started",
+            "priority": "middle",
+        },
+    ]
+    assert data["calendar_event_links"] == [
+        {
+            "id": "calendar_event_mail_detail_related",
+            "calendar_event_id": "calendar_event_mail_detail_related",
+            "title": "Mail detail meeting",
+            "start_at": "2026-05-24T10:00:00+09:00",
+            "end_at": "2026-05-24T11:00:00+09:00",
+            "all_day": False,
+            "status": None,
+        }
+    ]
     assert "process" in data["available_actions"]
     assert "set_importance" in data["available_actions"]
 

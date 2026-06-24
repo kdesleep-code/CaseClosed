@@ -697,6 +697,210 @@ def test_google_calendar_create_event_posts_to_calendar(
     )
 
 
+def test_google_calendar_event_create_aligns_weekly_start_to_selected_weekday(
+    client,
+    database_path,
+    monkeypatch,
+) -> None:
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings (id, key, value_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "setting_google_gmail_oauth_connection",
+                "google_gmail_oauth_connection",
+                json.dumps(
+                    {
+                        "access_token": "test-access-token",
+                        "token_expires_at": "2099-05-26T23:00:00+09:00",
+                        "connected_at": "2026-05-26T08:00:00+09:00",
+                        "scopes": [
+                            "https://www.googleapis.com/auth/calendar.events",
+                        ],
+                    }
+                ),
+                "2026-05-26T08:00:00+09:00",
+            ),
+        )
+        connection.commit()
+
+    from caseclosed import google_integration
+
+    posted_payloads = []
+
+    def fake_calendar_api_post_json(path, access_token, payload):
+        assert path == "/calendars/primary/events"
+        assert access_token == "test-access-token"
+        posted_payloads.append(payload)
+        return {
+            "id": "weekly_created_event",
+            "summary": payload["summary"],
+            "htmlLink": "https://calendar.google.com/event?eid=weekly_created_event",
+            "start": payload["start"],
+            "end": payload["end"],
+            "recurrence": payload["recurrence"],
+        }
+
+    monkeypatch.setattr(
+        google_integration,
+        "calendar_api_post_json",
+        fake_calendar_api_post_json,
+    )
+
+    response = client.post(
+        "/api/v1/google/gmail/calendar/events",
+        json={
+            "summary": "Weekly Tuesday meeting",
+            "start": "2026-06-15T10:00:00+09:00",
+            "end": "2026-06-15T11:00:00+09:00",
+            "recurrence_rule": "RRULE:FREQ=WEEKLY;BYDAY=TU",
+        },
+    )
+
+    assert response.status_code == 200
+    assert posted_payloads == [
+        {
+            "summary": "Weekly Tuesday meeting",
+            "start": {
+                "dateTime": "2026-06-16T10:00:00+09:00",
+                "timeZone": "Asia/Tokyo",
+            },
+            "end": {
+                "dateTime": "2026-06-16T11:00:00+09:00",
+                "timeZone": "Asia/Tokyo",
+            },
+            "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=TU"],
+        }
+    ]
+
+
+
+def test_google_calendar_event_create_aligns_monthly_start_to_selected_day(
+    client,
+    database_path,
+    monkeypatch,
+) -> None:
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings (id, key, value_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "setting_google_gmail_oauth_connection",
+                "google_gmail_oauth_connection",
+                json.dumps(
+                    {
+                        "access_token": "test-access-token",
+                        "token_expires_at": "2099-05-26T23:00:00+09:00",
+                        "connected_at": "2026-05-26T08:00:00+09:00",
+                        "scopes": [
+                            "https://www.googleapis.com/auth/calendar.events",
+                        ],
+                    }
+                ),
+                "2026-05-26T08:00:00+09:00",
+            ),
+        )
+        connection.commit()
+
+    from caseclosed import google_integration
+
+    posted_payloads = []
+
+    def fake_calendar_api_post_json(path, access_token, payload):
+        posted_payloads.append(payload)
+        return {
+            "id": "monthly_created_event",
+            "summary": payload["summary"],
+            "htmlLink": "https://calendar.google.com/event?eid=monthly_created_event",
+            "start": payload["start"],
+            "end": payload["end"],
+            "recurrence": payload["recurrence"],
+        }
+
+    monkeypatch.setattr(google_integration, "calendar_api_post_json", fake_calendar_api_post_json)
+
+    response = client.post(
+        "/api/v1/google/gmail/calendar/events",
+        json={
+            "summary": "Monthly final day report",
+            "start": "2026-06-15T10:00:00+09:00",
+            "end": "2026-06-15T11:00:00+09:00",
+            "recurrence_rule": "RRULE:FREQ=MONTHLY;BYMONTHDAY=-1",
+            "attendance_requirement": "not_required",
+        },
+    )
+
+    assert response.status_code == 200
+    assert posted_payloads[0]["start"]["dateTime"] == "2026-06-30T10:00:00+09:00"
+    assert posted_payloads[0]["end"]["dateTime"] == "2026-06-30T11:00:00+09:00"
+    assert response.json()["data"]["db_event"]["attendance_requirement"] == "not_required"
+
+
+def test_google_calendar_event_create_aligns_yearly_start_to_selected_date(
+    client,
+    database_path,
+    monkeypatch,
+) -> None:
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings (id, key, value_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "setting_google_gmail_oauth_connection",
+                "google_gmail_oauth_connection",
+                json.dumps(
+                    {
+                        "access_token": "test-access-token",
+                        "token_expires_at": "2099-05-26T23:00:00+09:00",
+                        "connected_at": "2026-05-26T08:00:00+09:00",
+                        "scopes": [
+                            "https://www.googleapis.com/auth/calendar.events",
+                        ],
+                    }
+                ),
+                "2026-05-26T08:00:00+09:00",
+            ),
+        )
+        connection.commit()
+
+    from caseclosed import google_integration
+
+    posted_payloads = []
+
+    def fake_calendar_api_post_json(path, access_token, payload):
+        posted_payloads.append(payload)
+        return {
+            "id": "yearly_created_event",
+            "summary": payload["summary"],
+            "htmlLink": "https://calendar.google.com/event?eid=yearly_created_event",
+            "start": payload["start"],
+            "end": payload["end"],
+            "recurrence": payload["recurrence"],
+        }
+
+    monkeypatch.setattr(google_integration, "calendar_api_post_json", fake_calendar_api_post_json)
+
+    response = client.post(
+        "/api/v1/google/gmail/calendar/events",
+        json={
+            "summary": "Yearly entrance task",
+            "start": "2026-06-15T10:00:00+09:00",
+            "end": "2026-06-15T11:00:00+09:00",
+            "recurrence_rule": "RRULE:FREQ=YEARLY;BYMONTH=10;BYMONTHDAY=1",
+        },
+    )
+
+    assert response.status_code == 200
+    assert posted_payloads[0]["start"]["dateTime"] == "2026-10-01T10:00:00+09:00"
+    assert posted_payloads[0]["end"]["dateTime"] == "2026-10-01T11:00:00+09:00"
+
+
 def test_google_calendar_db_event_delete_deletes_google_event(
     client,
     database_path,

@@ -71,6 +71,25 @@ export type MailCaseLink = {
   title: string
 }
 
+export type MailTaskLink = {
+  id: string
+  task_id: string
+  case_id: string | null
+  title: string
+  status: string
+  priority: string
+}
+
+export type MailCalendarEventLink = {
+  id: string
+  calendar_event_id: string
+  title: string
+  start_at: string
+  end_at: string
+  all_day: boolean
+  status: string | null
+}
+
 export type MailAttachment = {
   id: string
   message_id: string
@@ -165,6 +184,8 @@ export type MailDetail = {
     }
   >
   case_links?: MailCaseLink[]
+  task_links?: MailTaskLink[]
+  calendar_event_links?: MailCalendarEventLink[]
   user_state: {
     user_importance: string | null
     processed_status: string
@@ -537,6 +558,7 @@ export type GoogleCalendarEventCreatePayload = {
   linked_mail_message_id?: string | null
   linked_case_id?: string | null
   academic_series_id?: string | null
+  attendance_requirement?: string | null
 }
 
 export function toJstIsoDateTime(value: string): string {

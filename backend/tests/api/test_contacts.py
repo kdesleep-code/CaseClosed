@@ -1277,3 +1277,34 @@ def test_fixed_importance_rule_update_rewrites_existing_mail_auto_state(
     assert auto_rows == sorted(
         [(first_mail_id, "low"), (second_mail_id, "low")],
     )
+
+def test_fixed_importance_rule_can_be_changed_back_to_llm(client) -> None:
+    contact_response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Rule Reset Sender",
+            "status": "active",
+            "mail_importance_rule_action": "fixed",
+            "mail_importance_rule_importance": "low",
+            "email_addresses": [
+                {"email_address": "rule-reset@example.com", "is_primary": True}
+            ],
+        },
+    )
+    assert contact_response.status_code == 200
+    contact_id = contact_response.json()["data"]["id"]
+
+    update_response = client.patch(
+        f"{CONTACTS_URL}/{contact_id}",
+        json={
+            "mail_importance_rule_action": "llm",
+            "mail_importance_rule_importance": None,
+            "mail_importance_rule_instruction": None,
+        },
+    )
+
+    assert update_response.status_code == 200
+    data = update_response.json()["data"]
+    assert data["mail_importance_rule_action"] == "llm"
+    assert data["mail_importance_rule_importance"] is None
+    assert data["mail_importance_rule_instruction"] is None

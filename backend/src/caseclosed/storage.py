@@ -92,6 +92,7 @@ CONTENT_TYPE_EXTENSIONS = {
 INTERNAL_STORAGE_LOCATION_ID = "storage_location_internal"
 GMAIL_ATTACHMENT_STORAGE_SCOPE = "tmp/gmail-attachments"
 NO_STORE_FILE_HEADERS = {"Cache-Control": "no-store"}
+CACHEABLE_IMAGE_FILE_HEADERS = {"Cache-Control": "private, max-age=604800, immutable"}
 ACTIVE_STORAGE_DIRECTORY_KINDS = ("normal", "case", "task")
 
 
@@ -712,6 +713,19 @@ def storage_location_data(
 
 def storage_object_url(storage_object_id: str) -> str:
     return f"/api/v1/storage/objects/{storage_object_id}/content"
+
+
+def should_record_storage_content_view(storage_object: StorageObject) -> bool:
+    return storage_object.scope == "managed"
+
+
+def storage_content_response_headers(storage_object: StorageObject) -> dict[str, str]:
+    if (
+        storage_object.scope != "managed"
+        and storage_object.content_type.lower().startswith("image/")
+    ):
+        return CACHEABLE_IMAGE_FILE_HEADERS
+    return NO_STORE_FILE_HEADERS
 
 
 def storage_object_id_from_url(value: str | None) -> str | None:
@@ -4031,23 +4045,24 @@ def get_storage_object_version_content(
     version_path = storage_object_version_absolute_path(storage_object, version, session)
     if not version_path.is_file():
         raise json_error(404, "NOT_FOUND", "Storage object version file not found.")
-    record_storage_operation(
-        session,
-        operation_type="viewed",
-        now=jst_iso(),
-        storage_object=storage_object,
-        details={
-            "storage_object_version_id": version.id,
-            "version_number": version.version_number,
-        },
-    )
-    session.commit()
+    if should_record_storage_content_view(storage_object):
+        record_storage_operation(
+            session,
+            operation_type="viewed",
+            now=jst_iso(),
+            storage_object=storage_object,
+            details={
+                "storage_object_version_id": version.id,
+                "version_number": version.version_number,
+            },
+        )
+        session.commit()
     return FileResponse(
         version_path,
         media_type=version.content_type,
         filename=version.original_filename,
         content_disposition_type="inline",
-        headers=NO_STORE_FILE_HEADERS,
+        headers=storage_content_response_headers(storage_object),
     )
 
 
@@ -4145,19 +4160,20 @@ def get_storage_object_content(
     object_path = storage_object_absolute_path(storage_object, session)
     if not object_path.is_file():
         raise json_error(404, "NOT_FOUND", "Storage object file not found.")
-    record_storage_operation(
-        session,
-        operation_type="viewed",
-        now=jst_iso(),
-        storage_object=storage_object,
-    )
-    session.commit()
+    if should_record_storage_content_view(storage_object):
+        record_storage_operation(
+            session,
+            operation_type="viewed",
+            now=jst_iso(),
+            storage_object=storage_object,
+        )
+        session.commit()
     return FileResponse(
         object_path,
         media_type=storage_object.content_type,
         filename=storage_object.original_filename,
         content_disposition_type="inline",
-        headers=NO_STORE_FILE_HEADERS,
+        headers=storage_content_response_headers(storage_object),
     )
 
 

@@ -1167,6 +1167,7 @@ function CaseListView() {
   const [status, setStatus] = useState<CaseListStatus>('user_ball')
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedTag, setSelectedTag] = useState<string | null>(null)
+  const [isTagFilterOpen, setIsTagFilterOpen] = useState(false)
   const [sortMode, setSortMode] = useState('genre_name')
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -1329,27 +1330,50 @@ function CaseListView() {
                 <option value="name">{t('cases.sort.name')}</option>
               </select>
             </label>
-            <div aria-label={t('cases.tags.filter')} className="case-tag-filters">
-              {caseTags.length === 0 ? (
-                <span>{t('cases.tags.filterEmpty')}</span>
-              ) : (
-                caseTags.map((tag) => (
-                  <button
-                    aria-pressed={selectedTag?.toLocaleLowerCase() === tag.toLocaleLowerCase()}
-                    key={tag}
-                    onClick={() =>
-                      setSelectedTag((currentTag) =>
-                        currentTag?.toLocaleLowerCase() === tag.toLocaleLowerCase() ? null : tag,
-                      )
-                    }
-                    type="button"
-                  >
-                    {tag}
-                    <span>{currentTabTagCounts.get(tag.toLocaleLowerCase()) ?? 0}</span>
-                  </button>
-                ))
-              )}
+            <div className="case-tag-filter-shell">
+              <button
+                aria-expanded={isTagFilterOpen}
+                className="case-tag-filter-toggle"
+                onClick={() => setIsTagFilterOpen((current) => !current)}
+                type="button"
+              >
+                <span>{t('cases.tags.filter')}</span>
+                <strong>{selectedTag ?? t('common.all')}</strong>
+              </button>
             </div>
+            {isTagFilterOpen && (
+              <div aria-label={t('cases.tags.filter')} className="case-tag-filters">
+                {caseTags.length === 0 ? (
+                  <span>{t('cases.tags.filterEmpty')}</span>
+                ) : (
+                  <>
+                    <button
+                      aria-pressed={selectedTag === null}
+                      onClick={() => setSelectedTag(null)}
+                      type="button"
+                    >
+                      {t('common.all')}
+                      <span>{cases.length}</span>
+                    </button>
+                    {caseTags.map((tag) => (
+                      <button
+                        aria-pressed={selectedTag?.toLocaleLowerCase() === tag.toLocaleLowerCase()}
+                        key={tag}
+                        onClick={() =>
+                          setSelectedTag((currentTag) =>
+                            currentTag?.toLocaleLowerCase() === tag.toLocaleLowerCase() ? null : tag,
+                          )
+                        }
+                        type="button"
+                      >
+                        {tag}
+                        <span>{currentTabTagCounts.get(tag.toLocaleLowerCase()) ?? 0}</span>
+                      </button>
+                    ))}
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </section>
 

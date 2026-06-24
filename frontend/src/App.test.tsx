@@ -3049,6 +3049,30 @@ describe('Phase 3 contacts screen', () => {
                   version: 1,
                 },
                 {
+                id: 'contact_quiet',
+                display_name: 'Quiet Contact',
+                avatar_url: null,
+                user_memo: null,
+                  status: 'active',
+                  tags: [],
+                  email_addresses: [],
+                  created_at: '2026-05-23T09:00:00+09:00',
+                  updated_at: '2026-05-23T09:00:00+09:00',
+                  version: 1,
+                },
+                {
+                id: 'contact_spam',
+                display_name: 'Spam Contact',
+                avatar_url: null,
+                user_memo: null,
+                  status: 'spam',
+                  tags: [],
+                  email_addresses: [],
+                  created_at: '2026-05-23T09:00:00+09:00',
+                  updated_at: '2026-05-23T09:00:00+09:00',
+                  version: 1,
+                },
+                {
                 id: 'contact_list',
                 display_name: 'Example List',
                 avatar_url: null,
@@ -3075,6 +3099,15 @@ describe('Phase 3 contacts screen', () => {
     render(<App />)
 
     expect(await screen.findByText('Example Student')).toBeInTheDocument()
+    const tagFilterButtons = within(screen.getByLabelText('Contact tag filters')).getAllByRole('button')
+    expect(tagFilterButtons[0]).toHaveAccessibleName('No tag 1')
+    expect(tagFilterButtons[0]).toHaveClass('is-reserved-contact-tag')
+    await user.click(screen.getByRole('button', { name: 'No tag 1' }))
+    expect(screen.queryByText('Example Student')).not.toBeInTheDocument()
+    expect(screen.queryByText('KDE Student')).not.toBeInTheDocument()
+    expect(screen.getByText('Quiet Contact')).toBeInTheDocument()
+    expect(screen.queryByText('Spam Contact')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'No tag 1' }))
     await user.click(screen.getByRole('button', { name: 'Other tags (3)' }))
     await user.click(screen.getByRole('button', { name: 'lab-member 1' }))
 

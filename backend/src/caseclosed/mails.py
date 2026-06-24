@@ -13,6 +13,7 @@ from fastapi import Depends
 from fastapi.responses import FileResponse
 from fastapi.responses import Response
 from pydantic import BaseModel
+from sqlalchemy import and_
 from sqlalchemy import func
 from sqlalchemy import or_
 from sqlalchemy import select
@@ -22,6 +23,8 @@ from caseclosed.auth import json_error
 from caseclosed.contact_selectors import resolve_recipient_selectors
 from caseclosed.db.models import AppSetting
 from caseclosed.db.models import Case
+from caseclosed.db.models import CalendarEvent
+from caseclosed.db.models import CalendarEventLink
 from caseclosed.db.models import CaseMailLink
 from caseclosed.db.models import Contact
 from caseclosed.db.models import ContactEmailAddress
@@ -37,11 +40,14 @@ from caseclosed.db.models import MailSummary
 from caseclosed.db.models import MailThreadSummary
 from caseclosed.db.models import MailUserState
 from caseclosed.db.models import StorageObject
+from caseclosed.db.models import Task
+from caseclosed.db.models import TaskLink
 from caseclosed.db.runtime import get_session
 from caseclosed.db.runtime import jst_now
 from caseclosed.db.runtime import jst_iso
 from caseclosed.email_addressing import normalize_address_list
 from caseclosed.email_addressing import normalize_email_address
+from caseclosed.services.case_mail_stakeholders import ensure_case_stakeholders_for_mail_senders
 from caseclosed.services.mail_ingestion import MailIngestionResult
 from caseclosed.services.mail_ingestion import MockMailInput
 from caseclosed.services.mail_ingestion import apply_contact_mail_importance_rule
@@ -1255,6 +1261,71 @@ def mail_thread_case_link_items(
     ]
 
 
+def mail_thread_task_link_items(
+    session: DatabaseSession,
+    thread_message_ids: list[str],
+) -> list[dict[str, object]]:
+    if len(thread_message_ids) == 0:
+        return []
+    tasks = session.scalars(
+        select(Task)
+        .outerjoin(TaskLink, TaskLink.task_id == Task.id)
+        .where(
+            or_(
+                and_(Task.source_type == "mail", Task.source_id.in_(thread_message_ids)),
+                and_(
+                    TaskLink.linked_type.in_(["mail", "gmail_message"]),
+                    TaskLink.linked_id.in_(thread_message_ids),
+                ),
+            )
+        )
+        .where(Task.deleted_at.is_(None))
+        .group_by(Task.id)
+        .order_by(Task.status.asc(), Task.updated_at.desc(), Task.title.asc(), Task.id.asc())
+    ).all()
+    return [
+        {
+            "id": task.id,
+            "task_id": task.id,
+            "case_id": task.case_id,
+            "title": task.title,
+            "status": task.status,
+            "priority": task.priority,
+        }
+        for task in tasks
+    ]
+
+
+def mail_thread_calendar_event_link_items(
+    session: DatabaseSession,
+    thread_message_ids: list[str],
+) -> list[dict[str, object]]:
+    if len(thread_message_ids) == 0:
+        return []
+    events = session.scalars(
+        select(CalendarEvent)
+        .join(CalendarEventLink, CalendarEventLink.calendar_event_id == CalendarEvent.id)
+        .where(CalendarEventLink.linked_type.in_(["mail", "gmail_message"]))
+        .where(CalendarEventLink.linked_id.in_(thread_message_ids))
+        .where(CalendarEvent.sync_status != "missing")
+        .where(or_(CalendarEvent.google_status.is_(None), CalendarEvent.google_status != "cancelled"))
+        .group_by(CalendarEvent.id)
+        .order_by(CalendarEvent.start_at.desc(), CalendarEvent.summary.asc(), CalendarEvent.id.asc())
+    ).all()
+    return [
+        {
+            "id": event.id,
+            "calendar_event_id": event.id,
+            "title": event.summary,
+            "start_at": event.start_at,
+            "end_at": event.end_at,
+            "all_day": bool(event.all_day),
+            "status": event.google_status,
+        }
+        for event in events
+    ]
+
+
 def ensure_case_for_mail_assignment(session: DatabaseSession, case_id: str) -> Case:
     case = session.get(Case, case_id)
     if case is None:
@@ -1670,6 +1741,8 @@ def detail_data(
             thread_message_ids,
         ),
         "case_links": mail_thread_case_link_items(session, message.thread_id),
+        "task_links": mail_thread_task_link_items(session, thread_message_ids),
+        "calendar_event_links": mail_thread_calendar_event_link_items(session, thread_message_ids),
         "attachments": unique_attachment_items(
             unique_thread_attachments(attachments_by_message_id)
             + [
@@ -2989,6 +3062,7 @@ def assign_mail_thread_to_case(
                 version=1,
             )
         )
+    ensure_case_stakeholders_for_mail_senders(session, case, messages, now=now)
     case.updated_at = now
     case.version += 1
     session.commit()

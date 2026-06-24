@@ -1010,12 +1010,12 @@ def update_contact(
     )
     next_mail_importance_rule_importance = (
         payload.mail_importance_rule_importance
-        if payload.mail_importance_rule_importance is not None
+        if "mail_importance_rule_importance" in payload.model_fields_set
         else contact.mail_importance_rule_importance
     )
     next_mail_importance_rule_instruction = (
         payload.mail_importance_rule_instruction
-        if payload.mail_importance_rule_instruction is not None
+        if "mail_importance_rule_instruction" in payload.model_fields_set
         else contact.mail_importance_rule_instruction
     )
     validate_mail_importance_rule(

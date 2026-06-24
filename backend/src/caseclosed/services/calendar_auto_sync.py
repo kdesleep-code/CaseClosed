@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import threading
+import time
 
 from caseclosed.db import runtime
 from caseclosed.google_integration import google_calendar_auto_sync_settings_data
 from caseclosed.google_integration import run_google_calendar_auto_sync_once
+
+logger = logging.getLogger("uvicorn.error")
 
 
 @dataclass
@@ -37,11 +41,25 @@ class CalendarAutoSyncSupervisor:
             return
         while not self._stop_event.is_set():
             interval_seconds = 60 * 60
+            started_at = time.perf_counter()
             try:
                 with runtime.SessionLocal() as session:
                     settings = google_calendar_auto_sync_settings_data(session)
                     interval_seconds = int(settings["interval_minutes"]) * 60
-                    run_google_calendar_auto_sync_once(session)
+                    logger.info(
+                        "Calendar auto sync starting interval_seconds=%s enabled=%s",
+                        interval_seconds,
+                        settings.get("enabled"),
+                    )
+                    result = run_google_calendar_auto_sync_once(session)
+                    logger.info(
+                        "Calendar auto sync finished duration_seconds=%.3f result=%s",
+                        time.perf_counter() - started_at,
+                        result,
+                    )
             except Exception:
-                pass
+                logger.exception(
+                    "Calendar auto sync failed duration_seconds=%.3f",
+                    time.perf_counter() - started_at,
+                )
             self._stop_event.wait(max(5 * 60, interval_seconds))

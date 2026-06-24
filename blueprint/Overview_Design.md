@@ -56,11 +56,15 @@ CaseClosed は、大学教員として日々発生する研究・教育・事務
 
 自動処理結果は、専用カラムまたは専用テーブルに保存し、最終的にUIで表示する effective 値は、ユーザー確定値を最優先として計算する。
 
-### 2.6 SQLite正本とSingle DB Writer
+### 2.6 SQLite正本と更新経路
 
-本アプリの正本DBは SQLite とする。書き込み衝突を避けるため、業務テーブルへの更新は Single DB Writer に集約する。
+本アプリの正本DBは SQLite とする。
 
-Web/APIやWorkerは業務テーブルへ直接 write しない。ユーザー操作や自動処理は Write Request として投入し、Single DB Writer が順次反映する。
+現行実装では、Web/APIおよびWorkerが、入力検証・権限確認・競合確認を行った上で、リクエストまたはJob単位のDBトランザクション内で業務テーブルを直接更新する。
+
+`write_requests` / Single DB Writer は、将来同時書き込み負荷が増えた場合に導入可能な拡張方針として扱う。現行仕様として、通常のCase / Mail / Task / Calendar / Storage更新に必須ではない。
+
+ユーザーが明示確定した値を守る原則は維持する。自動処理やLLM処理は、ユーザー値を上書きせず、専用カラム・専用テーブル・effective値計算で反映する。
 
 ---
 

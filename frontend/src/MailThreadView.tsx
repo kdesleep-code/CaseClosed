@@ -53,6 +53,7 @@ type CalendarDraftState = {
   startTime: string
   endTime: string
   location: string
+  attendanceRequirement: string
   description: string
 }
 
@@ -1796,6 +1797,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
         startTime: timePart(result.prefill.start_at),
         endTime: timePart(result.prefill.end_at),
         location: result.prefill.location ?? '',
+        attendanceRequirement: 'required',
         description: result.prefill.description ?? '',
       })
     } catch (requestError) {
@@ -1861,6 +1863,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
         time_zone: calendarDraft.prefill.time_zone || 'Asia/Tokyo',
         linked_mail_message_id: calendarDraft.message.id,
         linked_case_id: linkedCaseId,
+        attendance_requirement: calendarDraft.attendanceRequirement,
       })
       setNotice(t('mail.thread.calendarCreated'))
       setCalendarDraft(null)
@@ -1931,6 +1934,17 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
               onChange={(event) => updateCalendarDraft({ location: event.target.value })}
               value={calendarDraft.location}
             />
+          </label>
+          <label>
+            {t('calendar.event.attendance')}
+            <select
+              disabled={busy}
+              onChange={(event) => updateCalendarDraft({ attendanceRequirement: event.target.value })}
+              value={calendarDraft.attendanceRequirement}
+            >
+              <option value="required">{t('calendar.event.attendanceRequired')}</option>
+              <option value="not_required">{t('calendar.event.attendanceOptional')}</option>
+            </select>
           </label>
           <label>
             {t('mail.thread.calendarCase')}
@@ -2281,12 +2295,13 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
   })
   const summaryItems = detail.summary?.items ?? []
   const assignedCaseLinks = detail.case_links ?? []
+  const relatedTaskLinks = detail.task_links ?? []
+  const relatedCalendarEventLinks = detail.calendar_event_links ?? []
   const focusedMessage =
     detail.thread_messages.find((threadMessage) => threadMessage.id === focusMessageId) ??
     detail.thread_messages.find((threadMessage) => threadMessage.id === messageId) ??
     detail.message
   const mailListHref = mailListHrefFor(focusedMessage)
-  const returnHref = returnToHrefFromLocation() ?? mailListHref
   const gmailThreadLink =
     detail.message.gmail_link ??
     threadMessages.find((message) => message.gmail_link !== null)?.gmail_link ??
@@ -2330,54 +2345,98 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                 </a>
               )}
             </div>
-            <div className="mail-thread-case-links">
-              <span>{t('mail.thread.assignedCases')}</span>
-              <div className="mail-thread-case-badges">
-                {assignedCaseLinks.length === 0 ? (
-                  <span className="mail-thread-case-empty">
-                    {t('mail.thread.noAssignedCases')}
-                  </span>
-                ) : (
-                  assignedCaseLinks.map((caseLink) => (
-                    <span className="mail-thread-case-badge-wrap" key={caseLink.case_id}>
-                      {caseAssignEditing ? (
-                        <span className="mail-thread-case-badge mail-thread-case-badge-editing">
-                          {caseLink.title}
-                        </span>
-                      ) : (
-                        <AppLink
-                          className="mail-thread-case-badge"
-                          href={`/cases/${encodeURIComponent(caseLink.case_id)}`}
-                        >
-                          {caseLink.title}
-                        </AppLink>
-                      )}
-                      {caseAssignEditing && (
-                        <button
-                          aria-label={t('mail.thread.caseUnassign', {
-                            name: caseLink.title,
-                          })}
-                          className="mail-thread-case-badge-remove"
-                          disabled={caseAssignBusy}
-                          onClick={() => void handleUnassignCase(caseLink.case_id, caseLink.title)}
-                          type="button"
-                        >
-                          ×
-                        </button>
-                      )}
+            <div className="mail-thread-related-badge-row">
+              <div className="mail-thread-case-links">
+                <span>{t('mail.thread.assignedCases')}</span>
+                <div className="mail-thread-case-badges">
+                  {assignedCaseLinks.length === 0 ? (
+                    <span className="mail-thread-case-empty">
+                      {t('mail.thread.noAssignedCases')}
                     </span>
-                  ))
-                )}
+                  ) : (
+                    assignedCaseLinks.map((caseLink) => (
+                      <span className="mail-thread-case-badge-wrap" key={caseLink.case_id}>
+                        {caseAssignEditing ? (
+                          <span className="mail-thread-case-badge mail-thread-case-badge-editing">
+                            {caseLink.title}
+                          </span>
+                        ) : (
+                          <AppLink
+                            className="mail-thread-case-badge"
+                            href={`/cases/${encodeURIComponent(caseLink.case_id)}`}
+                          >
+                            {caseLink.title}
+                          </AppLink>
+                        )}
+                        {caseAssignEditing && (
+                          <button
+                            aria-label={t('mail.thread.caseUnassign', {
+                              name: caseLink.title,
+                            })}
+                            className="mail-thread-case-badge-remove"
+                            disabled={caseAssignBusy}
+                            onClick={() => void handleUnassignCase(caseLink.case_id, caseLink.title)}
+                            type="button"
+                          >
+                            ×
+                          </button>
+                        )}
+                      </span>
+                    ))
+                  )}
+                </div>
+                <button
+                  aria-expanded={caseAssignEditing}
+                  className="mail-thread-case-settings"
+                  onClick={() => setCaseAssignEditing((current) => !current)}
+                  title={t('mail.thread.caseAssignSettings')}
+                  type="button"
+                >
+                  {t('mail.thread.caseAssignSettingsShort')}
+                </button>
               </div>
-              <button
-                aria-expanded={caseAssignEditing}
-                className="mail-thread-case-settings"
-                onClick={() => setCaseAssignEditing((current) => !current)}
-                title={t('mail.thread.caseAssignSettings')}
-                type="button"
-              >
-                {t('mail.thread.caseAssignSettingsShort')}
-              </button>
+              <div className="mail-thread-case-links mail-thread-task-links">
+                <span>{t('mail.thread.relatedTasks')}</span>
+                <div className="mail-thread-case-badges">
+                  {relatedTaskLinks.length === 0 ? (
+                    <span className="mail-thread-case-empty">
+                      {t('mail.thread.noRelatedTasks')}
+                    </span>
+                  ) : (
+                    relatedTaskLinks.map((taskLink) => (
+                      <AppLink
+                        className="mail-thread-case-badge mail-thread-task-badge"
+                        href={`/tasks/${encodeURIComponent(taskLink.task_id)}`}
+                        key={taskLink.task_id}
+                        title={`${taskLink.status} / ${taskLink.priority}`}
+                      >
+                        {taskLink.title}
+                      </AppLink>
+                    ))
+                  )}
+                </div>
+              </div>
+              <div className="mail-thread-case-links mail-thread-calendar-links">
+                <span>{t('mail.thread.relatedCalendarEvents')}</span>
+                <div className="mail-thread-case-badges">
+                  {relatedCalendarEventLinks.length === 0 ? (
+                    <span className="mail-thread-case-empty">
+                      {t('mail.thread.noRelatedCalendarEvents')}
+                    </span>
+                  ) : (
+                    relatedCalendarEventLinks.map((eventLink) => (
+                      <AppLink
+                        className="mail-thread-case-badge mail-thread-calendar-badge"
+                        href={`/calendar/events/${encodeURIComponent(eventLink.calendar_event_id)}`}
+                        key={eventLink.calendar_event_id}
+                        title={eventLink.start_at.replace('T', ' ')}
+                      >
+                        {eventLink.title || t('calendar.noTitle')}
+                      </AppLink>
+                    ))
+                  )}
+                </div>
+              </div>
             </div>
             {caseAssignEditing && (
               <div className="mail-thread-case-editor">
@@ -2414,7 +2473,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
             ariaLabelKey="mail.thread.navLabel"
             className="mail-thread-nav"
             items={[
-              { href: returnHref, labelKey: 'nav.mail' },
+              { href: mailListHref, labelKey: 'nav.mail' },
               { href: '/', labelKey: 'top.heading' },
               { href: '/follow-ups', labelKey: 'nav.followUps' },
               { href: '/cases', labelKey: 'nav.cases' },

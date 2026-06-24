@@ -44,6 +44,7 @@ export type ContactsInitialData =
 
 const maxCustomTabs = 4
 const maxCustomTabNameLength = 12
+const noTagFilterValue = '__caseclosed_no_tag__'
 const reservedContactRoleTags = new Set([
   'collaborator',
   'lab-alumni',
@@ -166,6 +167,16 @@ function isReservedContactRoleTag(tag: string) {
 
 function contactTagClassName(tag: string) {
   return isReservedContactRoleTag(tag) ? 'is-reserved-contact-tag' : undefined
+}
+
+function contactMatchesSelectedTagFilter(contact: Contact, selectedTagFilter: string | null) {
+  if (selectedTagFilter === null) {
+    return true
+  }
+  if (selectedTagFilter === noTagFilterValue) {
+    return contact.tags.length === 0 && contact.status !== 'spam'
+  }
+  return contact.tags.some((tag) => tag === selectedTagFilter)
 }
 
 function customTabMatches(contact: Contact, expression: string) {
@@ -521,6 +532,19 @@ function ContactsView({
     )
   }
 
+  function matchingMergeTargetContact(displayName: string, kind: ContactKind) {
+    const normalizedDisplayName = displayName.trim().toLocaleLowerCase()
+    if (normalizedDisplayName === '' || kind === 'mailing_list') {
+      return null
+    }
+    return contacts.find(
+      (contact) =>
+        contact.display_name.trim().toLocaleLowerCase() === normalizedDisplayName &&
+        contactKind(contact) === kind &&
+        (contactKind(contact) === 'person' || contactKind(contact) === 'service'),
+    ) ?? null
+  }
+
   function handlePendingDecision(
     item: UnresolvedFromAddress,
     decision: PendingContactStatus,
@@ -573,6 +597,15 @@ function ContactsView({
     setBusyEmailAddress(item.email_address)
 
     try {
+      const mergeTargetContact = matchingMergeTargetContact(nextDisplayName, kind)
+      const shouldMerge =
+        mergeTargetContact !== null &&
+        window.confirm(
+          t('contacts.pending.mergeConfirm', {
+            source: nextDisplayName,
+            target: mergeTargetContact.display_name,
+          }),
+        )
       const createdContact = await createContact({
         display_name: nextDisplayName,
         user_memo: '',
@@ -589,11 +622,23 @@ function ContactsView({
         ],
         source_suggestion_id: item.suggestion?.id ?? null,
       })
-      setContacts((currentContacts) => [...currentContacts, createdContact])
+      if (shouldMerge && mergeTargetContact !== null) {
+        const response = await mergeContact(createdContact.id, mergeTargetContact.id)
+        setContacts((currentContacts) =>
+          currentContacts
+            .filter((contact) => contact.id !== response.deleted_contact_id)
+            .map((contact) =>
+              contact.id === response.target_contact.id ? response.target_contact : contact,
+            ),
+        )
+        setNotice(t('contacts.pending.createdAndMerged'))
+      } else {
+        setContacts((currentContacts) => [...currentContacts, createdContact])
+        setNotice(
+          status === 'skipped' ? t('contacts.skippedCreated') : t('contacts.created'),
+        )
+      }
       removePendingEmailAddress(item.email_address)
-      setNotice(
-        status === 'skipped' ? t('contacts.skippedCreated') : t('contacts.created'),
-      )
     } catch (requestError) {
       setError(describeError(requestError))
     } finally {
@@ -1076,11 +1121,7 @@ function ContactsView({
   const mergeToolContacts = contacts
     .filter((contact) => contactKind(contact) === 'person' || contactKind(contact) === 'service')
     .filter(contactMatchesCurrentTabs)
-    .filter(
-      (contact) =>
-        selectedTagFilter === null ||
-        contact.tags.some((tag) => tag === selectedTagFilter),
-    )
+    .filter((contact) => contactMatchesSelectedTagFilter(contact, selectedTagFilter))
     .toSorted((first, second) =>
       first.display_name.localeCompare(second.display_name),
     )
@@ -1111,6 +1152,10 @@ function ContactsView({
   }, new Map<string, number>())].sort(([firstTag], [secondTag]) =>
     firstTag.localeCompare(secondTag),
   )
+  const noTagContactCount = tagSourceContacts.filter(
+    (contact) => contact.tags.length === 0 && contact.status !== 'spam',
+  ).length
+  const hasVisibleTagFilters = tagCounts.length > 0 || noTagContactCount > 0
   const customTabTags = tagsUsedInCustomTabs(customTabs)
   const primaryTagCounts = tagCounts.filter(
     ([tag, count]) =>
@@ -1123,6 +1168,22 @@ function ContactsView({
   const visibleTagCounts = isTagFilterExpanded
     ? [...primaryTagCounts, ...collapsedTagCounts]
     : primaryTagCounts
+
+  useEffect(() => {
+    if (selectedTagFilter === null) {
+      return
+    }
+    if (selectedTagFilter === noTagFilterValue) {
+      if (noTagContactCount === 0) {
+        setSelectedTagFilter(null)
+      }
+      return
+    }
+    if (!tagCounts.some(([tag]) => tag === selectedTagFilter)) {
+      setSelectedTagFilter(null)
+    }
+  }, [noTagContactCount, selectedTagFilter, tagCounts])
+
   const areTagFiltersInteractive = kindFilter === 'person'
   const activeListTabId =
     activeCustomTabId === null
@@ -1153,10 +1214,7 @@ function ContactsView({
       return true
     })
     .filter((contact) => {
-      if (
-        selectedTagFilter !== null &&
-        !contact.tags.some((tag) => tag === selectedTagFilter)
-      ) {
+      if (!contactMatchesSelectedTagFilter(contact, selectedTagFilter)) {
         return false
       }
       const queryTerms = searchQuery
@@ -1434,16 +1492,33 @@ function ContactsView({
                     />
                   </label>
                   <div
-                    aria-hidden={tagCounts.length === 0 ? true : undefined}
+                    aria-hidden={hasVisibleTagFilters ? undefined : true}
                     aria-label={
-                      tagCounts.length > 0 ? t('contacts.tagFilters.label') : undefined
+                      hasVisibleTagFilters ? t('contacts.tagFilters.label') : undefined
                     }
                     className={`contact-tag-filters${
-                      tagCounts.length === 0 ? ' contact-tag-filters-placeholder' : ''
+                      hasVisibleTagFilters ? '' : ' contact-tag-filters-placeholder'
                     }${
                       areTagFiltersInteractive ? '' : ' contact-tag-filters-disabled'
                     }`}
                   >
+                    {noTagContactCount > 0 && (
+                      <button
+                        aria-label={`${t('contacts.tagFilters.noTag')} ${noTagContactCount}`}
+                        aria-pressed={selectedTagFilter === noTagFilterValue}
+                        className="is-reserved-contact-tag"
+                        disabled={!areTagFiltersInteractive}
+                        onClick={() =>
+                          setSelectedTagFilter((currentTag) =>
+                            currentTag === noTagFilterValue ? null : noTagFilterValue,
+                          )
+                        }
+                        type="button"
+                      >
+                        {t('contacts.tagFilters.noTag')}
+                        <span>{noTagContactCount}</span>
+                      </button>
+                    )}
                     {visibleTagCounts.map(([tag, count]) => (
                       <button
                         aria-label={`${tag} ${count}`}

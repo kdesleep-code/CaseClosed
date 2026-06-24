@@ -7,6 +7,7 @@ import {
   listGoogleCalendars,
   moveCalendarDbEvent,
   syncGoogleCalendarEvents,
+  updateGoogleCalendarAutoSyncSettings,
   toJstIsoDateTime,
   updateCalendarDbEventTitleFit,
 } from './phase4Api'
@@ -557,6 +558,7 @@ function CalendarView() {
   } | null>(null)
   const [draggedEventId, setDraggedEventId] = useState<string | null>(null)
   const [dragGrabOffsetMinutes, setDragGrabOffsetMinutes] = useState(0)
+  const [hasLoadedCalendarSourceSettings, setHasLoadedCalendarSourceSettings] = useState(false)
 
   const selectedMonthDays = useMemo(() => calendarDays(calendarMonth), [calendarMonth])
   const selectedWeekDays = useMemo(() => weekDays(selectedDate), [selectedDate])
@@ -637,9 +639,23 @@ function CalendarView() {
     })
     .filter((item): item is NonNullable<typeof item> => item !== null)
   const positionedWeekEvents = [
-    ...positionedWeekEventBase
-      .filter((item) => item.isAllDay)
-      .map((item) => ({ ...item, lane: 0, laneCount: 1, laneOffsetRatio: 0, laneWidthRatio: 1 })),
+    ...selectedWeekDays.flatMap((_, dayIndex) => {
+      const allDayEvents = positionedWeekEventBase
+        .filter((item) => item.dayIndex === dayIndex && item.isAllDay)
+        .sort(
+          (left, right) =>
+            calendarEventStartSortKey(left.event) - calendarEventStartSortKey(right.event) ||
+            (left.event.summary || '').localeCompare(right.event.summary || ''),
+        )
+      const laneCount = Math.max(1, allDayEvents.length)
+      return allDayEvents.map((item, lane) => ({
+        ...item,
+        lane,
+        laneCount,
+        laneOffsetRatio: lane / laneCount,
+        laneWidthRatio: 1 / laneCount,
+      }))
+    }),
     ...selectedWeekDays.flatMap((_, dayIndex) => {
       const dayEvents = positionedWeekEventBase
         .filter((item) => item.dayIndex === dayIndex && !item.isAllDay)
@@ -729,7 +745,18 @@ function CalendarView() {
       const calendarItems = await listGoogleCalendars()
       setCalendars(calendarItems)
       const validIds = new Set(calendarItems.map((calendar) => calendar.id))
-      const nextCalendarIds = selectedCalendarIds.filter((id) => validIds.has(id))
+      const primaryCalendarId = calendarItems.find((calendar) => calendar.primary)?.id ?? 'primary'
+      const isDefaultPrimarySelection = (calendarIds: string[]) =>
+        calendarIds.length === 1 &&
+        (calendarIds[0] === 'primary' || calendarIds[0] === primaryCalendarId)
+      const serverCalendarIds = status.calendar_auto_sync.calendar_ids
+      const savedCalendarIds = hasLoadedCalendarSourceSettings
+        ? selectedCalendarIds
+        : isDefaultPrimarySelection(serverCalendarIds) &&
+            !isDefaultPrimarySelection(selectedCalendarIds)
+          ? selectedCalendarIds
+          : serverCalendarIds
+      const nextCalendarIds = savedCalendarIds.filter((id) => validIds.has(id))
       if (nextCalendarIds.length === 0) {
         const fallbackId =
           calendarItems.find((calendar) => calendar.primary)?.id ??
@@ -737,6 +764,7 @@ function CalendarView() {
           'primary'
         nextCalendarIds.push(fallbackId)
       }
+      setHasLoadedCalendarSourceSettings(true)
       if (nextCalendarIds.join('\n') !== selectedCalendarIds.join('\n')) {
         setSelectedCalendarIds(nextCalendarIds)
       }
@@ -917,6 +945,23 @@ function CalendarView() {
     })
   }
 
+  async function saveCalendarSourceSelection(calendarIds: string[]) {
+    if (calendarAutoSync === null) {
+      return
+    }
+    try {
+      const settings = await updateGoogleCalendarAutoSyncSettings({
+        enabled: calendarAutoSync.enabled,
+        interval_minutes: calendarAutoSync.interval_minutes,
+        calendar_ids: calendarIds,
+        month_count: calendarAutoSync.month_count,
+      })
+      setCalendarAutoSync(settings)
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : t('app.requestFailed'))
+    }
+  }
+
   useEffect(() => {
     const timerId = window.setInterval(() => setNow(new Date()), 60000)
     return () => window.clearInterval(timerId)
@@ -931,7 +976,10 @@ function CalendarView() {
     } catch {
       // Calendar source selection is a convenience setting; ignore storage failures.
     }
-  }, [selectedCalendarIds])
+    if (hasLoadedCalendarSourceSettings) {
+      void saveCalendarSourceSelection(selectedCalendarIds)
+    }
+  }, [hasLoadedCalendarSourceSettings, selectedCalendarIds])
 
   function jumpMonth(amount: number) {
     const nextMonth = addMonths(calendarMonth, amount)
@@ -1099,13 +1147,9 @@ function CalendarView() {
                         setDragGrabOffsetMinutes(0)
                       }}
                       style={{
-                        left: isAllDay
-                          ? `calc(58px + ((100% - 58px) / 7) * ${dayIndex} + 4px)`
-                          : `calc(58px + ((100% - 58px) / 7) * ${dayIndex} + (((100% - 58px) / 7 - 8px) * ${laneOffsetRatio}) + 4px)`,
+                        left: `calc(58px + ((100% - 58px) / 7) * ${dayIndex} + (((100% - 58px) / 7 - 8px) * ${laneOffsetRatio}) + 4px)`,
                         top: `${top}px`,
-                        width: isAllDay
-                          ? 'calc((100% - 58px) / 7 - 8px)'
-                          : `calc(((100% - 58px) / 7 - 8px) * ${laneWidthRatio} - 2px)`,
+                        width: `calc(((100% - 58px) / 7 - 8px) * ${laneWidthRatio} - 2px)`,
                         height: `${height}px`,
                         ...savedTitleStyle,
                       }}

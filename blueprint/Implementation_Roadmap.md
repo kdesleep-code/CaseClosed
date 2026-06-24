@@ -282,7 +282,7 @@ API:
 
 ### 完了条件
 
-- write_requestがSingle DB Writer経由で反映される
+- DB更新がAPI/Workerのtransactionで反映される
 - Jobがpending -> running -> succeeded/failedへ遷移する
 - stale jobを検出できる
 - external_operationのunknownを手動解決できる
@@ -1320,7 +1320,7 @@ CaseClosedの設計書群に従って、[機能名] を実装してください�
 ## Phase 2
 
 - Job状態が見えるか
-- Write RequestがSingle DB Writer経由か
+- DB更新がAPI/Workerのtransactionで反映されるか
 - unknownが自動再実行されないか
 
 ## Phase 3
@@ -1365,7 +1365,7 @@ CaseClosedの設計書群に従って、[機能名] を実装してください�
 - Case詳細が案件の基地になっているか
 - Task化でprocessedになるか
 - Task削除が論理削除か
-- Case Closed条件が効いているか
+- Case Completed条件が効いているか
 
 ## Phase 9
 
@@ -1419,7 +1419,7 @@ Pending中はLLM自動処理が止まる
 
 Phase 6のStorage基盤は、手元ファイル・メール添付・Contact画像・Storage一覧/詳細/検索/ディレクトリ・添付元メール参照・LLM input許可切替・物理削除・Storage操作履歴・ファイル更新バージョン管理・LLM Digest・Version Differenceまで実装済みである。Storage / Case Stored Files / Task Filesは、共通Storage Explorerを用いる方針に整理済みで、Root Directoryだけを変えて同じ移動・ドロップ・右クリック操作を使う。ディレクトリの再帰ドロップ、ディレクトリ移動、Case専用ディレクトリからCase本体へ戻る導線、右クリック「別ウィンドウで開く」、`.eml`表示、Markdown表表示を含む。
 
-Phase 7のCase連携基盤はFix扱いとする。Case一覧/詳細、Case Genre、Case専用Storage Directory、引継ぎ資料特殊ディレクトリ、file_linksによる同一Storage objectの複数Case参照、Overview / Open When / Closed When / Genre / tags、Stakeholders、Current Situation手動生成、Mail Thread手動Assign / Remove、Case詳細Assigned Mail検索、Stored Files Window、右ガジェットCalendar枠、Case Toolsアイコンランチャーまで実装済みである。Case Toolsは「アイコン + URL」の単純なリンク集合として扱い、通常表示はアイコンのみ、設定時に追加・削除・ドラッグ並べ替えを行う。Case Tool Iconsはfile-iconsと同系統の仕組みで、登録URLとの部分一致が最も長いアイコンを採用する。
+Phase 7のCase連携基盤はFix扱いとする。Case一覧/詳細、Case Genre、Case専用Storage Directory、引継ぎ資料特殊ディレクトリ、file_linksによる同一Storage objectの複数Case参照、Overview / Open When / Closed When / Genre / tags、Stakeholders、Current Situation手動生成、Mail Thread手動Assign / Remove、メール送信者のCase Stakeholder自動登録、Case詳細Assigned Mail検索、Stored Files Window、右ガジェットCalendar枠、Case Toolsアイコンランチャーまで実装済みである。Case Toolsは「アイコン + URL」の単純なリンク集合として扱い、通常表示はアイコンのみ、設定時に追加・削除・ドラッグ並べ替えを行う。Case Tool Iconsはfile-iconsと同系統の仕組みで、登録URLとの部分一致が最も長いアイコンを採用する。
 
 Current Situationは自動生成せず、ユーザーが「今どうなっていたか」を確認したい時にRefreshを押して生成する。入力にはCase概要、関連メールThread要約、Task情報、Calendar実データ、Case Storage内File Digestを含める。
 
@@ -1429,11 +1429,11 @@ Caseの繰り返し案件は、初期運用では独立したCase Series機能�
 
 Phase 8のTask中核はFix扱いとする。Task DB/API、Task一覧/詳細/新規作成/編集/削除/Done、Not Started / Inbox / Done / Archived、Start DateによるIn Progress化、Case詳細のNext Task / New Task導線、メールからLLM Task生成、Task Files、Progress Memo時系列、Completed Task FilesのCompleted Tasksディレクトリ移動、Recurring Task（毎週 / 2週に1度 / 毎月 / 毎年、月末・月末前日・第N曜日・最終曜日、Repeat設定から初回Start / Due Date自動補完）まで実装済みである。Case詳細のNext Taskは、Inbox相当の開始済み未完了Taskを優先し、存在しない場合だけNot Started Taskを表示する。表示時はInbox / Not Startedのバッジで区別する。
 
-Phase 9のCalendar連携は中核実装済みである。Google Calendar OAuth scope拡張、Calendar API有効化前提、Calendar Event DB、Google Calendar同期ロード、複数Calendar Source同時表示、週表示、月ミニカレンダー、Upcoming、過去/参加不要イベントの薄表示、重複イベントの横分割、終日/複数日イベント、イベント詳細/編集、Calendar上DnD日時変更、手入力新規Event作成、メールからLLMでEvent作成、Case / Task / Mailリンク編集、Case詳細Calendarガジェット、Case Next Event接続まで実装済みである。Google Calendarを正本とし、DBは表示キャッシュとCaseClosed独自メタデータの保持に使う。
+Phase 9のCalendar連携は中核実装済みである。Google Calendar OAuth scope拡張、Calendar API有効化前提、Calendar Event DB、Google Calendar同期ロード、複数Calendar Source同時表示、Calendar Source選択のサーバー保存、週表示、月ミニカレンダー、Upcoming、過去/参加不要イベントの薄表示、重複イベントの横分割、終日/複数全日イベントの横分割、イベント詳細/編集、Calendar上DnD日時変更、手入力新規Event作成、週次/隔週予定の初回曜日補正、メールからLLMでEvent作成、Case / Task / Mailリンク編集、Case詳細Calendarガジェット、Case Next Event接続まで実装済みである。Google Calendarを正本とし、DBは表示キャッシュとCaseClosed独自メタデータの保持に使う。
 
 引継ぎ資料からのTask群生成を追加実装済みである。Case詳細のNew Task横から専用画面へ移動し、Caseの「引継ぎ資料」ディレクトリ内ファイルを選択して、追加プロンプトとともにLLMへ渡す。LLMはTask候補群を返し、ユーザーはNew Task画面に1件ずつ事前入力された状態で確認し、登録またはSkipする。入力ファイルはMarkdown / EML / DOCX / XLSXのテキスト抽出に対応し、Due Dateだけ取得できた場合はStart DateをDue Dateの1週間前で補完する。
 
-フロントエンド共通化として、上部ナビゲーションはページ側が必要な導線を宣言する形へ整理し、Suggest入力はバッジ化・直下候補表示を共通コンポーネント化する方針とした。Mail宛先、Case/Taskリンク、Stakeholder、Calendar Linkなどは順次このSuggestInputへ寄せる。
+フロントエンド共通化として、上部ナビゲーションはページ側が必要な導線を宣言する形へ整理し、Escによるreturn_to/自然戻り先/ブラウザ履歴の戻る操作を共通化した。Suggest入力はバッジ化・直下候補表示を共通コンポーネント化する方針とした。Mail宛先、Case/Taskリンク、Stakeholder、Calendar Linkなどは順次このSuggestInputへ寄せる。
 
 Phase 6で未実装として残すもの:
 

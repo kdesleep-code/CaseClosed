@@ -49,6 +49,7 @@ from caseclosed.db.runtime import ensure_case_storage_directory
 from caseclosed.db.runtime import get_session
 from caseclosed.db.runtime import jst_iso
 from caseclosed.email_addressing import normalize_email_address
+from caseclosed.services.case_mail_stakeholders import sync_all_case_stakeholders_from_linked_mail_senders
 from caseclosed.services.llm_provider import FUNCTION_TYPE_CASE_PREFILL_GENERATION
 from caseclosed.services.llm_provider import OpenAIProviderError
 from caseclosed.services.llm_provider import build_case_current_situation_provider
@@ -415,11 +416,18 @@ def case_task_counts(session: DatabaseSession, case_id: str) -> tuple[int, int]:
 
 
 def case_has_open_mail(session: DatabaseSession, case_id: str) -> bool:
+    effective_importance = func.coalesce(
+        MailUserState.user_importance,
+        MailAutoState.effective_importance,
+        "unclassified",
+    )
     open_mail_id = session.scalar(
         select(CaseMailLink.message_id)
         .outerjoin(MailUserState, MailUserState.message_id == CaseMailLink.message_id)
+        .outerjoin(MailAutoState, MailAutoState.message_id == CaseMailLink.message_id)
         .where(CaseMailLink.case_id == case_id)
         .where(or_(MailUserState.id.is_(None), MailUserState.processed_status != "processed"))
+        .where(effective_importance.notin_(["low", "skip"]))
         .limit(1)
     )
     return open_mail_id is not None
@@ -1042,7 +1050,7 @@ def primary_contact_email(
     primary = session.scalar(
         select(ContactEmailAddress.email_address)
         .where(ContactEmailAddress.contact_id == contact_id)
-        .where(ContactEmailAddress.resolution_status == "active")
+        .where(ContactEmailAddress.status == "active")
         .where(ContactEmailAddress.is_primary == 1)
         .order_by(ContactEmailAddress.email_address.asc())
         .limit(1)
@@ -1052,7 +1060,7 @@ def primary_contact_email(
     return session.scalar(
         select(ContactEmailAddress.email_address)
         .where(ContactEmailAddress.contact_id == contact_id)
-        .where(ContactEmailAddress.resolution_status == "active")
+        .where(ContactEmailAddress.status == "active")
         .order_by(ContactEmailAddress.email_address.asc())
         .limit(1)
     )
@@ -1569,6 +1577,15 @@ def delete_case_tool_icon_setting(
     )
     session.commit()
     return {"ok": True, "data": {"deleted": True}}
+
+
+@router.post("/sync-mail-sender-stakeholders")
+def sync_mail_sender_stakeholders(
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    added_count = sync_all_case_stakeholders_from_linked_mail_senders(session)
+    session.commit()
+    return {"ok": True, "data": {"added_count": added_count}}
 
 
 @router.get("/{case_id}")

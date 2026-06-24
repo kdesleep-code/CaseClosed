@@ -721,6 +721,90 @@ def test_future_start_task_does_not_put_case_in_user_ball(client, database_path)
     assert "case_actionable_task" in user_ball_ids
 
 
+def test_low_and_skip_case_mail_do_not_put_case_in_user_ball(client, database_path) -> None:
+    created_cases: dict[str, str] = {}
+    for importance in ["low", "skip", "high"]:
+        response = client.post(
+            "/api/v1/cases",
+            json={
+                "name": f"Case mail {importance}",
+                "description": None,
+                "progress_status": "waiting",
+                "ball_status": "none",
+            },
+        )
+        assert response.status_code == 200
+        created_cases[importance] = response.json()["data"]["case"]["id"]
+
+    message_ids: dict[str, str] = {}
+    for importance in ["low", "skip", "high"]:
+        response = client.post(
+            "/api/v1/mails/mock-ingest",
+            json={
+                "gmail_message_id": f"gmail_case_mail_{importance}",
+                "gmail_thread_id": f"thread_case_mail_{importance}",
+                "message_id_header": f"<case-mail-{importance}@example.com>",
+                "subject": f"Case mail {importance}",
+                "from_address": f"case.mail.{importance}@example.com",
+                "received_at": "2026-05-31T11:00:00+09:00",
+                "body_text": f"This {importance} mail is linked to a Case.",
+            },
+        )
+        assert response.status_code == 200
+        message_ids[importance] = response.json()["data"]["message_id"]
+
+    with sqlite3.connect(database_path) as connection:
+        for importance, message_id in message_ids.items():
+            connection.execute(
+                """
+                UPDATE mail_auto_state
+                SET suggested_importance = ?, effective_importance = ?
+                WHERE message_id = ?
+                """,
+                (importance, importance, message_id),
+            )
+            connection.execute(
+                """
+                UPDATE mail_user_state
+                SET processed_status = 'unprocessed', user_importance = NULL
+                WHERE message_id = ?
+                """,
+                (message_id,),
+            )
+            connection.execute(
+                """
+                INSERT INTO case_mail_links (
+                    id, case_id, message_id, created_at, updated_at, version
+                ) VALUES (?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    f"case_mail_link_{importance}",
+                    created_cases[importance],
+                    message_id,
+                    "2026-05-31T11:05:00+09:00",
+                    "2026-05-31T11:05:00+09:00",
+                ),
+            )
+        connection.commit()
+
+    user_ball_ids = {
+        item["id"]
+        for item in client.get("/api/v1/cases?status=user_ball").json()["data"][
+            "items"
+        ]
+    }
+    waiting_ids = {
+        item["id"]
+        for item in client.get("/api/v1/cases?status=waiting").json()["data"]["items"]
+    }
+
+    assert created_cases["high"] in user_ball_ids
+    assert created_cases["low"] not in user_ball_ids
+    assert created_cases["skip"] not in user_ball_ids
+    assert created_cases["low"] in waiting_ids
+    assert created_cases["skip"] in waiting_ids
+
+
 def test_case_can_be_completed_reopened_and_archived(client) -> None:
     case_response = client.post(
         "/api/v1/cases",

@@ -143,6 +143,123 @@ function addDateDays(value: string, days: number) {
   ).padStart(2, '0')}`
 }
 
+function firstWeeklyRecurrenceDate(startDate: string, weekdays: string[]) {
+  if (weekdays.length === 0) return startDate
+  const currentWeekday = numericWeekdayForDate(startDate)
+  const offsets = weekdays
+    .map((weekday) => recurrenceWeekdayNumber(weekday))
+    .map((weekday) => (weekday - currentWeekday + 7) % 7)
+  const nextOffset = Math.min(...offsets)
+  return addDateDays(startDate, nextOffset)
+}
+
+function daysInMonth(year: number, month: number) {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate()
+}
+
+function monthDate(year: number, month: number, monthDay: number) {
+  const lastDay = daysInMonth(year, month)
+  const day = monthDay > 0 ? monthDay : lastDay + monthDay + 1
+  if (day < 1 || day > lastDay) return null
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
+function nthWeekdayDate(year: number, month: number, weekday: number, position: number) {
+  const lastDay = daysInMonth(year, month)
+  let day = 1
+  if (position > 0) {
+    const firstWeekday = new Date(Date.UTC(year, month - 1, 1)).getUTCDay()
+    day = 1 + ((weekday - firstWeekday + 7) % 7) + (position - 1) * 7
+  } else {
+    const lastWeekday = new Date(Date.UTC(year, month - 1, lastDay)).getUTCDay()
+    day = lastDay - ((lastWeekday - weekday + 7) % 7) + (position + 1) * 7
+  }
+  if (day < 1 || day > lastDay) return null
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
+function monthOffset(year: number, month: number, offset: number) {
+  const monthIndex = year * 12 + (month - 1) + offset
+  return { year: Math.floor(monthIndex / 12), month: (monthIndex % 12) + 1 }
+}
+
+function firstMonthlyRecurrenceDate(
+  startDate: string,
+  pattern: 'day' | 'weekday',
+  monthDay: string,
+  monthWeek: string,
+  monthWeekday: string,
+) {
+  const [startYear, startMonth] = startDate.split('-').map(Number)
+  for (let offset = 0; offset < 240; offset += 1) {
+    const { year, month } = monthOffset(startYear, startMonth, offset)
+    const candidate =
+      pattern === 'weekday'
+        ? nthWeekdayDate(year, month, recurrenceWeekdayNumber(monthWeekday), Number(monthWeek))
+        : monthDate(year, month, monthDayToRRuleDay(monthDay))
+    if (candidate !== null && candidate >= startDate) return candidate
+  }
+  return startDate
+}
+
+function firstYearlyRecurrenceDate(
+  startDate: string,
+  pattern: 'day' | 'weekday',
+  yearMonth: string,
+  yearDay: string,
+  monthWeek: string,
+  monthWeekday: string,
+) {
+  const [startYear] = startDate.split('-').map(Number)
+  const month = Number(yearMonth)
+  if (!Number.isInteger(month) || month < 1 || month > 12) return startDate
+  for (let offset = 0; offset < 50; offset += 1) {
+    const year = startYear + offset
+    const candidate =
+      pattern === 'weekday'
+        ? nthWeekdayDate(year, month, recurrenceWeekdayNumber(monthWeekday), Number(monthWeek))
+        : monthDate(year, month, Number(yearDay))
+    if (candidate !== null && candidate >= startDate) return candidate
+  }
+  return startDate
+}
+
+function firstRecurrenceDate(
+  startDate: string,
+  recurrenceType: string,
+  recurrenceWeekdayValues: string[],
+  recurrenceMonthPattern: 'day' | 'weekday',
+  recurrenceMonthDay: string,
+  recurrenceMonthWeek: string,
+  recurrenceMonthWeekday: string,
+  recurrenceYearMonth: string,
+  recurrenceYearDay: string,
+) {
+  if (recurrenceType === 'weekly' || recurrenceType === 'biweekly') {
+    return firstWeeklyRecurrenceDate(startDate, recurrenceWeekdayValues)
+  }
+  if (recurrenceType === 'monthly') {
+    return firstMonthlyRecurrenceDate(
+      startDate,
+      recurrenceMonthPattern,
+      recurrenceMonthDay,
+      recurrenceMonthWeek,
+      recurrenceMonthWeekday,
+    )
+  }
+  if (recurrenceType === 'yearly') {
+    return firstYearlyRecurrenceDate(
+      startDate,
+      recurrenceMonthPattern,
+      recurrenceYearMonth,
+      recurrenceYearDay,
+      recurrenceMonthWeek,
+      recurrenceMonthWeekday,
+    )
+  }
+  return startDate
+}
+
 function addDateMonths(value: string, months: number) {
   const [year, month, day] = value.split('-').map(Number)
   const date = new Date(Date.UTC(year, month - 1 + months, day))
@@ -740,11 +857,28 @@ export default function CalendarNewEventView() {
         }
         return
       }
+      const recurrenceStartDate = firstRecurrenceDate(
+        startDate,
+        recurrenceType,
+        recurrenceWeekdayValues,
+        recurrenceMonthPattern,
+        recurrenceMonthDay,
+        recurrenceMonthWeek,
+        recurrenceMonthWeekday,
+        recurrenceYearMonth,
+        recurrenceYearDay,
+      )
+      const recurrenceDateOffset = Math.round(
+        (new Date(`${recurrenceStartDate}T00:00:00Z`).getTime() -
+          new Date(`${startDate}T00:00:00Z`).getTime()) /
+          86400000,
+      )
+      const recurrenceEndDate = addDateDays(endDate, recurrenceDateOffset)
       const result = await createGoogleCalendarEvent({
         calendar_id: calendarId,
         summary: summary.trim(),
-        start: toJstIsoDateTime(`${startDate}T${startTime}`),
-        end: toJstIsoDateTime(`${endDate}T${endTime}`),
+        start: toJstIsoDateTime(`${recurrenceStartDate}T${startTime}`),
+        end: toJstIsoDateTime(`${recurrenceEndDate}T${endTime}`),
         location: location.trim() === '' ? null : location,
         description: description.trim() === '' ? null : description,
         recurrence_rule: recurrenceRule,

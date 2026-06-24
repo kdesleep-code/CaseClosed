@@ -88,6 +88,15 @@ GMAIL_AUTO_IMPORT_LOOKBACK_DAYS = 3
 GMAIL_EXCLUDED_IMPORT_QUERY = "-in:drafts"
 CALENDAR_AUTO_SYNC_DEFAULT_INTERVAL_MINUTES = 60
 CALENDAR_AUTO_SYNC_DEFAULT_MONTH_COUNT = 3
+CALENDAR_RRULE_WEEKDAY_INDEX = {
+    "SU": 0,
+    "MO": 1,
+    "TU": 2,
+    "WE": 3,
+    "TH": 4,
+    "FR": 5,
+    "SA": 6,
+}
 
 
 class GmailImportByDatePayload(BaseModel):
@@ -138,6 +147,7 @@ class GoogleCalendarEventCreatePayload(BaseModel):
     linked_mail_message_id: str | None = None
     linked_case_id: str | None = None
     academic_series_id: str | None = None
+    attendance_requirement: str | None = None
 
 
 class CalendarEventMovePayload(BaseModel):
@@ -1513,17 +1523,25 @@ def create_google_calendar_event(
             "Google Calendar event scope is not granted. Reconnect Google.",
         )
     access_token = google_gmail_access_token(session, connection)
+    recurrence_rule = None
+    if payload.recurrence_rule is not None and payload.recurrence_rule.strip() != "":
+        recurrence_rule = calendar_recurrence_rule(payload.recurrence_rule)
+    start_time, end_time = calendar_event_times_aligned_to_recurrence(
+        calendar_event_time(payload.start, payload.time_zone),
+        calendar_event_time(payload.end, payload.time_zone),
+        recurrence_rule,
+    )
     event_payload: dict[str, object] = {
         "summary": payload.summary.strip(),
-        "start": calendar_event_time(payload.start, payload.time_zone),
-        "end": calendar_event_time(payload.end, payload.time_zone),
+        "start": start_time,
+        "end": end_time,
     }
     if payload.description is not None and payload.description.strip() != "":
         event_payload["description"] = payload.description.strip()
     if payload.location is not None and payload.location.strip() != "":
         event_payload["location"] = payload.location.strip()
-    if payload.recurrence_rule is not None and payload.recurrence_rule.strip() != "":
-        event_payload["recurrence"] = [calendar_recurrence_rule(payload.recurrence_rule)]
+    if recurrence_rule is not None:
+        event_payload["recurrence"] = [recurrence_rule]
     operation = create_calendar_external_operation(
         session,
         operation_type="google_calendar_event_create",
@@ -1561,6 +1579,11 @@ def create_google_calendar_event(
     )
     if payload.academic_series_id is not None and payload.academic_series_id.strip() != "":
         db_event.academic_series_id = payload.academic_series_id.strip()
+        db_event.updated_at = now
+        db_event.version += 1
+    attendance_requirement = normalized_attendance_requirement(payload.attendance_requirement)
+    if attendance_requirement is not None:
+        db_event.attendance_requirement = attendance_requirement
         db_event.updated_at = now
         db_event.version += 1
     links = []
@@ -2529,8 +2552,208 @@ def calendar_recurrence_rule(value: str) -> str:
     return rule
 
 
+def calendar_recurrence_parts(rule: str) -> dict[str, str]:
+    body = rule[6:] if rule.startswith("RRULE:") else rule
+    parts: dict[str, str] = {}
+    for item in body.split(";"):
+        key, separator, value = item.partition("=")
+        if separator == "" or key == "":
+            continue
+        parts[key] = value
+    return parts
+
+
+def calendar_rrule_weekday(value: str) -> int | None:
+    match = re.fullmatch(r"[+-]?\d*([A-Z]{2})", value.strip())
+    if match is None:
+        return None
+    return CALENDAR_RRULE_WEEKDAY_INDEX.get(match.group(1))
+
+
+def calendar_time_date(value: dict[str, object]) -> date | None:
+    raw_date_time = value.get("dateTime")
+    if isinstance(raw_date_time, str):
+        try:
+            return datetime.fromisoformat(raw_date_time.replace("Z", "+00:00")).date()
+        except ValueError:
+            return None
+    raw_date = value.get("date")
+    if isinstance(raw_date, str):
+        try:
+            return date.fromisoformat(raw_date)
+        except ValueError:
+            return None
+    return None
+
+
+def calendar_time_plus_days(value: dict[str, object], days: int) -> dict[str, object]:
+    if days == 0:
+        return dict(value)
+    updated = dict(value)
+    raw_date_time = updated.get("dateTime")
+    if isinstance(raw_date_time, str):
+        parsed = datetime.fromisoformat(raw_date_time.replace("Z", "+00:00"))
+        updated["dateTime"] = (parsed + timedelta(days=days)).isoformat(timespec="seconds")
+        return updated
+    raw_date = updated.get("date")
+    if isinstance(raw_date, str):
+        updated["date"] = (date.fromisoformat(raw_date) + timedelta(days=days)).isoformat()
+    return updated
+
+
+def calendar_int_values(value: str | None) -> list[int]:
+    if value is None:
+        return []
+    values: list[int] = []
+    for item in value.split(","):
+        try:
+            values.append(int(item))
+        except ValueError:
+            continue
+    return values
+
+
+def calendar_days_in_month(year: int, month: int) -> int:
+    if month == 12:
+        return (date(year + 1, 1, 1) - timedelta(days=1)).day
+    return (date(year, month + 1, 1) - timedelta(days=1)).day
+
+
+def calendar_monthday_date(year: int, month: int, month_day: int) -> date | None:
+    days_in_month = calendar_days_in_month(year, month)
+    day = month_day if month_day > 0 else days_in_month + month_day + 1
+    if day < 1 or day > days_in_month:
+        return None
+    return date(year, month, day)
+
+
+def calendar_nth_weekday_date(year: int, month: int, weekday: int, position: int) -> date | None:
+    days_in_month = calendar_days_in_month(year, month)
+    if position > 0:
+        first_weekday = (date(year, month, 1).weekday() + 1) % 7
+        day = 1 + ((weekday - first_weekday) % 7) + (position - 1) * 7
+    else:
+        last_weekday = (date(year, month, days_in_month).weekday() + 1) % 7
+        day = days_in_month - ((last_weekday - weekday) % 7) + (position + 1) * 7
+    if day < 1 or day > days_in_month:
+        return None
+    return date(year, month, day)
+
+
+def calendar_monthly_candidate_dates(parts: dict[str, str], year: int, month: int) -> list[date]:
+    month_days = calendar_int_values(parts.get("BYMONTHDAY"))
+    if len(month_days) > 0:
+        return sorted(
+            candidate
+            for month_day in month_days
+            if (candidate := calendar_monthday_date(year, month, month_day)) is not None
+        )
+    weekdays = [
+        weekday
+        for value in parts.get("BYDAY", "").split(",")
+        if (weekday := calendar_rrule_weekday(value)) is not None
+    ]
+    if len(weekdays) == 0:
+        return []
+    positions = calendar_int_values(parts.get("BYSETPOS"))
+    if len(positions) == 0:
+        positions = [1]
+    return sorted(
+        candidate
+        for weekday in weekdays
+        for position in positions
+        if (candidate := calendar_nth_weekday_date(year, month, weekday, position)) is not None
+    )
+
+
+def calendar_next_month(year: int, month: int, offset: int) -> tuple[int, int]:
+    month_index = (year * 12 + (month - 1)) + offset
+    return month_index // 12, month_index % 12 + 1
+
+
+def calendar_first_recurrence_date_on_or_after(
+    parts: dict[str, str],
+    start_date: date,
+) -> date | None:
+    frequency = parts.get("FREQ")
+    if frequency == "WEEKLY" and "BYDAY" in parts:
+        selected_weekdays = [
+            weekday
+            for value in parts["BYDAY"].split(",")
+            if (weekday := calendar_rrule_weekday(value)) is not None
+        ]
+        if len(selected_weekdays) == 0:
+            return None
+        current_weekday = (start_date.weekday() + 1) % 7
+        return start_date + timedelta(
+            days=min((weekday - current_weekday) % 7 for weekday in selected_weekdays)
+        )
+    if frequency == "MONTHLY":
+        for month_offset in range(0, 240):
+            year, month = calendar_next_month(start_date.year, start_date.month, month_offset)
+            candidates = [
+                candidate
+                for candidate in calendar_monthly_candidate_dates(parts, year, month)
+                if candidate >= start_date
+            ]
+            if len(candidates) > 0:
+                return min(candidates)
+        return None
+    if frequency == "YEARLY":
+        months = calendar_int_values(parts.get("BYMONTH")) or [start_date.month]
+        months = [month for month in months if 1 <= month <= 12]
+        if len(months) == 0:
+            return None
+        for year_offset in range(0, 50):
+            year = start_date.year + year_offset
+            candidates = [
+                candidate
+                for month in months
+                for candidate in calendar_monthly_candidate_dates(parts, year, month)
+                if candidate >= start_date
+            ]
+            if len(candidates) > 0:
+                return min(candidates)
+        return None
+    return None
+
+
+def calendar_event_times_aligned_to_recurrence(
+    start_time: dict[str, object],
+    end_time: dict[str, object],
+    recurrence_rule: str | None,
+) -> tuple[dict[str, object], dict[str, object]]:
+    if recurrence_rule is None:
+        return start_time, end_time
+    start_date = calendar_time_date(start_time)
+    if start_date is None:
+        return start_time, end_time
+    occurrence_date = calendar_first_recurrence_date_on_or_after(
+        calendar_recurrence_parts(recurrence_rule),
+        start_date,
+    )
+    if occurrence_date is None:
+        return start_time, end_time
+    day_offset = (occurrence_date - start_date).days
+    if day_offset == 0:
+        return start_time, end_time
+    return (
+        calendar_time_plus_days(start_time, day_offset),
+        calendar_time_plus_days(end_time, day_offset),
+    )
+
+
 def calendar_event_items(items: list[object]) -> list[dict[str, object]]:
     return [calendar_event_item(item) for item in items if isinstance(item, dict)]
+
+
+def normalized_attendance_requirement(value: str | None) -> str | None:
+    attendance_requirement = value.strip() if value is not None else None
+    if attendance_requirement not in {None, "required", "optional", "not_required"}:
+        raise json_error(422, "VALIDATION_ERROR", "Invalid attendance requirement.")
+    if attendance_requirement == "optional":
+        return "not_required"
+    return attendance_requirement
 
 
 def normalized_calendar_ids(values: list[str] | None) -> list[str]:

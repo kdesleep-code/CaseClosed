@@ -76,12 +76,26 @@ def test_file_icon_settings_can_be_managed(client, database_path: Path) -> None:
     assert created["storage_object_id"].startswith("storage_object_")
     assert created["icon_url"] == f"/api/v1/storage/objects/{created['storage_object_id']}/content"
     assert created["extensions"] == [".docx", ".pdf", ".txt", ".md"]
+    icon_content_response = client.get(created["icon_url"])
+    assert icon_content_response.status_code == 200
+    assert icon_content_response.headers["cache-control"] == "private, max-age=604800, immutable"
+    assert icon_content_response.headers["etag"] != ""
     with sqlite3.connect(database_path) as connection:
         icon_row = connection.execute(
             "SELECT scope, storage_path FROM storage_objects WHERE id = ?",
             (created["storage_object_id"],),
         ).fetchone()
+        viewed_count = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM storage_operation_history
+            WHERE storage_object_id = ?
+              AND operation_type = 'viewed'
+            """,
+            (created["storage_object_id"],),
+        ).fetchone()
     assert icon_row == ("file-icons", f"file-icons/{created['storage_object_id'][15:17]}/{created['storage_object_id']}.svg")
+    assert viewed_count == (0,)
 
     update_response = client.patch(
         f"/api/v1/storage/file-icons/{created['id']}",
@@ -1396,10 +1410,21 @@ def test_contact_image_upload_stores_file_and_updates_avatar(
     content_response = client.get(storage_object["url"])
     assert content_response.status_code == 200
     assert content_response.headers["content-type"].startswith("image/webp")
+    assert content_response.headers["cache-control"] == "private, max-age=604800, immutable"
+    assert content_response.headers["etag"] != ""
     with Image.open(BytesIO(content_response.content)) as resized_image:
         assert max(resized_image.size) == 256
 
     with sqlite3.connect(database_path) as connection:
+        viewed_count = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM storage_operation_history
+            WHERE storage_object_id = ?
+              AND operation_type = 'viewed'
+            """,
+            (storage_object["id"],),
+        ).fetchone()
         row = connection.execute(
             """
             SELECT contacts.avatar_url, storage_objects.storage_path
@@ -1409,6 +1434,7 @@ def test_contact_image_upload_stores_file_and_updates_avatar(
             (contact_id, storage_object["id"]),
         ).fetchone()
 
+    assert viewed_count == (0,)
     assert row[0] == storage_object["url"]
     assert row[1].startswith("contact-images/")
 

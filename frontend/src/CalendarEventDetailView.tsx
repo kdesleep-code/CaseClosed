@@ -554,7 +554,7 @@ export default function CalendarEventDetailView({
                     },
                   ]
                 : []),
-              { href: returnHref, labelKey: 'nav.calendar' },
+              { href: calendarHref, labelKey: 'nav.calendar' },
               { href: '/', labelKey: 'top.heading' },
               { href: '/mail', labelKey: 'nav.mail' },
               { href: '/tasks', labelKey: 'nav.tasks' },

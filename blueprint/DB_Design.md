@@ -13,7 +13,9 @@ Version: 0.4
 
 概要設計・詳細設計で定義した概念を、SQLite上のテーブル、主要カラム、制約、削除方針、状態値、更新ルールとして具体化する。
 
-本書は、初期migration、ORMモデル、Repository層、Single DB Writer、Job Worker、API設計の前提となる。
+本書は、初期migration、ORMモデル、Repository層、Job Worker、API設計の前提となる。
+
+現行実装では、業務DB更新はAPI/WorkerがDBトランザクション内で直接行う。`write_requests` / Single DB Writer は将来の拡張候補であり、本書の現行テーブル仕様を利用する通常更新経路では必須ではない。
 
 ただし、本書はDDLを完全固定するものではない。実装中に必要な補助カラム、index、履歴テーブルはmigrationで追加してよい。
 
@@ -30,24 +32,24 @@ Version: 0.4
 - 本人専用アプリであり、同時利用者数が少ない。
 - ローカルファイルストレージとの相性がよい。
 - バックアップ対象を単純化しやすい。
-- Single DB Writer方針により、SQLiteの書き込み制約を吸収できる。
+- 本人専用アプリとして、API/Worker単位の短いSQLite transactionで扱いやすい。
 
 ## 1.2 書き込み方針
 
-業務テーブルへの更新は、原則として `write_requests` を経由し、Single DB Writer が実行する。
+業務テーブルへの更新は、現行実装ではAPI/WorkerがリクエストまたはJob単位のDBトランザクション内で直接行う。
 
-例外:
+方針:
 
-- `audit_logs` は Audit Log Writer が直接INSERTする。
-- `system_logs` はシステム内部から直接INSERTしてよい。
-- migration処理は直接DBを変更する。
-- 初期セットアップ処理は直接DBを変更してよい。
+- ユーザー確定値を自動処理が上書きしない。
+- 外部副作用は `external_operations` 等で二重実行を避ける。
+- `audit_logs` / `system_logs` / migration / 初期セットアップは、それぞれの処理単位で直接DBを変更してよい。
+- 将来同時書き込み負荷が増えた場合は、Command API境界を保ったまま `write_requests` / Single DB Writer を導入する。
 
 ## 1.3 読み込み方針
 
 Read API はSQLiteを直接読む。
 
-ただし、ユーザー操作直後には `write_requests` が未反映の場合があるため、APIレスポンスには必要に応じて `optimistic_state` を返し、UI側で即時反映する。
+ユーザー操作直後は、Command APIのレスポンスまたは再取得でDB反映後の状態を返す。将来 `write_requests` を導入する場合は、APIレスポンスに必要に応じて `optimistic_state` を返し、UI側で即時反映する。
 
 ## 1.4 一次情報と解釈情報の分離
 
@@ -176,7 +178,7 @@ deleted_by      TEXT NULL
 `version` は楽観的競合制御に用いる。
 
 - Write Request作成時に `base_version` を保存する。
-- Single DB Writer実行時に現在versionと比較する。
+- 更新時に現在versionと比較する。
 - 競合時は安全側に倒し、原則として自動上書きしない。
 - ユーザー操作由来の競合はUIに通知する。
 - LLM/System由来の競合はdiscardまたは再計算Jobへ回す。
@@ -191,7 +193,9 @@ deleted_by      TEXT NULL
 case_progress_status:
   not_started
   in_progress
-  closed
+  waiting
+  blocked
+  completed
 
 case_ball_status:
   none
@@ -400,7 +404,7 @@ Inbox / なんでも箱
 
 - `closed_at` が入っていても `archived_at` はNULLでよい。
 - `is_system_case = 1` のCaseは削除不可。
-- `system_case_key = inbox` はClosed不可・Archive不可。
+- `system_case_key = inbox` はCompleted不可・Archive不可。
 - `system_case_key = system_maintenance` は原則Archive不可。ただし将来変更可。
 - Closed済みCaseは削除ではなくArchiveを通常導線とする。
 - 誤作成Case削除では、関連Taskを論理削除し、関連リンク・専用Storage Directoryを参照破綻しない形で整理する。
@@ -885,6 +889,8 @@ Caseが保持するメール集合を表現する関連テーブル。
 概念上は「メールが案件に紐づく」ではなく、「Caseが関連メールを持つ」と捉える。Gmail本文・スレッド等の一次情報は `gmail_messages` / `gmail_threads` に保持し、Case側から参照する。
 
 Phase 7 Fix時点では、手動Assignおよび明示Auto Assign Ruleにより、Thread内の各メールへCaseリンクを作る。LLMによる主Case自動判定は保留する。
+
+CaseへメールThreadがリンクされた場合、そのThread内メールの送信者はCaseのStakeholder候補として扱う。既存Contactに解決でき、対象Caseに未登録の送信者は、`case_stakeholders.role = mail_sender` として追加する。既存リンク全体を再同期する保守APIも持つ。
 
 ```text
 id                  TEXT PRIMARY KEY
@@ -2268,7 +2274,7 @@ created_at           TEXT NOT NULL
 
 ## 17.1 目的
 
-Single DB Writer経由の更新では、ユーザー操作から実DB反映まで短い遅延が発生する。
+将来 `write_requests` / Single DB Writer を導入する場合、ユーザー操作から実DB反映まで短い遅延が発生しうる。
 
 そのため、軽い操作ではAPIレスポンスに `optimistic_state` を返し、UIを即時更新する。
 

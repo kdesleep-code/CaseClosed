@@ -27,7 +27,7 @@ Version: 0.5
     |
     |-- Read API ----> SQLite read
     |
-    |-- User Action --> Write Request
+    |-- User Action --> DB Transaction
     |-- Job Request  --> Job Queue
     |-- Audit Event  --> Audit Log Writer
     |
@@ -41,8 +41,6 @@ Version: 0.5
     |-- Context Update Worker
     |-- Report / Handover Worker
     |
-[Single DB Writer]
-    |
 [SQLite DB + Local File Storage]
 ```
 
@@ -53,12 +51,12 @@ Version: 0.5
 - 画面表示
 - ユーザー操作受付
 - Read API
-- Write Request作成
+- DB Transactionによる業務更新
 - Job作成
 - Audit Log Request作成
 - 軽量なバリデーション
 
-業務テーブルへ直接writeしない。
+現行実装では、軽量な業務更新をDBトランザクション内で直接反映する。ユーザー確定値を自動処理が上書きしないこと、外部副作用を二重実行しないことを優先する。
 
 ## 1.3 Orchestrator
 
@@ -92,23 +90,22 @@ Worker数は動的可変とする。
 - LLM cost limit
 - worker heartbeat timeout
 
-## 1.5 Single DB Writer
+## 1.5 DB更新経路
 
-業務DB更新を一元的に処理する。
+現行実装では、Web/APIおよびWorkerが、処理単位ごとのDBトランザクションで業務テーブルを直接更新する。
 
 原則:
 
-- Web/APIやWorkerは業務テーブルへ直接writeしない
-- Write Requestを優先度順に処理する
-- ユーザー操作由来のWrite Requestを最優先する
-- LLM/System由来のWrite Requestは user_* カラムを更新してはならない
-- base_version競合時は安全側に倒す
+- ユーザー操作由来の更新を最優先する
+- LLM/System由来の処理は user_* カラムを更新してはならない
+- versionや状態競合時は安全側に倒す
+- SQLite書き込み競合が実運用上問題になる場合は、Command API境界を保って `write_requests` / Single DB Writer を導入できるようにする
 
 ## 1.6 Audit Log Writer
 
 Audit Log専用Writer。
 
-メール一覧表示、本文表示、ファイルカード表示など高頻度ログを処理する。業務DB更新用のSingle DB Writerを詰まらせないために分離する。
+メール一覧表示、本文表示、ファイルカード表示など高頻度ログを処理する。業務DB更新と混ぜず、閲覧系ログが通常操作を重くしないように分離する。
 
 ---
 
@@ -268,11 +265,13 @@ system
 ```text
 not_started
 in_progress
-closed
+waiting
+blocked
+completed
 ```
 
-Caseの終結状態は、ソフト名 Case-Closed に合わせて `closed` と呼ぶ。
-Taskの完了状態は `completed` のままとする。
+現行実装ではCaseの終結状態も `completed` とする。`closed_at` は終結日時を表すtimestampとして保持する。
+Taskの完了状態も `completed` のままとする。
 
 ### ball_status
 
@@ -316,9 +315,9 @@ overdue
 
 DB詳細設計では、将来の例外に備えてCase固有期限を追加できる構造にしておくが、初期仕様では使わない。
 
-## 4.6 Case Closed条件
+## 4.6 Case Completed条件
 
-Caseは、未完了Taskが残っている場合はClosed不可。
+Caseは、未完了Taskが残っている場合はCompleted不可。
 
 親Task・子Taskを含むすべてのTaskが以下のいずれかである必要がある。
 
@@ -330,7 +329,7 @@ deleted
 
 `deleted` は論理削除済みTaskを指す。
 
-CaseがClosedになった日時は `closed_at` で管理する。
+CaseがCompletedになった日時は `closed_at` で管理する。
 
 ## 4.7 Case削除
 
@@ -1250,7 +1249,7 @@ input_hash、参照ID、入力再構成に必要なsource情報、関連Context�
 - API名は英語で統一
 - Read APIは直接DB read
 - Audit LogはAudit Log Writerへ送る
-- 業務DB更新はSingle DB Writer経由
+- 業務DB更新はAPI/WorkerのDBトランザクション経由
 - 単純編集はPATCH
 - 業務操作はPOST action
 - 実体削除は原則使わず、論理削除はPOST actionまたはPATCH
@@ -1620,7 +1619,7 @@ UIの完全自動テストより、以下のロジックテストを重視する
 
 ### Case
 
-- 未完了TaskがあるCaseはClosed不可
+- 未完了TaskがあるCaseはCompleted不可
 - completed/canceled TaskのみならCaseをClosedにできる
 - deleted_at付きTaskはCase Closed判定から除外される
 - archived Caseは通常一覧から除外される
@@ -1978,7 +1977,7 @@ MVPという用語は用いない。以下の順に段階的に実装する。
 1. ユーザー操作を待たせない。
 2. ユーザー操作をLLMや自動処理で上書きしない。
 3. 外部一次情報とアプリ内解釈を混ぜない。
-4. SQLite書き込みはSingle DB Writerに集約する。
+4. SQLite書き込みは短いDBトランザクションで行い、将来必要になればSingle DB Writerへ集約できる境界を保つ。
 5. Contact情報はGoogle Contactsへ出さない。
 6. LLM入力全文は原則ログに保存しないが、プロンプト改善に必要な再構成情報は保存する。
 7. 外部API副作用は二重実行しない。

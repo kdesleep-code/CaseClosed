@@ -583,6 +583,40 @@ def validate_source_type(source_type: str) -> None:
         raise json_error(400, "INVALID_SOURCE_TYPE", "Invalid Task source type.")
 
 
+def ensure_task_mail_link(
+    session: DatabaseSession,
+    *,
+    task: Task,
+    message_id: str | None,
+    now: str,
+) -> None:
+    normalized_message_id = normalize_optional_text(message_id)
+    if normalized_message_id is None:
+        return
+    if session.get(GmailMessage, normalized_message_id) is None:
+        raise json_error(404, "NOT_FOUND", "Source mail not found.")
+    existing = session.scalar(
+        select(TaskLink.id)
+        .where(TaskLink.task_id == task.id)
+        .where(TaskLink.linked_type == "mail")
+        .where(TaskLink.linked_id == normalized_message_id)
+        .limit(1)
+    )
+    if existing is not None:
+        return
+    session.add(
+        TaskLink(
+            id=new_id("task_link"),
+            task_id=task.id,
+            linked_type="mail",
+            linked_id=normalized_message_id,
+            url=None,
+            label=None,
+            created_at=now,
+        )
+    )
+
+
 def validate_parent_task(
     session: DatabaseSession,
     *,
@@ -1197,11 +1231,12 @@ def create_task_from_mail(
     case.updated_at = now
     case.version += 1
     session.add(task)
+    ensure_task_mail_link(session, task=task, message_id=message.id, now=now)
     session.commit()
     return {
         "ok": True,
         "data": {
-            "task": task_data(task, session),
+            "task": task_data(task, session, include_links=True),
             "prefill": prefill,
             "llm_run_id": llm_run_id,
         },
@@ -1348,8 +1383,10 @@ def create_task(
     case.updated_at = now
     case.version += 1
     session.add(task)
+    if task.source_type == "mail":
+        ensure_task_mail_link(session, task=task, message_id=task.source_id, now=now)
     session.commit()
-    return {"ok": True, "data": {"task": task_data(task, session)}}
+    return {"ok": True, "data": {"task": task_data(task, session, include_links=True)}}
 
 
 @router.post("/{task_id}/progress-entries")

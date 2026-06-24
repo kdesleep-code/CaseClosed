@@ -1,7 +1,7 @@
 # CaseClosed 状態遷移設計書
 
-Version: 0.1  
-作成日: 2026-05-22  
+Version: 0.1
+作成日: 2026-05-22
 対象: 個人用案件管理Webアプリ CaseClosed
 
 ---
@@ -48,8 +48,8 @@ CaseClosedでは、単一の状態値にすべての意味を詰め込まない�
 以下は別概念である。
 
 ```text
-Case Closed:
-  案件として終結した。
+Case Completed:
+  案件として完了・終結した。
 
 Archived:
   通常運用画面から外した。
@@ -98,7 +98,9 @@ Caseは以下の状態軸を持つ。
 progress_status:
   not_started
   in_progress
-  closed
+  waiting
+  blocked
+  completed
 
 ball_status:
   none
@@ -134,22 +136,22 @@ archive state:
 - 関連メールが処理中
 - 相手待ち・日付待ち・自分側作業が残っている
 
-### closed
+### completed
 
 案件として完了・終結した状態。
 
 DB上は以下で表現する。
 
 ```text
-progress_status = closed
+progress_status = completed
 closed_at IS NOT NULL
 ```
 
-## 2.3 Case Closed条件
+## 2.3 Case Completed条件
 
-Caseは、未完了Taskが残っている場合はClosed不可。
+Caseは、未完了Taskが残っている場合はCompleted不可。
 
-Closed可能な条件:
+Completed可能な条件:
 
 ```text
 Caseに属する全Taskが以下のいずれか:
@@ -158,9 +160,9 @@ Caseに属する全Taskが以下のいずれか:
   deleted_at IS NOT NULL
 ```
 
-ただし、`deleted_at IS NOT NULL` のTaskは通常タスク集合から除外されるため、Closed判定では未完了とは扱わない。
+ただし、`deleted_at IS NOT NULL` のTaskは通常タスク集合から除外されるため、Completed判定では未完了とは扱わない。
 
-Closed不可なTask状態:
+Completed不可なTask状態:
 
 ```text
 not_started
@@ -171,9 +173,9 @@ in_progress
 
 ```text
 not_started -> in_progress
-not_started -> closed
-in_progress -> closed
-closed -> in_progress
+not_started -> completed
+in_progress -> completed
+completed -> in_progress
 ```
 
 ### not_started -> in_progress
@@ -185,26 +187,26 @@ closed -> in_progress
 - ユーザーが手動で進行中にする
 - Recurring Taskが生成される
 
-### in_progress -> closed
+### in_progress -> completed
 
 発火条件:
 
-- ユーザーがClosed操作を行う
+- ユーザーがComplete操作を行う
 - 未完了Taskが存在しない
 - 確認ダイアログで承認する
 
 副作用:
 
 - closed_at設定
-- case_eventsにclosed記録
+- case_eventsにcompleted記録
 - 必要に応じて引継ぎログ生成候補を表示
 
-### closed -> in_progress
+### completed -> in_progress
 
 発火条件:
 
 - ユーザーがReopenする
-- Closed後に新規対応が必要になった
+- Completed後に新規対応が必要になった
 
 副作用:
 
@@ -214,12 +216,12 @@ closed -> in_progress
 ## 2.5 禁止遷移
 
 ```text
-closed -> not_started
+completed -> not_started
 archived system case
 delete system case
 ```
 
-通常の完了・終結フローでCase削除は使わない。Closed済みCaseはArchiveする。誤作成など未完了のまま消したいCaseのみ、明示確認付きDeleteを許可する。
+通常の完了・終結フローでCase削除は使わない。Completed済みCaseはArchiveする。誤作成など未完了のまま消したいCaseのみ、明示確認付きDeleteを許可する。
 
 ## 2.6 Archive状態
 
@@ -235,8 +237,8 @@ archived:
 
 ### Archive可能条件
 
-通常CaseはArchive可能。  
-Closed済みであることを推奨するが、必須にはしない。
+通常CaseはArchive可能。
+Completed済みであることを推奨するが、必須にはしない。
 
 ### Archive禁止
 
@@ -264,14 +266,21 @@ stalled:
   停滞、要確認
 ```
 
-ball_statusはCaseの見せ方に使う。  
-Closed条件そのものではない。
+ball_statusはCaseの見せ方に使う。
+Completed条件そのものではない。
+
+現行のCase一覧/Myball判定では、以下を `user` 相当の要素として扱う。
+
+- 開始済みで未完了の関連Taskがある。
+- 関連メールに未処理メールがあり、そのeffective importanceが `low` / `skip` ではない。
+
+Mail importanceのeffective値は `mail_user_state.user_importance` を最優先し、なければ `mail_auto_state.effective_importance`、それもなければ `unclassified` とする。`low` / `skip` の関連メールは、未処理であってもCaseをMyballへ押し上げない。
 
 ## 2.8 Case期限状態
 
 Case本体には原則として期限を持たせない。
 
-期限はTaskに持たせる。  
+期限はTaskに持たせる。
 Case画面では、Case内Taskの期限から以下を計算表示する。
 
 ```text
@@ -322,12 +331,12 @@ deleted_at IS NOT NULL:
 
 ### canceled
 
-一度は考慮したが不要になった状態。  
+一度は考慮したが不要になった状態。
 履歴として意味がある。
 
 ### deleted
 
-誤作成・ノイズとして非表示にする状態。  
+誤作成・ノイズとして非表示にする状態。
 DB上は `deleted_at` による論理削除。
 
 ## 3.3 Task状態遷移
@@ -374,7 +383,7 @@ in_progress
 
 ## 3.5 Canceledの扱い
 
-CanceledはClosed条件上、閉じた状態として扱う。  
+CanceledはCompleted条件上、閉じた状態として扱う。
 ただし、作業完了とは区別する。
 
 用途:
@@ -395,7 +404,7 @@ Deletedは論理削除であり、通常画面から非表示にする。
 - ノイズ
 - 復活不要に近いが、履歴参照のためDBには残す
 
-物理削除は原則提供しない。  
+物理削除は原則提供しない。
 保守画面でも慎重に扱う。
 
 ## 3.7 Task作成時の初期状態
@@ -412,7 +421,7 @@ not_started
 in_progress
 ```
 
-LLM候補は正式Taskではない。  
+LLM候補は正式Taskではない。
 ユーザー採用時にTaskとして作成される。
 
 ---
@@ -542,7 +551,7 @@ Pending
 
 ### Pinned
 
-特殊枠・ピン留め。  
+特殊枠・ピン留め。
 Gmailスターとは無関係。
 
 付与可能:
@@ -556,32 +565,32 @@ Case候補抽出・Case判定対象外。
 
 ### High
 
-高優先度。  
+高優先度。
 自動要約・Case判定対象。
 
 Highになった場合、Gmailスター付与External Operationを作成する。
 
 ### Middle
 
-通常処理対象。  
+通常処理対象。
 自動要約・Case判定対象。
 
 ### Low
 
-低優先度。  
-LLM重要度判定の出力ラベルとして使用可能。  
-自動要約なし。  
+低優先度。
+LLM重要度判定の出力ラベルとして使用可能。
+自動要約なし。
 自動Case判定なし。
 
 ### Skip
 
-通常処理対象外。  
-LLM出力不可。  
+通常処理対象外。
+LLM出力不可。
 Processedとは別扱い。
 
 ### Pending
 
-Contact未登録Fromにより判定保留。  
+Contact未登録Fromにより判定保留。
 重要度判定・Case判定・自動要約を停止する。
 
 ## 5.3 effective_importance計算優先順位
@@ -938,7 +947,7 @@ Gmail送信External Operationが成功した草案。
 
 ## 9.5 failed
 
-送信または生成に失敗した草案。  
+送信または生成に失敗した草案。
 ただし、Gmail送信の不明状態はDraftではなくExternal Operation側の `unknown` で扱う。
 
 ## 9.6 状態遷移
@@ -989,12 +998,12 @@ llm_policy:
 
 ### trashed
 
-ゴミ箱状態。  
+ゴミ箱状態。
 通常画面からは非表示またはゴミ箱表示。
 
 ### purged
 
-物理削除済み。  
+物理削除済み。
 DBメタ情報は残す。
 
 ## 10.3 File状態遷移
@@ -1160,7 +1169,7 @@ Workerが実行中。
 
 サーバーダウン等によりrunningのまま残ったJob。
 
-MVPという用語は使わないが、初期実装ではstale jobを自動再実行しない。  
+MVPという用語は使わないが、初期実装ではstale jobを自動再実行しない。
 保守画面で確認し、必要なら手動再実行する。
 
 ## 13.8 状態遷移

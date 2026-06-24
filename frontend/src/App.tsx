@@ -1,9 +1,11 @@
 ﻿import { useEffect, useRef, useState } from 'react'
-import type { FormEvent } from 'react'
+import type { CSSProperties, FormEvent } from 'react'
 import { AuthApiError, login, readSession } from './authApi'
 import type { SessionData } from './authApi'
 import AcademicCalendarView from './AcademicCalendarView'
 import loginDoorTanuki from './assets/login-door-tanuki.png'
+import settingsGearIconUrl from './assets/settings-gear.svg'
+import pomodoroBellUrl from './assets/pomodoro-school-bell.mp3'
 import CalendarView from './CalendarView'
 import CalendarEventDetailView from './CalendarEventDetailView'
 import CalendarNewEventView from './CalendarNewEventView'
@@ -41,7 +43,7 @@ import {
 import type { ExternalToolLink } from './externalToolsApi'
 import { t } from './i18n'
 import type { MessageKey } from './i18n'
-import { AppLink, TopNav } from './navigation'
+import { AppLink, TopNav, naturalReturnTargetFromLocation, returnToFromLocation } from './navigation'
 import {
   listExternalOperations,
   listJobs,
@@ -74,6 +76,8 @@ import './App.css'
 type LinkItem = {
   labelKey: MessageKey
   href: string
+  target?: '_blank'
+  rel?: string
 }
 
 type LinkRenderItem = LinkItem & {
@@ -91,6 +95,7 @@ const pageLinks: LinkItem[] = [
   { labelKey: 'nav.files', href: '/files' },
   { labelKey: 'nav.externalTools', href: '/external-tools' },
   { labelKey: 'nav.extensions', href: '/extensions' },
+  { labelKey: 'nav.pomodoro', href: '/pomodoro', target: '_blank', rel: 'noopener noreferrer' },
 ]
 
 const mainPageSlots: PageSlot[] = [
@@ -209,7 +214,20 @@ function endOfDate(date: string) {
 }
 
 function currentBrowserPath() {
-  return `${window.location.pathname}${window.location.search}${window.location.hash}`
+  return window.location.pathname + window.location.search + window.location.hash
+}
+
+function isEditableShortcutTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false
+  }
+  const tagName = target.tagName.toLowerCase()
+  return (
+    tagName === 'input' ||
+    tagName === 'textarea' ||
+    tagName === 'select' ||
+    target.isContentEditable
+  )
 }
 
 function mailTabFromSearchParams(params: URLSearchParams): MailTab {
@@ -514,10 +532,65 @@ function TopView({
 
   const isLockedByPending = pendingCount !== null && pendingCount > 0
 
+  function openPomodoroWindow() {
+    const width = 420
+    const height = 620
+    const margin = 24
+    const screen = window.screen as Screen & { availLeft?: number; availTop?: number }
+    const left = Math.max(0, (screen.availLeft ?? 0) + screen.availWidth - width - margin)
+    const top = Math.max(0, (screen.availTop ?? 0) + screen.availHeight - height - margin)
+    const features = [
+      'popup=yes',
+      `width=${width}`,
+      `height=${height}`,
+      `left=${Math.round(left)}`,
+      `top=${Math.round(top)}`,
+      'resizable=yes',
+      'scrollbars=yes',
+    ].join(',')
+    const popup = window.open('', 'caseclosed-pomodoro', features)
+    if (popup === null) {
+      window.open('/pomodoro', '_blank')
+      return
+    }
+    try {
+      if (popup.location.href !== 'about:blank') {
+        popup.focus()
+        return
+      }
+    } catch {
+      popup.focus()
+      return
+    }
+    try {
+      popup.opener = null
+      popup.document.write(
+        '<!doctype html><title>Pomodoro Timer</title><style>html,body{margin:0;min-height:100%;background:#fbf1df;color:#5a321f;font-family:system-ui,sans-serif;}</style>',
+      )
+      popup.document.close()
+      popup.location.replace('/pomodoro')
+      popup.focus()
+    } catch {
+      popup.location.href = '/pomodoro'
+    }
+  }
+
   function lockedLink(link: LinkRenderItem, className?: string) {
     if (!isLockedByPending || link.href === '/maintenance') {
       return (
-        <AppLink className={className} href={link.href} key={link.href}>
+        <AppLink
+          className={className}
+          href={link.href}
+          key={link.href}
+          onClick={link.href === '/pomodoro'
+            ? (event) => {
+                event.preventDefault()
+                openPomodoroWindow()
+              }
+            : undefined}
+          rel={link.rel}
+          target={link.target}
+        >
           {linkLabel(link)}
         </AppLink>
       )
@@ -588,6 +661,198 @@ function TopView({
               {utilityPageSlots.map((slot) => pageSlot(slot))}
             </div>
           </nav>
+        </section>
+      </div>
+    </main>
+  )
+}
+
+type PomodoroPhase = 'work' | 'break' | 'done'
+
+function PomodoroView() {
+  const [workMinutes, setWorkMinutes] = useState(25)
+  const [breakMinutes, setBreakMinutes] = useState(5)
+  const [cycleCount, setCycleCount] = useState(4)
+  const [phase, setPhase] = useState<PomodoroPhase>('work')
+  const [currentCycle, setCurrentCycle] = useState(1)
+  const [remainingSeconds, setRemainingSeconds] = useState(25 * 60)
+  const [isRunning, setIsRunning] = useState(false)
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+  const bellAudioRef = useRef<HTMLAudioElement | null>(null)
+
+  const totalSeconds = phase === 'break' ? breakMinutes * 60 : workMinutes * 60
+  const progress =
+    phase === 'done' || totalSeconds <= 0
+      ? 1
+      : Math.min(1, Math.max(0, (totalSeconds - remainingSeconds) / totalSeconds))
+  const minutes = Math.floor(remainingSeconds / 60)
+  const seconds = remainingSeconds % 60
+  const timeLabel = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+
+  useEffect(() => {
+    if (!isRunning || phase === 'done') {
+      return undefined
+    }
+
+    const timerId = window.setInterval(() => {
+      setRemainingSeconds((current) => Math.max(0, current - 1))
+    }, 1000)
+    return () => window.clearInterval(timerId)
+  }, [isRunning, phase])
+
+  function bellAudio() {
+    const audio = bellAudioRef.current ?? new Audio(pomodoroBellUrl)
+    bellAudioRef.current = audio
+    audio.preload = 'auto'
+    return audio
+  }
+
+  function prepareTransitionBell() {
+    bellAudio().load()
+  }
+
+  function playTransitionBell() {
+    const audio = bellAudio()
+    audio.pause()
+    audio.currentTime = 0
+    void audio.play().catch(() => undefined)
+  }
+
+  useEffect(() => {
+    if (remainingSeconds > 0 || phase === 'done') {
+      return
+    }
+    playTransitionBell()
+    if (phase === 'work') {
+      setPhase('break')
+      setRemainingSeconds(breakMinutes * 60)
+      return
+    }
+    if (currentCycle >= cycleCount) {
+      setPhase('done')
+      setIsRunning(false)
+      setRemainingSeconds(0)
+      return
+    }
+    setCurrentCycle((cycle) => cycle + 1)
+    setPhase('work')
+    setRemainingSeconds(workMinutes * 60)
+  }, [breakMinutes, currentCycle, cycleCount, phase, remainingSeconds, workMinutes])
+
+  function resetTimer(nextWorkMinutes = workMinutes) {
+    setIsRunning(false)
+    setPhase('work')
+    setCurrentCycle(1)
+    setRemainingSeconds(nextWorkMinutes * 60)
+  }
+
+  function handleSettingsSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const normalizedWorkMinutes = Math.min(180, Math.max(1, Math.round(workMinutes)))
+    const normalizedBreakMinutes = Math.min(60, Math.max(1, Math.round(breakMinutes)))
+    const normalizedCycleCount = Math.min(24, Math.max(1, Math.round(cycleCount)))
+    setWorkMinutes(normalizedWorkMinutes)
+    setBreakMinutes(normalizedBreakMinutes)
+    setCycleCount(normalizedCycleCount)
+    setIsSettingsOpen(false)
+    resetTimer(normalizedWorkMinutes)
+  }
+
+  function skipPhase() {
+    setRemainingSeconds(0)
+  }
+
+  return (
+    <main className="app-shell pomodoro-app">
+      <div className="maintenance-shell pomodoro-shell">
+        <header className="maintenance-header pomodoro-header">
+          <div>
+            <p>{t('app.name')}</p>
+            <div className="pomodoro-title-row">
+              <h1>{t('pomodoro.heading')}</h1>
+              <button
+                aria-expanded={isSettingsOpen}
+                aria-label={t('pomodoro.settings')}
+                className="pomodoro-settings-toggle"
+                onClick={() => setIsSettingsOpen((isOpen) => !isOpen)}
+                title={t('pomodoro.settings')}
+                type="button"
+              >
+                <img alt="" aria-hidden="true" src={settingsGearIconUrl} />
+              </button>
+            </div>
+          </div>
+        </header>
+
+        <section className="pomodoro-panel">
+          <div className="pomodoro-status-row">
+            <span>{phase === 'done' ? t('pomodoro.done') : phase === 'work' ? t('pomodoro.work') : t('pomodoro.break')}</span>
+            <strong>{t('pomodoro.cycle', { current: String(currentCycle), total: String(cycleCount) })}</strong>
+          </div>
+
+          <div
+            aria-label={t('pomodoro.remaining')}
+            className="pomodoro-dial"
+            style={{ '--pomodoro-progress': `${progress * 360}deg` } as CSSProperties}
+          >
+            <strong>{timeLabel}</strong>
+            <span>{phase === 'done' ? t('pomodoro.completed') : t('pomodoro.remaining')}</span>
+          </div>
+
+          <div className="pomodoro-controls">
+            <button
+              disabled={phase === 'done'}
+              onClick={() => {
+                prepareTransitionBell()
+                setIsRunning((running) => !running)
+              }}
+              type="button"
+            >
+              {isRunning ? t('pomodoro.pause') : t('pomodoro.start')}
+            </button>
+            <button onClick={() => resetTimer()} type="button">
+              {t('pomodoro.reset')}
+            </button>
+            <button disabled={phase === 'done'} onClick={skipPhase} type="button">
+              {t('pomodoro.skip')}
+            </button>
+          </div>
+
+          {isSettingsOpen && (
+            <form className="pomodoro-settings" onSubmit={handleSettingsSubmit}>
+              <label>
+                <span>{t('pomodoro.workMinutes')}</span>
+                <input
+                  max={180}
+                  min={1}
+                  onChange={(event) => setWorkMinutes(Number(event.target.value))}
+                  type="number"
+                  value={workMinutes}
+                />
+              </label>
+              <label>
+                <span>{t('pomodoro.breakMinutes')}</span>
+                <input
+                  max={60}
+                  min={1}
+                  onChange={(event) => setBreakMinutes(Number(event.target.value))}
+                  type="number"
+                  value={breakMinutes}
+                />
+              </label>
+              <label>
+                <span>{t('pomodoro.cycles')}</span>
+                <input
+                  max={24}
+                  min={1}
+                  onChange={(event) => setCycleCount(Number(event.target.value))}
+                  type="number"
+                  value={cycleCount}
+                />
+              </label>
+              <button type="submit">{t('common.update')}</button>
+            </form>
+          )}
         </section>
       </div>
     </main>
@@ -1468,6 +1733,40 @@ function App() {
   }, [])
 
   useEffect(() => {
+    function handleGlobalShortcut(event: KeyboardEvent) {
+      if (
+        event.defaultPrevented ||
+        event.key !== 'Escape' ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.shiftKey ||
+        isEditableShortcutTarget(event.target)
+      ) {
+        return
+      }
+
+      event.preventDefault()
+      const returnTo = returnToFromLocation()
+      if (returnTo !== null) {
+        transitionToPreparedRoute(returnTo, 'push')
+        return
+      }
+      const naturalReturnTarget = naturalReturnTargetFromLocation()
+      if (naturalReturnTarget !== null) {
+        transitionToPreparedRoute(naturalReturnTarget, 'push')
+        return
+      }
+      window.history.back()
+    }
+
+    window.addEventListener('keydown', handleGlobalShortcut)
+    return () => {
+      window.removeEventListener('keydown', handleGlobalShortcut)
+    }
+  }, [])
+
+  useEffect(() => {
     function syncDocumentTitle() {
       const heading = document.querySelector('h1')?.textContent?.trim()
       document.title = heading === undefined || heading === '' ? t('app.name') : heading
@@ -1680,6 +1979,15 @@ function App() {
             preload={routePreload ?? undefined}
             viewMode={path === '/mail/action-needed' ? 'action-needed' : 'normal'}
           />
+        </>
+      )
+    }
+    if (path === '/pomodoro') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <PomodoroView />
         </>
       )
     }
