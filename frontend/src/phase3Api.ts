@@ -73,6 +73,56 @@ export type StorageObject = {
   file_updated_at: string
 }
 
+export type PaperBibtexEntry = {
+  id: string
+  paper_id: string
+  entry_type: string
+  entry_key: string
+  title: string
+  authors: string[]
+  journal: string
+  year: string
+  doi: string
+  url: string
+  abstract: string
+  raw_bibtex: string
+  fields: Record<string, string>
+  created_at: string
+  updated_at: string
+  version: number
+}
+
+export type PaperJournalIconSetting = {
+  id: string
+  match_journal: string
+  icon_filename: string | null
+  icon_content_type: string
+  icon_url: string | null
+  icon_data_url: string
+  created_at: string
+  updated_at: string
+  version: number
+}
+
+
+export type Paper = {
+  id: string
+  storage_object_id: string
+  storage_object: StorageObject | null
+  title: string
+  authors_text: string
+  journal_text: string
+  journal_icon_url: string | null
+  bibtex: string
+  summary: string
+  bibtex_entry: PaperBibtexEntry | null
+  tags: string[]
+  status: string
+  created_at: string
+  updated_at: string
+  version: number
+}
+
 export type StorageObjectVersion = {
   id: string
   storage_object_id: string
@@ -866,6 +916,123 @@ export function uploadManagedStorageFile(
     method: 'POST',
     body: formData,
   })
+}
+
+export function uploadBookshelfMaterial(file: File): Promise<TemporaryObjectUploadResponse> {
+  const formData = new FormData()
+  formData.append('file', file, file.name)
+  return request<TemporaryObjectUploadResponse>('/api/v1/storage/bookshelf/materials/upload', {
+    method: 'POST',
+    body: formData,
+  })
+}
+
+export function deleteBookshelfMaterial(storageObjectId: string): Promise<{ purged_storage_object_id: string }> {
+  return request<{ purged_storage_object_id: string }>(
+    `/api/v1/storage/bookshelf/materials/${encodeURIComponent(storageObjectId)}`,
+    { method: 'DELETE' },
+  )
+}
+
+export async function listPaperJournalIconSettings(): Promise<PaperJournalIconSetting[]> {
+  const data = await request<ListResponse<PaperJournalIconSetting>>(
+    '/api/v1/storage/paper-journal-icons',
+  )
+  return data.items
+}
+
+export async function createPaperJournalIconSetting(payload: {
+  match_journal: string
+  icon_filename: string | null
+  icon_content_type: string
+  icon_data_base64: string
+}): Promise<PaperJournalIconSetting> {
+  const data = await request<{ journal_icon: PaperJournalIconSetting }>(
+    '/api/v1/storage/paper-journal-icons',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  )
+  return data.journal_icon
+}
+
+export async function updatePaperJournalIconSetting(
+  journalIconId: string,
+  payload: {
+    match_journal?: string
+    icon_filename?: string | null
+    icon_content_type?: string
+    icon_data_base64?: string
+  },
+): Promise<PaperJournalIconSetting> {
+  const data = await request<{ journal_icon: PaperJournalIconSetting }>(
+    '/api/v1/storage/paper-journal-icons/' + encodeURIComponent(journalIconId),
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  )
+  return data.journal_icon
+}
+
+export function deletePaperJournalIconSetting(journalIconId: string): Promise<{ deleted: boolean }> {
+  return request<{ deleted: boolean }>(
+    '/api/v1/storage/paper-journal-icons/' + encodeURIComponent(journalIconId),
+    { method: 'DELETE' },
+  )
+}
+
+export async function listPapers(): Promise<Paper[]> {
+  const data = await request<ListResponse<Paper>>('/api/v1/storage/papers')
+  return data.items
+}
+
+export async function readPaper(paperId: string): Promise<Paper> {
+  const data = await request<{ paper: Paper }>(
+    '/api/v1/storage/papers/' + encodeURIComponent(paperId),
+  )
+  return data.paper
+}
+
+export function uploadPaper(file: File, bibtexFile: File): Promise<{ paper: Paper }> {
+  const formData = new FormData()
+  formData.append('file', file, file.name)
+  formData.append('bibtex_file', bibtexFile, bibtexFile.name)
+  return request<{ paper: Paper }>('/api/v1/storage/papers/upload', {
+    method: 'POST',
+    body: formData,
+  })
+}
+
+export async function updatePaper(
+  paperId: string,
+  payload: {
+    title?: string
+    authors_text?: string
+    bibtex?: string
+    summary?: string
+    tags?: string[]
+  },
+): Promise<Paper> {
+  const data = await request<{ paper: Paper }>(
+    `/api/v1/storage/papers/${encodeURIComponent(paperId)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  )
+  return data.paper
+}
+
+export function deletePaper(paperId: string): Promise<{ purged_paper_id: string; purged_storage_object_id: string }> {
+  return request<{ purged_paper_id: string; purged_storage_object_id: string }>(
+    `/api/v1/storage/papers/${encodeURIComponent(paperId)}`,
+    { method: 'DELETE' },
+  )
 }
 
 export function deleteContact(contactId: string): Promise<{ deleted_contact_id: string }> {

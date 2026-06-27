@@ -72,6 +72,8 @@ def bootstrap_database() -> None:
     with SessionLocal() as session:
         seed_settings(session)
         seed_system_cases(session)
+        ensure_bookshelf_storage_directory(session)
+        ensure_papers_storage_directory(session)
         ensure_case_storage_directories(session)
         ensure_task_storage_directories(session)
         seed_storage_locations(session)
@@ -96,6 +98,29 @@ def ensure_runtime_schema() -> None:
                 connection.execute(text("ALTER TABLE cases ADD COLUMN closed_when_text TEXT"))
             if "tags_json" not in case_columns:
                 connection.execute(text("ALTER TABLE cases ADD COLUMN tags_json TEXT"))
+    if "papers" in table_names:
+        paper_columns = {column["name"] for column in inspector.get_columns("papers")}
+        with engine.begin() as connection:
+            if "summary" not in paper_columns:
+                connection.execute(text("ALTER TABLE papers ADD COLUMN summary TEXT NOT NULL DEFAULT ''"))
+    if "paper_journal_icon_settings" not in table_names:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE paper_journal_icon_settings (
+                        id TEXT PRIMARY KEY,
+                        match_journal TEXT NOT NULL,
+                        icon_filename TEXT,
+                        icon_content_type TEXT NOT NULL,
+                        icon_data_url TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+            )
     if "case_genres" in table_names:
         genre_columns = {column["name"] for column in inspector.get_columns("case_genres")}
         with engine.begin() as connection:
@@ -1249,6 +1274,70 @@ def seed_storage_locations(session: Session) -> None:
         existing.root_path = root_path
         existing.updated_at = jst_iso()
         existing.version += 1
+
+
+BOOKSHELF_STORAGE_DIRECTORY_ID = "storage_directory_bookshelf"
+PAPERS_STORAGE_DIRECTORY_ID = "storage_directory_papers"
+
+
+def ensure_named_hidden_storage_directory(
+    session: Session,
+    *,
+    directory_id: str,
+    name: str,
+) -> StorageDirectory:
+    now = jst_iso()
+    directory = session.get(StorageDirectory, directory_id)
+    if directory is None:
+        directory = StorageDirectory(
+            id=directory_id,
+            parent_id=None,
+            directory_kind="normal",
+            case_id=None,
+            name=name,
+            status="active",
+            created_at=SEED_TIMESTAMP,
+            updated_at=SEED_TIMESTAMP,
+            version=1,
+        )
+        session.add(directory)
+        return directory
+    changed = False
+    if directory.parent_id is not None:
+        directory.parent_id = None
+        changed = True
+    if directory.directory_kind != "normal":
+        directory.directory_kind = "normal"
+        changed = True
+    if directory.case_id is not None:
+        directory.case_id = None
+        changed = True
+    if directory.name != name:
+        directory.name = name
+        changed = True
+    if directory.status != "active":
+        directory.status = "active"
+        changed = True
+    if changed:
+        directory.updated_at = now
+        directory.version += 1
+    return directory
+
+
+def ensure_bookshelf_storage_directory(session: Session) -> StorageDirectory:
+    return ensure_named_hidden_storage_directory(
+        session,
+        directory_id=BOOKSHELF_STORAGE_DIRECTORY_ID,
+        name="Bookshelf",
+    )
+
+
+def ensure_papers_storage_directory(session: Session) -> StorageDirectory:
+    return ensure_named_hidden_storage_directory(
+        session,
+        directory_id=PAPERS_STORAGE_DIRECTORY_ID,
+        name="Papers",
+    )
 
 
 def case_storage_directory_id(case_id: str) -> str:

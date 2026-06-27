@@ -9,7 +9,11 @@ from email.message import EmailMessage
 from email.parser import BytesParser
 from email.utils import getaddresses
 import json
+import mimetypes
 import re
+import shutil
+import subprocess
+import tempfile
 import zlib
 import zipfile
 from dataclasses import dataclass
@@ -26,10 +30,12 @@ from fastapi import File
 from fastapi import Query
 from fastapi import UploadFile
 from fastapi.responses import FileResponse
+from fastapi import Response
 from PIL import Image
 from PIL import ImageOps
 from PIL import UnidentifiedImageError
 from pydantic import BaseModel
+from sqlalchemy import delete
 from sqlalchemy import func
 from sqlalchemy import or_
 from sqlalchemy import select
@@ -48,6 +54,9 @@ from caseclosed.db.models import MailAutoState
 from caseclosed.db.models import MailSummary
 from caseclosed.db.models import MailThreadSummary
 from caseclosed.db.models import MailUserState
+from caseclosed.db.models import Paper
+from caseclosed.db.models import PaperBibtexEntry
+from caseclosed.db.models import PaperJournalIconSetting
 from caseclosed.db.models import LlmRun
 from caseclosed.db.models import StorageDirectory
 from caseclosed.db.models import StorageLocation
@@ -55,6 +64,8 @@ from caseclosed.db.models import StorageObject
 from caseclosed.db.models import StorageObjectVersion
 from caseclosed.db.models import StorageOperationHistory
 from caseclosed.db.models import Task
+from caseclosed.db.runtime import BOOKSHELF_STORAGE_DIRECTORY_ID
+from caseclosed.db.runtime import PAPERS_STORAGE_DIRECTORY_ID
 from caseclosed.db.runtime import case_handover_storage_directory_id
 from caseclosed.db.runtime import case_storage_directory_id
 from caseclosed.db.runtime import get_session
@@ -73,6 +84,7 @@ MAX_ARCHIVE_TREE_ENTRIES = 1000
 MAX_EML_PREVIEW_BYTES = 25 * 1024 * 1024
 MAX_FILE_SUMMARY_INPUT_BYTES = 900 * 1024
 MAX_FILE_SUMMARY_INPUT_CHARS = 60000
+MAX_PAPER_BIBTEX_BYTES = 2 * 1024 * 1024
 CONTACT_IMAGE_CONTENT_TYPES = {
     "image/png",
     "image/jpeg",
@@ -88,12 +100,14 @@ CONTENT_TYPE_EXTENSIONS = {
     "image/gif": ".gif",
     "image/webp": ".webp",
     "image/svg+xml": ".svg",
+    "application/pdf": ".pdf",
 }
 INTERNAL_STORAGE_LOCATION_ID = "storage_location_internal"
 GMAIL_ATTACHMENT_STORAGE_SCOPE = "tmp/gmail-attachments"
 NO_STORE_FILE_HEADERS = {"Cache-Control": "no-store"}
 CACHEABLE_IMAGE_FILE_HEADERS = {"Cache-Control": "private, max-age=604800, immutable"}
 ACTIVE_STORAGE_DIRECTORY_KINDS = ("normal", "case", "task")
+HIDDEN_STORAGE_DIRECTORY_IDS = {BOOKSHELF_STORAGE_DIRECTORY_ID, PAPERS_STORAGE_DIRECTORY_ID}
 
 
 class ContactImageUpload(BaseModel):
@@ -158,6 +172,28 @@ class FileSummaryRequest(BaseModel):
     storage_object_version_id: str | None = None
 
 
+class PaperUpdate(BaseModel):
+    title: str | None = None
+    authors_text: str | None = None
+    bibtex: str | None = None
+    summary: str | None = None
+    tags: list[str] | None = None
+
+
+class PaperJournalIconSettingCreate(BaseModel):
+    match_journal: str
+    icon_filename: str | None = None
+    icon_content_type: str
+    icon_data_base64: str
+
+
+class PaperJournalIconSettingUpdate(BaseModel):
+    match_journal: str | None = None
+    icon_filename: str | None = None
+    icon_content_type: str | None = None
+    icon_data_base64: str | None = None
+
+
 @dataclass(frozen=True)
 class FileTextExtraction:
     source_kind: str
@@ -204,6 +240,36 @@ def normalize_file_icon_extensions(values: list[str]) -> list[str]:
     if len(extensions) == 0:
         raise json_error(422, "VALIDATION_ERROR", "At least one extension is required.")
     return extensions
+
+
+
+
+def is_pdf_filename(filename: str | None) -> bool:
+    return filename is not None and filename.strip().lower().endswith(".pdf")
+
+
+def is_citation_filename(filename: str | None) -> bool:
+    if filename is None:
+        return False
+    lowered = filename.strip().lower()
+    return lowered.endswith(".bib") or lowered.endswith(".bibtex") or lowered.endswith(".ris")
+
+
+def is_bookshelf_pdf_filename(filename: str | None) -> bool:
+    return is_pdf_filename(filename)
+
+
+def is_bookshelf_epub_filename(filename: str | None) -> bool:
+    return filename is not None and filename.strip().lower().endswith(".epub")
+
+
+def is_bookshelf_material_filename(filename: str | None) -> bool:
+    return is_bookshelf_pdf_filename(filename) or is_bookshelf_epub_filename(filename)
+
+
+def converted_bookshelf_pdf_filename(filename: str | None) -> str:
+    raw_name = (filename or "book.epub").strip() or "book.epub"
+    return f"{Path(raw_name).stem or 'book'}.pdf"
 
 
 def normalized_optional_filename(value: str | None) -> str | None:
@@ -448,6 +514,10 @@ def file_version_diff_data(
     }
 
 
+def storage_directory_is_hidden_from_storage_ui(directory_id: str | None) -> bool:
+    return directory_id in HIDDEN_STORAGE_DIRECTORY_IDS
+
+
 def storage_directory_data(directory: StorageDirectory) -> dict[str, object]:
     return {
         "id": directory.id,
@@ -521,6 +591,7 @@ def storage_directory_descendant_ids(
         select(StorageDirectory).where(
             StorageDirectory.status == "active",
             StorageDirectory.directory_kind.in_(ACTIVE_STORAGE_DIRECTORY_KINDS),
+            StorageDirectory.id.not_in(HIDDEN_STORAGE_DIRECTORY_IDS),
         )
     ).all()
     if directory_id is None:
@@ -1328,6 +1399,384 @@ def delete_file_icon_storage_object_if_unused(
     ):
         return
     delete_storage_object(storage_object, session=session, now=now)
+
+
+def parse_paper_tags_json(value: str | None) -> list[str]:
+    if value is None:
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [item for item in parsed if isinstance(item, str)]
+
+
+def normalize_paper_tags(values: list[str]) -> list[str]:
+    tags: list[str] = []
+    seen: set[str] = set()
+    for raw_value in values:
+        tag = raw_value.strip()
+        normalized = tag.lower()
+        if tag == "" or normalized in seen:
+            continue
+        seen.add(normalized)
+        tags.append(tag)
+    return tags
+
+
+def paper_title_from_filename(filename: str | None) -> str:
+    raw_name = (filename or "Untitled paper").strip() or "Untitled paper"
+    return Path(raw_name).stem or raw_name
+
+
+def normalize_bibtex_value(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip().strip(",")
+
+
+def parse_ris_entry(ris: str) -> dict[str, object]:
+    fields: dict[str, str] = {}
+    authors: list[str] = []
+    type_map = {
+        "JOUR": "article",
+        "CONF": "inproceedings",
+        "CPAPER": "inproceedings",
+        "BOOK": "book",
+        "CHAP": "incollection",
+        "THES": "phdthesis",
+        "RPRT": "report",
+    }
+    entry_type = ""
+    entry_key = ""
+    for raw_line in ris.splitlines():
+        line = raw_line.strip()
+        if line == "" or line == "ER  -":
+            continue
+        match = re.match(r"(?P<tag>[A-Z0-9]{2})\s+-\s*(?P<value>.*)", line)
+        if match is None:
+            continue
+        tag = match.group("tag")
+        value = normalize_bibtex_value(match.group("value"))
+        if value == "":
+            continue
+        if tag == "TY":
+            entry_type = type_map.get(value.upper(), value.lower())
+        elif tag in {"AU", "A1", "A2", "A3"}:
+            authors.append(value)
+        elif tag in {"TI", "T1"}:
+            fields.setdefault("title", value)
+        elif tag in {"JO", "JF", "JA", "T2"}:
+            fields.setdefault("journal", value)
+        elif tag in {"PY", "Y1"}:
+            year_match = re.search(r"\d{4}", value)
+            fields.setdefault("year", year_match.group(0) if year_match is not None else value)
+        elif tag == "DO":
+            fields["doi"] = value.removeprefix("https://doi.org/").removeprefix("http://doi.org/")
+        elif tag in {"UR", "L1", "L2"}:
+            fields.setdefault("url", value)
+        elif tag in {"AB", "N2"}:
+            fields.setdefault("abstract", value)
+        elif tag == "ID":
+            entry_key = value
+        else:
+            fields.setdefault(tag.lower(), value)
+    if authors and "author" not in fields:
+        fields["author"] = " and ".join(authors)
+    if entry_key == "":
+        entry_key = fields.get("doi") or fields.get("url") or fields.get("title", "")[:80]
+    return {
+        "entry_type": entry_type or "ris",
+        "entry_key": entry_key,
+        "fields": fields,
+        "authors": authors,
+    }
+
+
+def parse_citation_entry(raw_citation: str) -> dict[str, object]:
+    if raw_citation.lstrip().startswith("@"):
+        return parse_bibtex_entry(raw_citation)
+    return parse_ris_entry(raw_citation)
+
+
+def parse_bibtex_entry(bibtex: str) -> dict[str, object]:
+    header_match = re.search(r"@(?P<type>[A-Za-z]+)\s*\{\s*(?P<key>[^,]+),", bibtex, re.DOTALL)
+    entry_type = normalize_bibtex_value(header_match.group("type")) if header_match is not None else ""
+    entry_key = normalize_bibtex_value(header_match.group("key")) if header_match is not None else ""
+    start_index = header_match.end() if header_match is not None else 0
+    end_index = bibtex.rfind("}")
+    body = bibtex[start_index:end_index if end_index > start_index else len(bibtex)]
+    fields: dict[str, str] = {}
+    index = 0
+    while index < len(body):
+        while index < len(body) and body[index] in " \t\r\n,":
+            index += 1
+        name_start = index
+        while index < len(body) and re.match(r"[A-Za-z0-9_:-]", body[index]):
+            index += 1
+        field_name = body[name_start:index].strip().lower()
+        while index < len(body) and body[index].isspace():
+            index += 1
+        if field_name == "" or index >= len(body) or body[index] != "=":
+            index += 1
+            continue
+        index += 1
+        while index < len(body) and body[index].isspace():
+            index += 1
+        if index >= len(body):
+            break
+        if body[index] == "{":
+            index += 1
+            depth = 1
+            value_start = index
+            while index < len(body) and depth > 0:
+                if body[index] == "{":
+                    depth += 1
+                elif body[index] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                index += 1
+            value = body[value_start:index]
+            index += 1
+        elif body[index] == '"':
+            index += 1
+            value_start = index
+            escaped = False
+            while index < len(body):
+                character = body[index]
+                if character == '"' and not escaped:
+                    break
+                escaped = character == "\\" and not escaped
+                if character != "\\":
+                    escaped = False
+                index += 1
+            value = body[value_start:index]
+            index += 1
+        else:
+            value_start = index
+            while index < len(body) and body[index] not in ",\n\r":
+                index += 1
+            value = body[value_start:index]
+        fields[field_name] = normalize_bibtex_value(value)
+    authors = [
+        author.strip()
+        for author in re.split(r"\s+and\s+", fields.get("author", ""), flags=re.IGNORECASE)
+        if author.strip()
+    ]
+    return {
+        "entry_type": entry_type,
+        "entry_key": entry_key,
+        "fields": fields,
+        "authors": authors,
+    }
+
+
+def bibtex_field_value(bibtex: str, field_name: str) -> str | None:
+    parsed = parse_citation_entry(bibtex)
+    fields = parsed.get("fields", {})
+    value = fields.get(field_name.lower()) if isinstance(fields, dict) else None
+    return value if isinstance(value, str) and value != "" else None
+
+
+async def read_paper_bibtex_upload_text(upload: UploadFile) -> str:
+    if not is_citation_filename(upload.filename):
+        raise json_error(422, "PAPER_CITATION_ONLY", "PaperShelf requires a .bib, .bibtex, or .ris file.")
+    data = await upload.read()
+    await upload.close()
+    if len(data) == 0:
+        raise json_error(422, "VALIDATION_ERROR", "Citation file is empty.")
+    if len(data) > MAX_PAPER_BIBTEX_BYTES:
+        raise json_error(413, "PAYLOAD_TOO_LARGE", "Citation file is too large.")
+    return data.decode("utf-8", errors="replace").strip()
+
+
+def upsert_paper_bibtex_entry(
+    session: DatabaseSession,
+    paper: Paper,
+    *,
+    now: str | None = None,
+) -> PaperBibtexEntry | None:
+    raw_bibtex = paper.bibtex.strip()
+    if raw_bibtex == "":
+        return None
+    timestamp = now or jst_iso()
+    parsed = parse_citation_entry(raw_bibtex)
+    fields = parsed.get("fields", {})
+    if not isinstance(fields, dict):
+        fields = {}
+    authors = parsed.get("authors", [])
+    if not isinstance(authors, list):
+        authors = []
+    entry = session.scalar(select(PaperBibtexEntry).where(PaperBibtexEntry.paper_id == paper.id).limit(1))
+    if entry is None:
+        entry = PaperBibtexEntry(
+            id=new_id("paper_bibtex"),
+            paper_id=paper.id,
+            entry_type=str(parsed.get("entry_type", "")),
+            entry_key=str(parsed.get("entry_key", "")),
+            title=str(fields.get("title", "")),
+            authors_json=json.dumps(authors, ensure_ascii=False),
+            journal=str(fields.get("journal", "")),
+            year=str(fields.get("year", "")),
+            doi=str(fields.get("doi", "")),
+            url=str(fields.get("url", "")),
+            abstract=str(fields.get("abstract", "")),
+            raw_bibtex=raw_bibtex,
+            fields_json=json.dumps(fields, ensure_ascii=False),
+            created_at=timestamp,
+            updated_at=timestamp,
+            version=1,
+        )
+        session.add(entry)
+        return entry
+    entry.entry_type = str(parsed.get("entry_type", ""))
+    entry.entry_key = str(parsed.get("entry_key", ""))
+    entry.title = str(fields.get("title", ""))
+    entry.authors_json = json.dumps(authors, ensure_ascii=False)
+    entry.journal = str(fields.get("journal", ""))
+    entry.year = str(fields.get("year", ""))
+    entry.doi = str(fields.get("doi", ""))
+    entry.url = str(fields.get("url", ""))
+    entry.abstract = str(fields.get("abstract", ""))
+    entry.raw_bibtex = raw_bibtex
+    entry.fields_json = json.dumps(fields, ensure_ascii=False)
+    entry.updated_at = timestamp
+    entry.version += 1
+    return entry
+
+
+def paper_bibtex_entry_data(entry: PaperBibtexEntry | None) -> dict[str, object] | None:
+    if entry is None:
+        return None
+    try:
+        authors = json.loads(entry.authors_json)
+    except json.JSONDecodeError:
+        authors = []
+    try:
+        fields = json.loads(entry.fields_json)
+    except json.JSONDecodeError:
+        fields = {}
+    return {
+        "id": entry.id,
+        "paper_id": entry.paper_id,
+        "entry_type": entry.entry_type,
+        "entry_key": entry.entry_key,
+        "title": entry.title,
+        "authors": authors if isinstance(authors, list) else [],
+        "journal": entry.journal,
+        "year": entry.year,
+        "doi": entry.doi,
+        "url": entry.url,
+        "abstract": entry.abstract,
+        "raw_bibtex": entry.raw_bibtex,
+        "fields": fields if isinstance(fields, dict) else {},
+        "created_at": entry.created_at,
+        "updated_at": entry.updated_at,
+        "version": entry.version,
+    }
+
+
+def normalize_paper_journal_match(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def paper_journal_icon_data_url(*, content_type: str, data_base64: str) -> tuple[str, str]:
+    resized_content_type, resized_data = prepare_file_icon_image(
+        content_type=content_type,
+        data_base64=data_base64,
+    )
+    encoded = base64.b64encode(resized_data).decode("ascii")
+    return resized_content_type, f"data:{resized_content_type};base64,{encoded}"
+
+
+def paper_journal_icon_setting_data(setting: PaperJournalIconSetting) -> dict[str, object]:
+    return {
+        "id": setting.id,
+        "match_journal": setting.match_journal,
+        "icon_filename": setting.icon_filename,
+        "icon_content_type": setting.icon_content_type,
+        "icon_url": setting.icon_data_url,
+        "icon_data_url": setting.icon_data_url,
+        "created_at": setting.created_at,
+        "updated_at": setting.updated_at,
+        "version": setting.version,
+    }
+
+
+def paper_journal_icon_for_name(
+    session: DatabaseSession,
+    journal_name: str,
+) -> PaperJournalIconSetting | None:
+    normalized_journal = journal_name.strip().lower()
+    if normalized_journal == "":
+        return None
+    settings = session.scalars(
+        select(PaperJournalIconSetting).order_by(
+            PaperJournalIconSetting.created_at.asc(),
+            PaperJournalIconSetting.id.asc(),
+        )
+    ).all()
+    best: PaperJournalIconSetting | None = None
+    best_length = -1
+    for setting in settings:
+        match_text = setting.match_journal.strip().lower()
+        if match_text == "" or match_text not in normalized_journal:
+            continue
+        if len(match_text) > best_length:
+            best = setting
+            best_length = len(match_text)
+    return best
+
+
+
+def paper_data(paper: Paper, session: DatabaseSession) -> dict[str, object]:
+    storage_object = session.get(StorageObject, paper.storage_object_id)
+    bibtex_entry = upsert_paper_bibtex_entry(session, paper)
+    journal_text = bibtex_entry.journal if bibtex_entry is not None else ""
+    journal_icon = paper_journal_icon_for_name(session, journal_text)
+    return {
+        "id": paper.id,
+        "storage_object_id": paper.storage_object_id,
+        "storage_object": storage_object_data(storage_object, session) if storage_object is not None else None,
+        "title": paper.title,
+        "authors_text": paper.authors_text,
+        "journal_text": journal_text,
+        "journal_icon_url": journal_icon.icon_data_url if journal_icon is not None else None,
+        "bibtex": bibtex_entry.raw_bibtex if bibtex_entry is not None else paper.bibtex,
+        "summary": paper.summary,
+        "bibtex_entry": paper_bibtex_entry_data(bibtex_entry),
+        "tags": parse_paper_tags_json(paper.tags_json),
+        "status": paper.status,
+        "created_at": paper.created_at,
+        "updated_at": paper.updated_at,
+        "version": paper.version,
+    }
+
+
+def purge_bookshelf_material_object(
+    storage_object: StorageObject,
+    *,
+    session: DatabaseSession,
+) -> dict[str, object]:
+    file_deleted = delete_storage_object_file(storage_object, session)
+    version_files_deleted = delete_storage_object_version_files(storage_object, session)
+    session.execute(delete(FileVersionDiff).where(FileVersionDiff.storage_object_id == storage_object.id))
+    session.execute(delete(FileSummary).where(FileSummary.storage_object_id == storage_object.id))
+    session.execute(delete(StorageObjectVersion).where(StorageObjectVersion.storage_object_id == storage_object.id))
+    session.execute(delete(FileLink).where(FileLink.storage_object_id == storage_object.id))
+    session.execute(
+        delete(StorageOperationHistory).where(
+            StorageOperationHistory.storage_object_id == storage_object.id
+        )
+    )
+    purged_storage_object_id = storage_object.id
+    session.delete(storage_object)
+    return {
+        "purged_storage_object_id": purged_storage_object_id,
+        "physical_file_deleted": file_deleted,
+        "version_files_deleted": version_files_deleted,
+    }
 
 
 def delete_managed_storage_object_for_request(
@@ -3033,6 +3482,7 @@ def list_storage_directories(
         select(StorageDirectory)
         .where(StorageDirectory.status == "active")
         .where(StorageDirectory.directory_kind.in_(ACTIVE_STORAGE_DIRECTORY_KINDS))
+        .where(StorageDirectory.id.not_in(HIDDEN_STORAGE_DIRECTORY_IDS))
         .order_by(StorageDirectory.name, StorageDirectory.id)
     )
     if normalized_parent_id is None:
@@ -3249,6 +3699,11 @@ def list_storage_objects(
         StorageObject.id.desc(),
     )
     statement = statement.where(StorageObject.scope == "managed")
+    if normalized_directory_id is None:
+        statement = statement.where(
+            (StorageObject.directory_id.is_(None))
+            | (StorageObject.directory_id.not_in(HIDDEN_STORAGE_DIRECTORY_IDS))
+        )
     if status != "all":
         statement = statement.where(StorageObject.status == status)
     if location_id != "all":
@@ -3321,6 +3776,11 @@ def search_storage_objects(
                     normalized_directory_id,
                 )
                 statement = statement.where(StorageObject.directory_id.in_(directory_ids))
+            else:
+                statement = statement.where(
+                    (StorageObject.directory_id.is_(None))
+                    | (StorageObject.directory_id.not_in(HIDDEN_STORAGE_DIRECTORY_IDS))
+                )
         elif normalized_directory_id is None:
             statement = statement.where(StorageObject.directory_id.is_(None))
         else:
@@ -3425,6 +3885,349 @@ async def upload_managed_object_multipart(
         directory_id=directory.id if directory is not None else None,
         source_type="direct_upload",
     )
+    session.commit()
+    return {
+        "ok": True,
+        "data": {"storage_object": storage_object_data(storage_object, session)},
+    }
+
+
+
+
+
+async def read_bookshelf_upload_bytes(upload: UploadFile) -> bytes:
+    data = await upload.read()
+    await upload.close()
+    if len(data) == 0:
+        raise json_error(422, "VALIDATION_ERROR", "Storage object is empty.")
+    if len(data) > MAX_TMP_OBJECT_BYTES:
+        raise json_error(413, "PAYLOAD_TOO_LARGE", "Storage object is too large.")
+    return data
+
+
+def convert_epub_bytes_to_pdf_bytes(data: bytes, filename: str | None) -> bytes:
+    command = shutil.which("ebook-convert")
+    if command is None:
+        raise json_error(503, "EPUB_CONVERTER_UNAVAILABLE", "ebook-convert is not installed.")
+    with tempfile.TemporaryDirectory(prefix="caseclosed_epub_convert_") as tmpdir:
+        tmp_path = Path(tmpdir)
+        input_path = tmp_path / (Path(filename or "book.epub").name or "book.epub")
+        if input_path.suffix.lower() != ".epub":
+            input_path = input_path.with_suffix(".epub")
+        output_path = tmp_path / "converted.pdf"
+        input_path.write_bytes(data)
+        try:
+            result = subprocess.run(
+                [command, str(input_path), str(output_path)],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=180,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise json_error(504, "EPUB_CONVERSION_TIMEOUT", "EPUB to PDF conversion timed out.") from error
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).decode("utf-8", errors="replace").strip()
+            message = "EPUB to PDF conversion failed."
+            if detail:
+                message = f"{message} {detail[-800:]}"
+            raise json_error(422, "EPUB_CONVERSION_FAILED", message)
+        if not output_path.is_file() or output_path.stat().st_size == 0:
+            raise json_error(422, "EPUB_CONVERSION_FAILED", "EPUB to PDF conversion produced no PDF.")
+        return output_path.read_bytes()
+
+
+@router.get("/paper-journal-icons")
+def list_paper_journal_icon_settings(
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    settings = session.scalars(
+        select(PaperJournalIconSetting).order_by(
+            PaperJournalIconSetting.match_journal.asc(),
+            PaperJournalIconSetting.created_at.asc(),
+            PaperJournalIconSetting.id.asc(),
+        )
+    ).all()
+    return {"ok": True, "data": {"items": [paper_journal_icon_setting_data(item) for item in settings]}}
+
+
+@router.post("/paper-journal-icons")
+def create_paper_journal_icon_setting(
+    payload: PaperJournalIconSettingCreate,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    match_journal = normalize_paper_journal_match(payload.match_journal)
+    if match_journal == "":
+        raise json_error(422, "VALIDATION_ERROR", "Journal match text is required.")
+    content_type, icon_data_url = paper_journal_icon_data_url(
+        content_type=payload.icon_content_type,
+        data_base64=payload.icon_data_base64,
+    )
+    now = jst_iso()
+    setting = PaperJournalIconSetting(
+        id=new_id("paper_journal_icon"),
+        match_journal=match_journal,
+        icon_filename=normalized_optional_filename(payload.icon_filename),
+        icon_content_type=content_type,
+        icon_data_url=icon_data_url,
+        created_at=now,
+        updated_at=now,
+        version=1,
+    )
+    session.add(setting)
+    session.commit()
+    return {"ok": True, "data": {"journal_icon": paper_journal_icon_setting_data(setting)}}
+
+
+@router.patch("/paper-journal-icons/{journal_icon_id}")
+def update_paper_journal_icon_setting(
+    journal_icon_id: str,
+    payload: PaperJournalIconSettingUpdate,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    setting = session.get(PaperJournalIconSetting, journal_icon_id)
+    if setting is None:
+        raise json_error(404, "NOT_FOUND", "Paper journal icon setting not found.")
+    if payload.match_journal is not None:
+        match_journal = normalize_paper_journal_match(payload.match_journal)
+        if match_journal == "":
+            raise json_error(422, "VALIDATION_ERROR", "Journal match text is required.")
+        setting.match_journal = match_journal
+    if payload.icon_content_type is not None and payload.icon_data_base64 is not None:
+        content_type, icon_data_url = paper_journal_icon_data_url(
+            content_type=payload.icon_content_type,
+            data_base64=payload.icon_data_base64,
+        )
+        setting.icon_content_type = content_type
+        setting.icon_data_url = icon_data_url
+        setting.icon_filename = normalized_optional_filename(payload.icon_filename)
+    elif payload.icon_content_type is not None or payload.icon_data_base64 is not None:
+        raise json_error(
+            422,
+            "VALIDATION_ERROR",
+            "Icon content type and image data must be updated together.",
+        )
+    setting.updated_at = jst_iso()
+    setting.version += 1
+    session.commit()
+    return {"ok": True, "data": {"journal_icon": paper_journal_icon_setting_data(setting)}}
+
+
+@router.delete("/paper-journal-icons/{journal_icon_id}")
+def delete_paper_journal_icon_setting(
+    journal_icon_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    setting = session.get(PaperJournalIconSetting, journal_icon_id)
+    if setting is None:
+        raise json_error(404, "NOT_FOUND", "Paper journal icon setting not found.")
+    session.delete(setting)
+    session.commit()
+    return {"ok": True, "data": {"deleted": True}}
+
+
+@router.get("/papers")
+def list_papers(
+    status: str = "active",
+    limit: int = 500,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    safe_limit = max(1, min(limit, 500))
+    statement = (
+        select(Paper)
+        .join(StorageObject, StorageObject.id == Paper.storage_object_id)
+        .where(StorageObject.directory_id == PAPERS_STORAGE_DIRECTORY_ID)
+        .order_by(Paper.title.asc(), Paper.id.asc())
+        .limit(safe_limit)
+    )
+    if status != "all":
+        statement = statement.where(Paper.status == status).where(StorageObject.status == status)
+    papers = session.scalars(statement).all()
+    items = [paper_data(paper, session) for paper in papers]
+    if session.dirty or session.new:
+        session.commit()
+    return {"ok": True, "data": {"items": items}}
+
+
+@router.get("/papers/{paper_id}")
+def read_paper(
+    paper_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    paper = session.get(Paper, paper_id)
+    if paper is None or paper.status != "active":
+        raise json_error(404, "NOT_FOUND", "Paper not found.")
+    storage_object = session.get(StorageObject, paper.storage_object_id)
+    if (
+        storage_object is None
+        or storage_object.status != "active"
+        or storage_object.directory_id != PAPERS_STORAGE_DIRECTORY_ID
+    ):
+        raise json_error(404, "NOT_FOUND", "Paper not found.")
+    data = paper_data(paper, session)
+    if session.dirty or session.new:
+        session.commit()
+    return {"ok": True, "data": {"paper": data}}
+
+
+@router.post("/papers/upload")
+async def upload_paper(
+    file: UploadFile = File(...),
+    bibtex_file: UploadFile = File(...),
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    if not is_pdf_filename(file.filename):
+        raise json_error(422, "PAPER_PDF_ONLY", "PaperShelf accepts .pdf files only.")
+    bibtex = await read_paper_bibtex_upload_text(bibtex_file)
+    directory = ensure_storage_directory(session, PAPERS_STORAGE_DIRECTORY_ID)
+    now = jst_iso()
+    storage_object = await save_uploaded_storage_object(
+        session,
+        scope="managed",
+        upload=file,
+        now=now,
+        directory_id=directory.id if directory is not None else None,
+        source_type="paper",
+    )
+    paper = Paper(
+        id=new_id("paper"),
+        storage_object_id=storage_object.id,
+        title=bibtex_field_value(bibtex, "title") or paper_title_from_filename(storage_object.original_filename),
+        authors_text=bibtex_field_value(bibtex, "author") or "",
+        bibtex=bibtex,
+        summary="",
+        tags_json="[]",
+        status="active",
+        created_at=now,
+        updated_at=now,
+        version=1,
+    )
+    session.add(paper)
+    session.flush()
+    upsert_paper_bibtex_entry(session, paper, now=now)
+    session.commit()
+    return {
+        "ok": True,
+        "data": {"paper": paper_data(paper, session)},
+    }
+
+
+@router.patch("/papers/{paper_id}")
+def update_paper(
+    paper_id: str,
+    payload: PaperUpdate,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    paper = session.get(Paper, paper_id)
+    if paper is None or paper.status != "active":
+        raise json_error(404, "NOT_FOUND", "Paper not found.")
+    storage_object = session.get(StorageObject, paper.storage_object_id)
+    if (
+        storage_object is None
+        or storage_object.status != "active"
+        or storage_object.directory_id != PAPERS_STORAGE_DIRECTORY_ID
+    ):
+        raise json_error(404, "NOT_FOUND", "Paper not found.")
+    if payload.title is not None:
+        title = payload.title.strip()
+        if title == "":
+            raise json_error(422, "VALIDATION_ERROR", "Paper title is required.")
+        paper.title = title
+    if payload.authors_text is not None:
+        paper.authors_text = payload.authors_text.strip()
+    if payload.bibtex is not None:
+        paper.bibtex = payload.bibtex.strip()
+    if payload.summary is not None:
+        paper.summary = payload.summary.strip()
+    if payload.tags is not None:
+        paper.tags_json = json.dumps(normalize_paper_tags(payload.tags), ensure_ascii=False)
+    now = jst_iso()
+    paper.updated_at = now
+    paper.version += 1
+    upsert_paper_bibtex_entry(session, paper, now=now)
+    session.commit()
+    return {"ok": True, "data": {"paper": paper_data(paper, session)}}
+
+
+@router.delete("/papers/{paper_id}")
+def delete_paper(
+    paper_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    paper = session.get(Paper, paper_id)
+    if paper is None or paper.status != "active":
+        raise json_error(404, "NOT_FOUND", "Paper not found.")
+    storage_object = session.get(StorageObject, paper.storage_object_id)
+    if (
+        storage_object is None
+        or storage_object.status != "active"
+        or storage_object.directory_id != PAPERS_STORAGE_DIRECTORY_ID
+        or storage_object.source_type != "paper"
+        or not is_pdf_filename(storage_object.original_filename)
+    ):
+        raise json_error(404, "NOT_FOUND", "Paper not found.")
+    result = purge_bookshelf_material_object(storage_object, session=session)
+    purged_paper_id = paper.id
+    session.execute(delete(PaperBibtexEntry).where(PaperBibtexEntry.paper_id == paper.id))
+    session.delete(paper)
+    session.commit()
+    result["purged_paper_id"] = purged_paper_id
+    return {"ok": True, "data": result}
+
+
+@router.delete("/bookshelf/materials/{storage_object_id}")
+def delete_bookshelf_material(
+    storage_object_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    storage_object = session.get(StorageObject, storage_object_id)
+    if (
+        storage_object is None
+        or storage_object.status != "active"
+        or storage_object.scope != "managed"
+        or storage_object.directory_id != BOOKSHELF_STORAGE_DIRECTORY_ID
+        or storage_object.source_type != "bookshelf_material"
+        or not is_bookshelf_pdf_filename(storage_object.original_filename)
+    ):
+        raise json_error(404, "NOT_FOUND", "Bookshelf material not found.")
+    result = purge_bookshelf_material_object(storage_object, session=session)
+    session.commit()
+    return {
+        "ok": True,
+        "data": result,
+    }
+
+
+@router.post("/bookshelf/materials/upload")
+async def upload_bookshelf_material(
+    file: UploadFile = File(...),
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    if not is_bookshelf_material_filename(file.filename):
+        raise json_error(422, "BOOKSHELF_MATERIAL_ONLY", "Bookshelf accepts .pdf and .epub files only.")
+    directory = ensure_storage_directory(session, BOOKSHELF_STORAGE_DIRECTORY_ID)
+    if is_bookshelf_pdf_filename(file.filename):
+        storage_object = await save_uploaded_storage_object(
+            session,
+            scope="managed",
+            upload=file,
+            now=jst_iso(),
+            directory_id=directory.id if directory is not None else None,
+            source_type="bookshelf_material",
+        )
+    else:
+        epub_data = await read_bookshelf_upload_bytes(file)
+        pdf_data = convert_epub_bytes_to_pdf_bytes(epub_data, file.filename)
+        storage_object = save_storage_object(
+            session,
+            scope="managed",
+            filename=converted_bookshelf_pdf_filename(file.filename),
+            content_type="application/pdf",
+            data=pdf_data,
+            now=jst_iso(),
+            directory_id=directory.id if directory is not None else None,
+            source_type="bookshelf_material",
+        )
     session.commit()
     return {
         "ok": True,

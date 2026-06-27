@@ -871,6 +871,61 @@ class StorageLocation(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
 
+class Paper(Base):
+    __tablename__ = "papers"
+    __table_args__ = (UniqueConstraint("storage_object_id"),)
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    storage_object_id: Mapped[str] = mapped_column(
+        ForeignKey("storage_objects.id"),
+        nullable=False,
+    )
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    authors_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    bibtex: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    tags_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class PaperJournalIconSetting(Base):
+    __tablename__ = "paper_journal_icon_settings"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    match_journal: Mapped[str] = mapped_column(Text, nullable=False)
+    icon_filename: Mapped[str | None] = mapped_column(Text)
+    icon_content_type: Mapped[str] = mapped_column(Text, nullable=False)
+    icon_data_url: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class PaperBibtexEntry(Base):
+    __tablename__ = "paper_bibtex_entries"
+    __table_args__ = (UniqueConstraint("paper_id"),)
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    paper_id: Mapped[str] = mapped_column(ForeignKey("papers.id"), nullable=False)
+    entry_type: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    entry_key: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    title: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    authors_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    journal: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    year: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    doi: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    url: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    abstract: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    raw_bibtex: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    fields_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
 class Contact(Base):
     __tablename__ = "contacts"
 

@@ -2327,9 +2327,9 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
   return (
     <main className="app-shell">
       <div className="mail-thread-shell">
-        <header className="maintenance-header">
-          <div>
-            <p>{t('app.name')}</p>
+        <header className="maintenance-header mail-thread-header">
+          <p className="mail-thread-kicker">{t('app.name')}</p>
+          <div className="mail-thread-heading-area">
             <div className="mail-thread-title-row">
               <h1>{detail.message.subject ?? t('mail.noSubject')}</h1>
               {gmailThreadLink !== null && (

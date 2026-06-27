@@ -1,14 +1,16 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import json
 import sqlite3
+import subprocess
 import zipfile
 from io import BytesIO
 from pathlib import Path
 
 from PIL import Image
 
+import caseclosed.storage as storage_module
 from caseclosed.storage import decoded_zip_info_path
 
 
@@ -16,6 +18,8 @@ def png_bytes(width: int, height: int) -> bytes:
     output = BytesIO()
     Image.new("RGB", (width, height), color=(128, 96, 64)).save(output, format="PNG")
     return output.getvalue()
+
+
 
 
 def simple_pdf_bytes(text_lines: list[str]) -> bytes:
@@ -994,6 +998,7 @@ def test_storage_directories_scope_list_and_uploads(
     assert root_directories.status_code == 200
     root_items = root_directories.json()["data"]["items"]
     assert directory["id"] in [item["id"] for item in root_items]
+    assert "storage_directory_bookshelf" not in [item["id"] for item in root_items]
     case_directories = [item for item in root_items if item["directory_kind"] == "case"]
     assert any(item["case_id"] == "case_system_inbox" for item in case_directories)
 
@@ -1027,6 +1032,136 @@ def test_storage_directories_scope_list_and_uploads(
     assert [item["id"] for item in child_objects.json()["data"]["items"]] == [
         storage_object["id"]
     ]
+
+
+
+def test_bookshelf_directory_is_hidden_from_storage_ui_but_usable(client, database_path: Path) -> None:
+    root_directories = client.get("/api/v1/storage/directories")
+    assert root_directories.status_code == 200
+    assert "storage_directory_bookshelf" not in [
+        item["id"] for item in root_directories.json()["data"]["items"]
+    ]
+
+    upload_response = client.post(
+        "/api/v1/storage/objects/upload?directory_id=storage_directory_bookshelf",
+        files={"file": ("book.pdf", simple_pdf_bytes(["book"]), "application/pdf")},
+    )
+    assert upload_response.status_code == 200
+    storage_object = upload_response.json()["data"]["storage_object"]
+    assert storage_object["directory_id"] == "storage_directory_bookshelf"
+    assert storage_object["scope"] == "managed"
+
+    root_objects = client.get("/api/v1/storage/objects")
+    assert root_objects.status_code == 200
+    assert storage_object["id"] not in [
+        item["id"] for item in root_objects.json()["data"]["items"]
+    ]
+
+    bookshelf_objects = client.get(
+        "/api/v1/storage/objects?directory_id=storage_directory_bookshelf"
+    )
+    assert bookshelf_objects.status_code == 200
+    assert [item["id"] for item in bookshelf_objects.json()["data"]["items"]] == [
+        storage_object["id"]
+    ]
+
+    search_response = client.get("/api/v1/storage/search/objects?q=book&recursive=true")
+    assert search_response.status_code == 200
+    assert storage_object["id"] not in [
+        item["id"] for item in search_response.json()["data"]["items"]
+    ]
+
+    explicit_search_response = client.get(
+        "/api/v1/storage/search/objects?directory_id=storage_directory_bookshelf&q=book&recursive=true"
+    )
+    assert explicit_search_response.status_code == 200
+    assert [item["id"] for item in explicit_search_response.json()["data"]["items"]] == [
+        storage_object["id"]
+    ]
+
+
+
+def test_bookshelf_upload_accepts_pdf_and_converts_epub(client, monkeypatch) -> None:
+    reject_response = client.post(
+        "/api/v1/storage/bookshelf/materials/upload",
+        files={"file": ("notes.txt", b"text", "text/plain")},
+    )
+    assert reject_response.status_code == 422
+    assert reject_response.json()["error"]["code"] == "BOOKSHELF_MATERIAL_ONLY"
+
+    pdf_response = client.post(
+        "/api/v1/storage/bookshelf/materials/upload",
+        files={"file": ("book.pdf", simple_pdf_bytes(["book"]), "application/pdf")},
+    )
+    assert pdf_response.status_code == 200
+    pdf_object = pdf_response.json()["data"]["storage_object"]
+    assert pdf_object["directory_id"] == "storage_directory_bookshelf"
+    assert pdf_object["scope"] == "managed"
+    assert pdf_object["source_type"] == "bookshelf_material"
+    assert pdf_object["original_filename"] == "book.pdf"
+
+    def fake_run(command, check, stdout, stderr, timeout):
+        Path(command[2]).write_bytes(simple_pdf_bytes(["converted"]))
+        return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(storage_module.shutil, "which", lambda name: "/usr/bin/ebook-convert")
+    monkeypatch.setattr(storage_module.subprocess, "run", fake_run)
+    epub_response = client.post(
+        "/api/v1/storage/bookshelf/materials/upload",
+        files={"file": ("book.epub", b"epub", "application/epub+zip")},
+    )
+    assert epub_response.status_code == 200
+    epub_object = epub_response.json()["data"]["storage_object"]
+    assert epub_object["directory_id"] == "storage_directory_bookshelf"
+    assert epub_object["scope"] == "managed"
+    assert epub_object["source_type"] == "bookshelf_material"
+    assert epub_object["original_filename"] == "book.pdf"
+    assert epub_object["content_type"] == "application/pdf"
+
+
+def test_bookshelf_epub_upload_reports_missing_converter(client, monkeypatch) -> None:
+    monkeypatch.setattr(storage_module.shutil, "which", lambda name: None)
+    response = client.post(
+        "/api/v1/storage/bookshelf/materials/upload",
+        files={"file": ("book.epub", b"epub", "application/epub+zip")},
+    )
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "EPUB_CONVERTER_UNAVAILABLE"
+
+
+def test_bookshelf_pdf_can_be_physically_deleted(client, database_path: Path) -> None:
+    upload_response = client.post(
+        "/api/v1/storage/bookshelf/materials/upload",
+        files={"file": ("book.pdf", simple_pdf_bytes(["book"]), "application/pdf")},
+    )
+    assert upload_response.status_code == 200
+    storage_object = upload_response.json()["data"]["storage_object"]
+    storage_object_id = storage_object["id"]
+
+    with sqlite3.connect(database_path) as connection:
+        storage_path = connection.execute(
+            "SELECT storage_path FROM storage_objects WHERE id = ?",
+            (storage_object_id,),
+        ).fetchone()[0]
+    object_path = database_path.parent / "storage" / storage_path
+    assert object_path.is_file()
+
+    delete_response = client.delete(f"/api/v1/storage/bookshelf/materials/{storage_object_id}")
+    assert delete_response.status_code == 200
+    assert delete_response.json()["data"]["purged_storage_object_id"] == storage_object_id
+    assert object_path.exists() is False
+
+    with sqlite3.connect(database_path) as connection:
+        object_count = connection.execute(
+            "SELECT COUNT(*) FROM storage_objects WHERE id = ?",
+            (storage_object_id,),
+        ).fetchone()[0]
+        history_count = connection.execute(
+            "SELECT COUNT(*) FROM storage_operation_history WHERE storage_object_id = ?",
+            (storage_object_id,),
+        ).fetchone()[0]
+    assert object_count == 0
+    assert history_count == 0
 
 
 def test_case_storage_directory_is_listed_and_protected(
@@ -1540,3 +1675,164 @@ def test_contact_image_upload_rejects_non_image(
 
     assert response.status_code == 422
     assert response.json()["ok"] is False
+
+
+
+def test_papers_upload_metadata_and_physical_delete(client, database_path: Path) -> None:
+    root_directories = client.get("/api/v1/storage/directories")
+    assert root_directories.status_code == 200
+    assert "storage_directory_papers" not in [
+        item["id"] for item in root_directories.json()["data"]["items"]
+    ]
+
+    reject_response = client.post(
+        "/api/v1/storage/papers/upload",
+        files={
+            "file": ("paper.txt", b"text", "text/plain"),
+            "bibtex_file": ("paper.bib", b"@article{x}", "text/plain"),
+        },
+    )
+    assert reject_response.status_code == 422
+    assert reject_response.json()["error"]["code"] == "PAPER_PDF_ONLY"
+
+    missing_bibtex_response = client.post(
+        "/api/v1/storage/papers/upload",
+        files={"file": ("distance-metric.pdf", simple_pdf_bytes(["paper"]), "application/pdf")},
+    )
+    assert missing_bibtex_response.status_code == 422
+
+    bibtex = b"""@article{distance2026,
+  title = {A Distance Metric for Papers},
+  author = {Ada Lovelace and Grace Hopper},
+  journal = {Journal of CaseClosed Studies},
+  year = {2026},
+  doi = {10.0000/caseclosed.2026}
+}
+"""
+    upload_response = client.post(
+        "/api/v1/storage/papers/upload",
+        files={
+            "file": ("distance-metric.pdf", simple_pdf_bytes(["paper"]), "application/pdf"),
+            "bibtex_file": ("distance-metric.bib", bibtex, "text/plain"),
+        },
+    )
+    assert upload_response.status_code == 200
+    paper = upload_response.json()["data"]["paper"]
+    assert paper["title"] == "A Distance Metric for Papers"
+    assert paper["authors_text"] == "Ada Lovelace and Grace Hopper"
+    assert paper["journal_text"] == "Journal of CaseClosed Studies"
+    assert paper["bibtex"].startswith("@article")
+    assert paper["bibtex_entry"]["entry_type"] == "article"
+    assert paper["bibtex_entry"]["entry_key"] == "distance2026"
+    assert paper["bibtex_entry"]["authors"] == ["Ada Lovelace", "Grace Hopper"]
+    assert paper["bibtex_entry"]["journal"] == "Journal of CaseClosed Studies"
+    assert paper["bibtex_entry"]["year"] == "2026"
+    assert paper["bibtex_entry"]["doi"] == "10.0000/caseclosed.2026"
+    assert paper["tags"] == []
+    storage_object = paper["storage_object"]
+    assert storage_object["directory_id"] == "storage_directory_papers"
+    assert storage_object["source_type"] == "paper"
+
+    root_objects = client.get("/api/v1/storage/objects")
+    ris = b"""TY  - JOUR
+TI  - Sleep Scoring Reliability
+AU  - Danker-Hopfe, Heidi
+AU  - Kunz, Dieter
+JF  - Journal of Sleep Research
+PY  - 2004/01/01
+DO  - 10.1111/jsr.2004
+ER  - 
+"""
+    ris_response = client.post(
+        "/api/v1/storage/papers/upload",
+        files={
+            "file": ("sleep-scoring.pdf", simple_pdf_bytes(["ris paper"]), "application/pdf"),
+            "bibtex_file": ("sleep-scoring.ris", ris, "application/x-research-info-systems"),
+        },
+    )
+    assert ris_response.status_code == 200
+    ris_paper = ris_response.json()["data"]["paper"]
+    assert ris_paper["title"] == "Sleep Scoring Reliability"
+    assert ris_paper["authors_text"] == "Danker-Hopfe, Heidi and Kunz, Dieter"
+    assert ris_paper["bibtex_entry"]["entry_type"] == "article"
+    assert ris_paper["bibtex_entry"]["authors"] == ["Danker-Hopfe, Heidi", "Kunz, Dieter"]
+    assert ris_paper["bibtex_entry"]["journal"] == "Journal of Sleep Research"
+    assert ris_paper["bibtex_entry"]["year"] == "2004"
+    assert ris_paper["bibtex_entry"]["doi"] == "10.1111/jsr.2004"
+
+    assert root_objects.status_code == 200
+    assert storage_object["id"] not in [
+        item["id"] for item in root_objects.json()["data"]["items"]
+    ]
+
+    list_response = client.get("/api/v1/storage/papers")
+    assert list_response.status_code == 200
+    assert {item["id"] for item in list_response.json()["data"]["items"]} == {paper["id"], ris_paper["id"]}
+
+    update_response = client.patch(
+        f"/api/v1/storage/papers/{paper['id']}",
+        json={
+            "title": "A Distance Metric for Papers",
+            "authors_text": "Ada Lovelace; Grace Hopper",
+            "bibtex": "@article{distance2026,title={A Distance Metric for Papers},journal={Updated Journal}}",
+            "tags": ["distance", "distance", " literature "],
+        },
+    )
+    assert update_response.status_code == 200
+    updated = update_response.json()["data"]["paper"]
+    assert updated["title"] == "A Distance Metric for Papers"
+    assert updated["authors_text"] == "Ada Lovelace; Grace Hopper"
+    assert updated["bibtex"].startswith("@article")
+    assert updated["bibtex_entry"]["journal"] == "Updated Journal"
+    assert updated["tags"] == ["distance", "literature"]
+
+    with sqlite3.connect(database_path) as connection:
+        storage_path = connection.execute(
+            "SELECT storage_path FROM storage_objects WHERE id = ?",
+            (storage_object["id"],),
+        ).fetchone()[0]
+        bibtex = connection.execute(
+            "SELECT bibtex FROM papers WHERE id = ?",
+            (paper["id"],),
+        ).fetchone()[0]
+        parsed_bibtex = connection.execute(
+            """
+            SELECT entry_type, entry_key, title, journal, raw_bibtex, fields_json
+            FROM paper_bibtex_entries
+            WHERE paper_id = ?
+            """,
+            (paper["id"],),
+        ).fetchone()
+    assert bibtex.startswith("@article")
+    assert parsed_bibtex[:4] == (
+        "article",
+        "distance2026",
+        "A Distance Metric for Papers",
+        "Updated Journal",
+    )
+    assert parsed_bibtex[4].startswith("@article")
+    assert "Updated Journal" in parsed_bibtex[5]
+    object_path = database_path.parent / "storage" / storage_path
+    assert object_path.is_file()
+
+    delete_response = client.delete(f"/api/v1/storage/papers/{paper['id']}")
+    assert delete_response.status_code == 200
+    assert delete_response.json()["data"]["purged_paper_id"] == paper["id"]
+    assert object_path.exists() is False
+
+    with sqlite3.connect(database_path) as connection:
+        paper_count = connection.execute(
+            "SELECT COUNT(*) FROM papers WHERE id = ?",
+            (paper["id"],),
+        ).fetchone()[0]
+        bibtex_count = connection.execute(
+            "SELECT COUNT(*) FROM paper_bibtex_entries WHERE paper_id = ?",
+            (paper["id"],),
+        ).fetchone()[0]
+        object_count = connection.execute(
+            "SELECT COUNT(*) FROM storage_objects WHERE id = ?",
+            (storage_object["id"],),
+        ).fetchone()[0]
+    assert paper_count == 0
+    assert bibtex_count == 0
+    assert object_count == 0

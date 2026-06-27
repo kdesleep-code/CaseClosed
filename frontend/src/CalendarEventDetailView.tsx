@@ -92,6 +92,23 @@ function attendanceValue(value: string | null | undefined) {
   return attendanceLabel(value) === t('calendar.event.attendanceOptional') ? 'not_required' : 'required'
 }
 
+const calendarMovingTag = 'calendar:moving'
+
+function calendarEventTags(event: GoogleCalendarEvent | null) {
+  const rawTags = event?.tags_json
+  if (rawTags === undefined || rawTags === null || rawTags.trim() === '') return []
+  try {
+    const parsed = JSON.parse(rawTags)
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function isCalendarEventMoving(event: GoogleCalendarEvent | null) {
+  return calendarEventTags(event).includes(calendarMovingTag)
+}
+
 function syncLabel(value: string | null | undefined) {
   if (value === 'local_only') return t('calendar.event.syncLocalOnly')
   if (value === 'synced') return t('calendar.event.syncSynced')
@@ -204,6 +221,7 @@ export default function CalendarEventDetailView({
   const [calendarIdDraft, setCalendarIdDraft] = useState('')
   const [locationDraft, setLocationDraft] = useState('')
   const [attendanceDraft, setAttendanceDraft] = useState('required')
+  const [movingDraft, setMovingDraft] = useState(false)
   const [caseQuery, setCaseQuery] = useState('')
   const [taskQuery, setTaskQuery] = useState('')
   const [startDraft, setStartDraft] = useState('')
@@ -315,6 +333,7 @@ export default function CalendarEventDetailView({
   }, [mailPageSize, mailSearchQuery, mailSearchRefreshTick, mode])
 
   const event = detail?.event ?? null
+  const eventIsMoving = isCalendarEventMoving(event)
   const calendarHref = calendarHrefForEvent(event)
   const returnHref = returnToOrFallback(calendarHref)
   const eventLocationHref = locationHref(event?.location)
@@ -372,9 +391,10 @@ export default function CalendarEventDetailView({
     setCalendarIdDraft(event.calendar_source_id ?? 'primary')
     setLocationDraft(event.location ?? '')
     setAttendanceDraft(attendanceValue(event.attendance_requirement))
+    setMovingDraft(isCalendarEventMoving(event))
     setStartDraft(eventDateTimeInputValue(event, 'start'))
     setEndDraft(eventDateTimeInputValue(event, 'end'))
-  }, [event?.id, mode])
+  }, [event?.id, event?.attendance_requirement, event?.tags_json, event?.updated, mode])
 
   useEffect(() => {
     if (!canDeleteSeries) {
@@ -395,6 +415,7 @@ export default function CalendarEventDetailView({
         calendar_id: calendarIdDraft,
         location: locationDraft.trim() === '' ? null : locationDraft,
         attendance_requirement: attendanceDraft,
+        moving: movingDraft,
       })
       setDetail(await getCalendarDbEvent(eventId))
     } catch (requestError) {
@@ -625,6 +646,7 @@ export default function CalendarEventDetailView({
               </div>
               <div className="calendar-event-badges">
                 <span>{attendanceLabel(event.attendance_requirement)}</span>
+                {eventIsMoving && <span>{t('calendar.event.moving')}</span>}
                 <span>{syncLabel(event.sync_status)}</span>
               </div>
               {event.meeting_url !== undefined && event.meeting_url !== null && event.meeting_url.trim() !== '' && (
@@ -690,6 +712,14 @@ export default function CalendarEventDetailView({
                           <option value="required">{t('calendar.event.attendanceRequired')}</option>
                           <option value="not_required">{t('calendar.event.attendanceOptional')}</option>
                         </select>
+                      </label>
+                      <label className="calendar-event-moving-toggle">
+                        <input
+                          checked={movingDraft}
+                          onChange={(inputEvent) => setMovingDraft(inputEvent.target.checked)}
+                          type="checkbox"
+                        />
+                        <span>{t('calendar.event.moving')}</span>
                       </label>
                       <button
                         className={`button-loading-dot${isSavingEvent ? ' is-loading' : ''}`}

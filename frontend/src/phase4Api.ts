@@ -486,6 +486,19 @@ export type GoogleCalendarEvent = {
   local_note?: string | null
 }
 
+export type CalendarConflictGroup = {
+  conflict_start: string
+  conflict_end: string
+  event_count: number
+  events: GoogleCalendarEvent[]
+}
+
+export type CalendarConflictList = {
+  time_min: string
+  time_max: string
+  items: CalendarConflictGroup[]
+}
+
 export type CalendarEventTitleFitPayload = {
   title: string
   font_size_px: number
@@ -500,6 +513,7 @@ export type CalendarEventUpdatePayload = {
   calendar_id?: string | null
   location?: string | null
   attendance_requirement?: string | null
+  moving?: boolean | null
 }
 
 export type CalendarEventLink = {
@@ -1024,6 +1038,22 @@ export function listCalendarDbEvents(params: {
 
 export function getCalendarDbEvent(eventId: string): Promise<CalendarEventDetail> {
   return request(`/api/v1/google/gmail/calendar/db-events/${encodeURIComponent(eventId)}`)
+}
+
+export function listCalendarConflicts(params: {
+  time_min?: string
+  time_max?: string
+} = {}): Promise<CalendarConflictList> {
+  const query = new URLSearchParams()
+  if (params.time_min !== undefined && params.time_min.trim() !== '') {
+    query.set('time_min', params.time_min)
+  }
+  if (params.time_max !== undefined && params.time_max.trim() !== '') {
+    query.set('time_max', params.time_max)
+  }
+  return request(
+    `/api/v1/google/gmail/calendar/conflicts${query.size === 0 ? '' : `?${query}`}`,
+  )
 }
 
 export function createCalendarDbEventLink(

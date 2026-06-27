@@ -7,6 +7,10 @@ import loginDoorTanuki from './assets/login-door-tanuki.png'
 import settingsGearIconUrl from './assets/settings-gear.svg'
 import pomodoroBellUrl from './assets/pomodoro-school-bell.mp3'
 import CalendarView from './CalendarView'
+import BookshelfView from './BookshelfView'
+import BookshelfReaderView from './BookshelfReaderView'
+import BookshelfTagHierarchyView from './BookshelfTagHierarchyView'
+import CalendarConflictView from './CalendarConflictView'
 import CalendarEventDetailView from './CalendarEventDetailView'
 import CalendarNewEventView from './CalendarNewEventView'
 import CaseTaskBatchGenerateView from './CaseTaskBatchGenerateView'
@@ -25,6 +29,9 @@ import type { MailInitialData } from './MailView'
 import type { MailTab } from './MailView'
 import MailThreadView from './MailThreadView'
 import MaintenanceView from './MaintenanceView'
+import PaperShelfView from './PaperShelfView'
+import PaperDetailView from './PaperDetailView'
+import PaperJournalIconsView from './PaperJournalIconsView'
 import type { MaintenanceInitialData } from './MaintenanceView'
 import ProfileView from './ProfileView'
 import SettingsView from './SettingsView'
@@ -50,6 +57,7 @@ import {
   listPendingMails,
   readMaintenanceStatus,
 } from './phase2Api'
+import { listTasks } from './phase8Api'
 import {
   createFileIconSetting,
   deleteFileIconSetting,
@@ -93,6 +101,18 @@ type LinkRenderItem = LinkItem & {
   label?: string
 }
 
+type TopAttentionState = {
+  mail: boolean
+  tasks: boolean
+  maintenance: boolean
+}
+
+const emptyTopAttentionState: TopAttentionState = {
+  mail: false,
+  tasks: false,
+  maintenance: false,
+}
+
 type PageSlot = LinkItem | { blank: true; key: string }
 
 const pomodoroSettingsStorageKey = 'caseclosed.pomodoroSettings'
@@ -104,6 +124,8 @@ const pageLinks: LinkItem[] = [
   { labelKey: 'nav.calendar', href: '/calendar' },
   { labelKey: 'nav.contacts', href: '/contacts' },
   { labelKey: 'nav.files', href: '/files' },
+  { labelKey: 'nav.bookshelf', href: '/bookshelf' },
+  { labelKey: 'nav.papers', href: '/papers' },
   { labelKey: 'nav.externalTools', href: '/external-tools' },
   { labelKey: 'nav.extensions', href: '/extensions' },
   { labelKey: 'nav.pomodoro', href: '/pomodoro', target: '_blank', rel: 'noopener noreferrer' },
@@ -214,6 +236,20 @@ function topTodayClassName() {
 
 function linkLabel(link: LinkRenderItem) {
   return link.label ?? t(link.labelKey)
+}
+
+function topAttentionTitle(href: string) {
+  if (href === '/mail') return t('top.attention.mail')
+  if (href === '/tasks') return t('top.attention.tasks')
+  if (href === '/maintenance') return t('top.attention.maintenance')
+  return null
+}
+
+function hasTopAttention(attentionState: TopAttentionState, href: string) {
+  if (href === '/mail') return attentionState.mail
+  if (href === '/tasks') return attentionState.tasks
+  if (href === '/maintenance') return attentionState.maintenance
+  return false
 }
 
 function startOfDate(date: string) {
@@ -516,6 +552,9 @@ function TopView({
     initialPendingCount ?? null,
   )
   const [pendingError, setPendingError] = useState<string | null>(null)
+  const [attentionState, setAttentionState] = useState<TopAttentionState>(
+    emptyTopAttentionState,
+  )
 
   useEffect(() => {
     if (initialPendingCount !== undefined) {
@@ -540,6 +579,35 @@ function TopView({
       isMounted = false
     }
   }, [initialPendingCount])
+
+  useEffect(() => {
+    let isMounted = true
+
+    Promise.allSettled([
+      listMailPage({ tab: 'all', needs_action: true, limit: 1 }),
+      listTasks({ status: 'open', due: 'today', limit: 1 }),
+      listTasks({ status: 'open', due: 'overdue', limit: 1 }),
+      readMaintenanceStatus(),
+    ]).then(([mailResult, todayTasksResult, overdueTasksResult, maintenanceResult]) => {
+      if (!isMounted) {
+        return
+      }
+      setAttentionState({
+        mail: mailResult.status === 'fulfilled' && mailResult.value.items.length > 0,
+        tasks:
+          (todayTasksResult.status === 'fulfilled' && todayTasksResult.value.length > 0) ||
+          (overdueTasksResult.status === 'fulfilled' && overdueTasksResult.value.length > 0),
+        maintenance:
+          maintenanceResult.status === 'fulfilled' &&
+          ((maintenanceResult.value.action_required_jobs ?? 0) > 0 ||
+            maintenanceResult.value.external_unknown_count > 0),
+      })
+    })
+
+    return () => {
+      isMounted = false
+    }
+  }, [])
 
   const isLockedByPending = pendingCount !== null && pendingCount > 0
 
@@ -586,6 +654,26 @@ function TopView({
     }
   }
 
+  function linkContent(link: LinkRenderItem) {
+    const attentionTitle = topAttentionTitle(link.href)
+    const showAttention = attentionTitle !== null && hasTopAttention(attentionState, link.href)
+
+    return (
+      <>
+        {linkLabel(link)}
+        {showAttention && (
+          <small
+            aria-label={attentionTitle}
+            className="top-attention-badge"
+            title={attentionTitle}
+          >
+            {t('top.attention.mark')}
+          </small>
+        )}
+      </>
+    )
+  }
+
   function lockedLink(link: LinkRenderItem, className?: string) {
     if (!isLockedByPending || link.href === '/maintenance') {
       return (
@@ -602,13 +690,13 @@ function TopView({
           rel={link.rel}
           target={link.target}
         >
-          {linkLabel(link)}
+          {linkContent(link)}
         </AppLink>
       )
     }
     return (
       <span aria-disabled="true" className={className} key={link.href}>
-        {linkLabel(link)}
+        {linkContent(link)}
       </span>
     )
   }
@@ -2161,6 +2249,60 @@ function App() {
         </>
       )
     }
+    if (path === '/bookshelf') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <BookshelfView />
+        </>
+      )
+    }
+    if (path === '/bookshelf/tag-hierarchy') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <BookshelfTagHierarchyView />
+        </>
+      )
+    }
+    if (path === '/papers') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <PaperShelfView />
+        </>
+      )
+    }
+    if (path === '/paper-journal-icons') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <PaperJournalIconsView />
+        </>
+      )
+    }
+    if (path.startsWith('/papers/')) {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <PaperDetailView paperId={decodeURIComponent(path.slice('/papers/'.length))} />
+        </>
+      )
+    }
+    if (path.startsWith('/bookshelf/')) {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <BookshelfReaderView storageObjectId={decodeURIComponent(path.slice('/bookshelf/'.length))} />
+        </>
+      )
+    }
     if (path === '/cases') {
       return (
         <>
@@ -2176,6 +2318,15 @@ function App() {
           {pendingContactNoticeElement}
           {navigationError !== null && <p className="route-error">{navigationError}</p>}
           <TaskView />
+        </>
+      )
+    }
+    if (path === '/calendar/conflicts') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <CalendarConflictView />
         </>
       )
     }

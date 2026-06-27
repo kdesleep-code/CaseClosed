@@ -18,7 +18,7 @@ import type {
 } from './phase4Api'
 import settingsGearIconUrl from './assets/settings-gear.svg'
 import { t } from './i18n'
-import { AppLink, TopNav } from './navigation'
+import { AppLink, TopNav, navigateTo } from './navigation'
 
 type CalendarEventWithSource = GoogleCalendarEvent & {
   calendar_source_id?: string | null
@@ -1046,14 +1046,23 @@ function CalendarView() {
                 <h2>{weekLabel}</h2>
                 <p>{t('calendar.day.count', { count: String(selectedEvents.length) })}</p>
               </div>
-              <button
-                className={`calendar-sync-button button-loading-dot${isSyncing ? ' is-loading' : ''}`}
-                disabled={isLoading || isSyncing || !canRead}
-                onClick={() => void syncVisibleCalendars()}
-                type="button"
-              >
-                {t('calendar.sync.load')}
-              </button>
+              <div className="calendar-heading-actions">
+                <button
+                  className={`calendar-sync-button button-loading-dot${isSyncing ? ' is-loading' : ''}`}
+                  disabled={isLoading || isSyncing || !canRead}
+                  onClick={() => void syncVisibleCalendars()}
+                  type="button"
+                >
+                  {t('calendar.sync.load')}
+                </button>
+                <button
+                  className="calendar-conflict-button"
+                  onClick={() => navigateTo('/calendar/conflicts')}
+                  type="button"
+                >
+                  {t('calendar.conflicts.open')}
+                </button>
+              </div>
             </div>
             {isLoading ? (
               <p className="mail-empty">{t('calendar.loading')}</p>

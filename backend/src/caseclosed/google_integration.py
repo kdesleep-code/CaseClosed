@@ -161,6 +161,7 @@ class CalendarEventUpdatePayload(BaseModel):
     calendar_id: str | None = None
     location: str | None = None
     attendance_requirement: str | None = None
+    moving: bool | None = None
 
 
 class CalendarEventTitleFitPayload(BaseModel):
@@ -173,6 +174,53 @@ class CalendarEventTitleFitPayload(BaseModel):
 
 
 CALENDAR_WEEK_TITLE_FIT_VERSION = 2
+CALENDAR_MOVING_TAG = "calendar:moving"
+
+
+def calendar_event_tags(event: CalendarEvent) -> list[str]:
+    if event.tags_json is None or event.tags_json.strip() == "":
+        return []
+    try:
+        parsed = json.loads(event.tags_json)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    tags: list[str] = []
+    for item in parsed:
+        if not isinstance(item, str):
+            continue
+        tag = item.strip()
+        if tag != "" and tag not in tags:
+            tags.append(tag)
+    return tags
+
+
+def set_calendar_event_tag(event: CalendarEvent, tag: str, enabled: bool) -> bool:
+    tags = calendar_event_tags(event)
+    next_tags = [existing for existing in tags if existing != tag]
+    if enabled:
+        next_tags.append(tag)
+    if next_tags == tags:
+        return False
+    event.tags_json = json.dumps(next_tags, ensure_ascii=False) if next_tags else None
+    return True
+
+
+def calendar_event_is_moving(event: CalendarEvent) -> bool:
+    return CALENDAR_MOVING_TAG in calendar_event_tags(event)
+
+
+def set_calendar_event_moving(event: CalendarEvent, enabled: bool) -> bool:
+    return set_calendar_event_tag(event, CALENDAR_MOVING_TAG, enabled)
+
+
+def clear_calendar_event_moving_after_time_change(event: CalendarEvent) -> bool:
+    changed = set_calendar_event_moving(event, False)
+    if event.attendance_requirement != "required":
+        event.attendance_requirement = "required"
+        changed = True
+    return changed
 
 
 class CalendarEventFromMailPrefillPayload(BaseModel):
@@ -814,6 +862,110 @@ def calendar_db_events(
     }
 
 
+def calendar_conflict_item(event: CalendarEvent) -> dict[str, object]:
+    return calendar_db_event_item(event)
+
+
+def calendar_conflict_group_item(
+    segment_start: datetime,
+    segment_end: datetime,
+    events: list[CalendarEvent],
+) -> dict[str, object]:
+    return {
+        "conflict_start": jst_iso(segment_start),
+        "conflict_end": jst_iso(segment_end),
+        "event_count": len(events),
+        "events": [calendar_conflict_item(event) for event in events],
+    }
+
+
+def calendar_conflict_groups(
+    events: list[CalendarEvent],
+) -> list[tuple[datetime, datetime, list[CalendarEvent]]]:
+    boundaries = sorted(
+        {
+            parse_iso_datetime(event.start_at)
+            for event in events
+        }
+        | {
+            parse_iso_datetime(event.end_at)
+            for event in events
+        }
+    )
+    groups: list[tuple[datetime, datetime, list[CalendarEvent]]] = []
+    seen_keys: set[tuple[str, ...]] = set()
+    for index, segment_start in enumerate(boundaries[:-1]):
+        segment_end = boundaries[index + 1]
+        if segment_end <= segment_start:
+            continue
+        active = [
+            event
+            for event in events
+            if parse_iso_datetime(event.start_at) < segment_end
+            and parse_iso_datetime(event.end_at) > segment_start
+        ]
+        if len(active) < 2:
+            continue
+        active = sorted(active, key=lambda event: (event.start_at, event.end_at, event.id))
+        key = tuple(event.id for event in active)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        groups.append((segment_start, segment_end, active))
+    return groups
+
+
+@router.get("/calendar/conflicts")
+def calendar_conflicts(
+    time_min: str | None = None,
+    time_max: str | None = None,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    range_start = parse_iso_datetime(time_min) if time_min is not None and time_min.strip() != "" else jst_now()
+    range_end = (
+        parse_iso_datetime(time_max)
+        if time_max is not None and time_max.strip() != ""
+        else range_start + timedelta(days=31)
+    )
+    if range_end <= range_start:
+        raise json_error(422, "VALIDATION_ERROR", "time_max must be after time_min.")
+
+    events = session.scalars(
+        select(CalendarEvent)
+        .where(CalendarEvent.sync_status != "missing_from_google")
+        .where(CalendarEvent.sync_status != "cancelled")
+        .where(
+            (CalendarEvent.google_status.is_(None))
+            | (CalendarEvent.google_status != "cancelled")
+        )
+        .where(
+            (CalendarEvent.attendance_requirement.is_(None))
+            | (~CalendarEvent.attendance_requirement.in_({"optional", "not_required", "unnecessary", "no_attendance"}))
+        )
+        .where(CalendarEvent.all_day == 0)
+        .where(
+            (CalendarEvent.tags_json.is_(None))
+            | (~CalendarEvent.tags_json.contains(CALENDAR_MOVING_TAG))
+        )
+        .where(CalendarEvent.end_at > jst_iso(range_start))
+        .where(CalendarEvent.start_at < jst_iso(range_end))
+        .order_by(CalendarEvent.start_at.asc(), CalendarEvent.end_at.asc(), CalendarEvent.summary.asc())
+    ).all()
+    events = deduplicated_calendar_events(events)
+    groups = calendar_conflict_groups(events)
+    return {
+        "ok": True,
+        "data": {
+            "time_min": jst_iso(range_start),
+            "time_max": jst_iso(range_end),
+            "items": [
+                calendar_conflict_group_item(segment_start, segment_end, group)
+                for segment_start, segment_end, group in groups
+            ],
+        },
+    }
+
+
 def deduplicated_calendar_events(events: list[CalendarEvent]) -> list[CalendarEvent]:
     selected: dict[tuple[str, str, str], CalendarEvent] = {}
     passthrough: list[CalendarEvent] = []
@@ -996,6 +1148,9 @@ def update_calendar_db_event(
             db_event.attendance_requirement = attendance_requirement or "unknown"
             db_event.updated_at = now
             db_event.version += 1
+        if payload.moving is not None and set_calendar_event_moving(db_event, payload.moving):
+            db_event.updated_at = now
+            db_event.version += 1
         session.commit()
         return {
             "ok": True,
@@ -1013,6 +1168,8 @@ def update_calendar_db_event(
         event.external_calendar_id = target_calendar_id
     if attendance_requirement_was_provided:
         event.attendance_requirement = attendance_requirement or "unknown"
+    if payload.moving is not None:
+        set_calendar_event_moving(event, payload.moving)
     event.updated_at = now
     event.version += 1
     session.commit()
@@ -1099,6 +1256,9 @@ def move_calendar_db_event(
             item=data,
             now=now,
         )
+        if clear_calendar_event_moving_after_time_change(db_event):
+            db_event.updated_at = now
+            db_event.version += 1
         session.commit()
         return {
             "ok": True,
@@ -1111,6 +1271,7 @@ def move_calendar_db_event(
     event.start_at = calendar_event_time(payload.start, payload.time_zone)["dateTime"]  # type: ignore[index]
     event.end_at = calendar_event_time(payload.end, payload.time_zone)["dateTime"]  # type: ignore[index]
     event.time_zone = payload.time_zone
+    clear_calendar_event_moving_after_time_change(event)
     event.updated_at = now
     event.last_synced_at = now
     event.version += 1

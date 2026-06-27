@@ -530,6 +530,180 @@ def test_calendar_db_events_deduplicates_primary_alias_rows(
     assert items[0]["id"] == "calendar_event_real_primary"
 
 
+
+def test_google_calendar_conflicts_lists_required_overlaps(client, database_path) -> None:
+    rows = [
+        (
+            "calendar_event_conflict_a",
+            "primary",
+            "google_conflict_a",
+            "Required A",
+            "2026-06-24T10:00:00+09:00",
+            "2026-06-24T11:00:00+09:00",
+            0,
+            "required",
+            None,
+        ),
+        (
+            "calendar_event_conflict_b",
+            "primary",
+            "google_conflict_b",
+            "Required B",
+            "2026-06-24T10:30:00+09:00",
+            "2026-06-24T11:30:00+09:00",
+            0,
+            "required",
+            None,
+        ),
+        (
+            "calendar_event_unknown_overlap",
+            "primary",
+            "google_unknown_overlap",
+            "Unknown overlap",
+            "2026-06-24T10:45:00+09:00",
+            "2026-06-24T11:15:00+09:00",
+            0,
+            "unknown",
+            None,
+        ),
+        (
+            "calendar_event_moving_overlap",
+            "primary",
+            "google_moving_overlap",
+            "Moving overlap",
+            "2026-06-24T10:40:00+09:00",
+            "2026-06-24T11:20:00+09:00",
+            0,
+            "unknown",
+            '["calendar:moving"]',
+        ),
+        (
+            "calendar_event_optional_overlap",
+            "primary",
+            "google_optional_overlap",
+            "Optional overlap",
+            "2026-06-24T10:50:00+09:00",
+            "2026-06-24T11:10:00+09:00",
+            0,
+            "optional",
+            None,
+        ),
+        (
+            "calendar_event_not_required_overlap",
+            "primary",
+            "google_not_required_overlap",
+            "Not required overlap",
+            "2026-06-24T10:55:00+09:00",
+            "2026-06-24T11:05:00+09:00",
+            0,
+            "not_required",
+            None,
+        ),
+        (
+            "calendar_event_all_day_required",
+            "primary",
+            "google_all_day_required",
+            "All day required",
+            "2026-06-24T00:00:00+09:00",
+            "2026-06-25T00:00:00+09:00",
+            1,
+            "required",
+            None,
+        ),
+        (
+            "calendar_event_not_overlap",
+            "primary",
+            "google_not_overlap",
+            "Required C",
+            "2026-06-24T12:00:00+09:00",
+            "2026-06-24T13:00:00+09:00",
+            0,
+            "required",
+            None,
+        ),
+    ]
+    with sqlite3.connect(database_path) as connection:
+        connection.executemany(
+            """
+            INSERT INTO calendar_events (
+                id, source, external_calendar_id, external_event_id,
+                summary, start_at, end_at, all_day, sync_status,
+                attendance_requirement, tags_json, created_at, updated_at, version
+            )
+            VALUES (?, 'google', ?, ?, ?, ?, ?, ?, 'synced', ?, ?,
+                    '2026-06-24T09:00:00+09:00',
+                    '2026-06-24T09:00:00+09:00', 1)
+            """,
+            rows,
+        )
+        connection.commit()
+
+    response = client.get(
+        "/api/v1/google/gmail/calendar/conflicts"
+        "?time_min=2026-06-24T00:00:00%2B09:00"
+        "&time_max=2026-06-25T00:00:00%2B09:00"
+    )
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert len(items) == 3
+    assert items[0]["conflict_start"] == "2026-06-24T10:30:00+09:00"
+    assert items[0]["conflict_end"] == "2026-06-24T10:45:00+09:00"
+    assert [event["id"] for event in items[0]["events"]] == [
+        "calendar_event_conflict_a",
+        "calendar_event_conflict_b",
+    ]
+    assert items[1]["conflict_start"] == "2026-06-24T10:45:00+09:00"
+    assert items[1]["conflict_end"] == "2026-06-24T11:00:00+09:00"
+    assert [event["id"] for event in items[1]["events"]] == [
+        "calendar_event_conflict_a",
+        "calendar_event_conflict_b",
+        "calendar_event_unknown_overlap",
+    ]
+    assert items[2]["conflict_start"] == "2026-06-24T11:00:00+09:00"
+    assert items[2]["conflict_end"] == "2026-06-24T11:15:00+09:00"
+    assert [event["id"] for event in items[2]["events"]] == [
+        "calendar_event_conflict_b",
+        "calendar_event_unknown_overlap",
+    ]
+    returned_ids = {event["id"] for item in items for event in item["events"]}
+    assert "calendar_event_moving_overlap" not in returned_ids
+
+
+def test_calendar_event_time_move_clears_moving_tag_and_requires_attendance(client, database_path) -> None:
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO calendar_events (
+                id, source, external_calendar_id, external_event_id,
+                summary, start_at, end_at, all_day, sync_status,
+                attendance_requirement, tags_json, created_at, updated_at, version
+            )
+            VALUES (
+                'calendar_event_moving_local', 'local', 'local', NULL,
+                'Moving local', '2026-06-24T10:00:00+09:00', '2026-06-24T11:00:00+09:00',
+                0, 'local_only', 'unknown', '["calendar:moving"]',
+                '2026-06-24T09:00:00+09:00', '2026-06-24T09:00:00+09:00', 1
+            )
+            """
+        )
+        connection.commit()
+
+    response = client.patch(
+        "/api/v1/google/gmail/calendar/db-events/calendar_event_moving_local/move",
+        json={
+            "start": "2026-06-24T12:00:00+09:00",
+            "end": "2026-06-24T13:00:00+09:00",
+            "time_zone": "Asia/Tokyo",
+        },
+    )
+
+    assert response.status_code == 200
+    event = response.json()["data"]["event"]
+    assert event["attendance_requirement"] == "required"
+    assert event["tags_json"] is None
+
+
 def test_google_calendar_events_lists_primary_events(
     client,
     database_path,
