@@ -1,0 +1,3 @@
+[submodule "extensions/user-extensions"]
+	path = extensions/user-extensions
+	url = git@github.com:kdesleep-code/Caseclosed-extension.git
