@@ -22,6 +22,7 @@ export type ExtensionInstance = {
   host: string
   port: number
   base_url: string
+  open_url: string
   process_id: number | null
   launch_context: {
     case_id: string | null

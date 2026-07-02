@@ -11,13 +11,20 @@ import json
 import secrets
 import socket
 import subprocess
+import time
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.error import URLError
+from urllib.request import Request as UrlRequest
+from urllib.request import urlopen
 from uuid import uuid4
 
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import Header
 from fastapi import Query
+from fastapi import Request
+from fastapi import Response
 from pydantic import BaseModel
 from sqlalchemy import or_
 from sqlalchemy import select
@@ -37,7 +44,10 @@ from caseclosed.db.models import AuditLog
 from caseclosed.db.models import Case
 from caseclosed.db.models import CaseEvent
 from caseclosed.db.models import CaseGenre
+from caseclosed.db.models import CaseAutoAssignRule
 from caseclosed.db.models import CaseMailLink
+from caseclosed.db.models import CaseStakeholder
+from caseclosed.db.models import CalendarEvent
 from caseclosed.db.models import Contact
 from caseclosed.db.models import ContactEmailAddress
 from caseclosed.db.models import ContactTag
@@ -53,6 +63,7 @@ from caseclosed.db.runtime import ensure_case_storage_directory
 from caseclosed.db.runtime import get_session
 from caseclosed.db.runtime import jst_iso
 from caseclosed.db import runtime as db_runtime
+from caseclosed.email_addressing import normalize_email_address
 from caseclosed.storage import save_storage_object
 from caseclosed.storage import storage_directory_data
 from caseclosed.storage import storage_directory_path
@@ -60,6 +71,32 @@ from caseclosed.storage import storage_object_absolute_path
 from caseclosed.storage import storage_object_data
 from caseclosed.storage import storage_object_version_data
 from caseclosed.storage import update_storage_object_from_upload
+
+
+def extension_calendar_event_data(event: CalendarEvent) -> dict[str, object]:
+    if event.all_day:
+        start: dict[str, object] = {"date": event.start_at[:10]}
+        end: dict[str, object] = {"date": event.end_at[:10]}
+    else:
+        start = {"dateTime": event.start_at}
+        end = {"dateTime": event.end_at}
+        if event.time_zone is not None:
+            start["timeZone"] = event.time_zone
+            end["timeZone"] = event.time_zone
+    return {
+        "id": event.id,
+        "calendar_source_id": event.external_calendar_id,
+        "summary": event.summary,
+        "description": event.description,
+        "location": event.location,
+        "start": start,
+        "end": end,
+        "status": event.google_status,
+        "sync_status": event.sync_status,
+        "attendance_requirement": event.attendance_requirement,
+        "tags_json": event.tags_json,
+    }
+
 
 router = APIRouter(prefix="/api/v1/extensions", tags=["extensions"])
 extension_api_router = APIRouter(prefix="/api/v1/extension-api", tags=["extension-api"])
@@ -71,6 +108,10 @@ DEFAULT_EXTENSION_MANIFESTS = [
     Path(__file__).resolve().parents[3]
     / "extensions"
     / "caseclosed-extension-template"
+    / "caseclosed-extension.json",
+    Path(__file__).resolve().parents[3]
+    / "extensions"
+    / "supervise-case-template"
     / "caseclosed-extension.json",
 ]
 
@@ -103,6 +144,16 @@ class ExtensionCaseCreate(BaseModel):
     progress_status: str = "not_started"
     genre_id: str | None = None
     tags: list[str] | None = None
+
+
+class ExtensionCaseStakeholderCreate(BaseModel):
+    contact_id: str
+    role: str = "stakeholder"
+
+
+class ExtensionCaseAutoAssignRuleCreate(BaseModel):
+    sender_email: str
+    label: str | None = None
 
 
 class BytesUpload:
@@ -311,7 +362,40 @@ def bootstrap_default_extensions(session: DatabaseSession) -> None:
         )
         bootstrapped = True
     if bootstrapped:
+        ensure_supervise_template_genre(session)
         session.commit()
+
+
+def ensure_supervise_template_genre(session: DatabaseSession) -> None:
+    extension = session.scalar(
+        select(ExtensionDefinition).where(ExtensionDefinition.slug == "supervise-case-template")
+    )
+    if extension is None:
+        return
+    genre = session.scalar(select(CaseGenre).where(CaseGenre.title == "Supervise"))
+    now = jst_iso()
+    if genre is None:
+        max_sort_order = session.scalar(
+            select(CaseGenre.sort_order).order_by(CaseGenre.sort_order.desc())
+        )
+        genre = CaseGenre(
+            id=new_id("case_genre"),
+            title="Supervise",
+            color_hex="#b8dd63",
+            sort_order=(max_sort_order if max_sort_order is not None else -1) + 1,
+            template_extension_id=extension.id,
+            template_context_json=json.dumps({"mode": "case_template", "template": "supervise"}, ensure_ascii=False),
+            created_at=now,
+            updated_at=now,
+            version=1,
+        )
+        session.add(genre)
+        return
+    if genre.template_extension_id is None:
+        genre.template_extension_id = extension.id
+        genre.template_context_json = json.dumps({"mode": "case_template", "template": "supervise"}, ensure_ascii=False)
+        genre.updated_at = now
+        genre.version += 1
 
 
 def extension_data(extension: ExtensionDefinition) -> dict[str, object]:
@@ -333,6 +417,10 @@ def extension_data(extension: ExtensionDefinition) -> dict[str, object]:
     }
 
 
+def extension_proxy_open_url(instance: ExtensionInstance) -> str:
+    return f"/api/v1/extensions/instances/{instance.id}/proxy/"
+
+
 def instance_data(instance: ExtensionInstance) -> dict[str, object]:
     return {
         "id": instance.id,
@@ -342,6 +430,7 @@ def instance_data(instance: ExtensionInstance) -> dict[str, object]:
         "host": instance.host,
         "port": instance.port,
         "base_url": instance.base_url,
+        "open_url": extension_proxy_open_url(instance),
         "process_id": instance.process_id,
         "launch_context": json.loads(instance.launch_context_json),
         "started_at": instance.started_at,
@@ -373,6 +462,24 @@ def stop_instance_process(instance: ExtensionInstance) -> None:
         process.wait(timeout=5)
 
 
+def wait_for_extension_ready(base_url: str, process: subprocess.Popen[bytes], *, timeout_seconds: float = 5.0) -> str | None:
+    deadline = time.monotonic() + timeout_seconds
+    last_error: str | None = None
+    while time.monotonic() < deadline:
+        exit_code = process.poll()
+        if exit_code is not None:
+            return f"Extension process exited before becoming ready: exit_code={exit_code}"
+        try:
+            request = UrlRequest(base_url, method="GET")
+            with urlopen(request, timeout=0.4) as response:
+                if 200 <= response.status < 500:
+                    return None
+        except Exception as error:  # noqa: BLE001 - readiness should tolerate transient startup failures.
+            last_error = str(error)
+        time.sleep(0.1)
+    return last_error or "Extension did not become ready in time."
+
+
 def mark_instance_stopped(
     session: DatabaseSession,
     instance: ExtensionInstance,
@@ -388,6 +495,29 @@ def mark_instance_stopped(
     instance.version += 1
     return instance
 
+
+
+def mark_active_extension_instances_stopped_on_startup(session: DatabaseSession) -> int:
+    instances = session.scalars(
+        select(ExtensionInstance).where(ExtensionInstance.status.in_(["starting", "running"]))
+    ).all()
+    if len(instances) == 0:
+        return 0
+    now = jst_iso()
+    for instance in instances:
+        instance.status = "stopped"
+        instance.stopped_at = now
+        instance.updated_at = now
+        instance.version += 1
+        write_extension_audit_log(
+            session,
+            action_type="extension.startup_stopped",
+            target_type="extension_instance",
+            target_id=instance.id,
+            case_id=instance.case_id,
+            metadata={"reason": "backend_restarted"},
+        )
+    return len(instances)
 
 def stop_idle_extension_instances(session: DatabaseSession) -> int:
     instances = session.scalars(
@@ -639,6 +769,11 @@ def start_extension(
         existing_instance.last_seen_at = now
         existing_instance.updated_at = now
         existing_instance.idle_timeout_seconds = idle_timeout
+        if "context" in payload.model_fields_set:
+            existing_instance.launch_context_json = json.dumps(
+                {"case_id": payload.case_id, "context": payload.context or {}},
+                ensure_ascii=False,
+            )
         existing_instance.version += 1
         write_extension_audit_log(
             session,
@@ -659,7 +794,7 @@ def start_extension(
             "ok": True,
             "data": {
                 "instance": instance_data(existing_instance),
-                "open_url": existing_instance.base_url,
+                "open_url": extension_proxy_open_url(existing_instance),
                 "extension_token": None,
                 "reused": True,
             },
@@ -733,10 +868,37 @@ def start_extension(
         session.commit()
         raise json_error(500, "EXTENSION_START_FAILED", str(error)) from error
     instance.process_id = process.pid
+    RUNNING_PROCESSES[instance.id] = process
+    ready_error = wait_for_extension_ready(base_url, process)
+    if ready_error is not None:
+        instance.status = "failed"
+        instance.error_message = ready_error
+        instance.stopped_at = jst_iso()
+        instance.updated_at = instance.stopped_at
+        instance.version += 1
+        with suppress(Exception):
+            process.terminate()
+        RUNNING_PROCESSES.pop(instance.id, None)
+        write_extension_audit_log(
+            session,
+            action_type="extension.start_failed",
+            target_type="extension_instance",
+            target_id=instance.id,
+            case_id=payload.case_id,
+            metadata={
+                "extension_id": extension.id,
+                "slug": extension.slug,
+                "name": extension.name,
+                "process_id": process.pid,
+                "base_url": base_url,
+                "error_message": ready_error,
+            },
+        )
+        session.commit()
+        raise json_error(502, "EXTENSION_START_FAILED", ready_error)
     instance.status = "running"
     instance.updated_at = jst_iso()
     instance.version += 1
-    RUNNING_PROCESSES[instance.id] = process
     write_extension_audit_log(
         session,
         action_type="extension.started",
@@ -757,10 +919,82 @@ def start_extension(
         "ok": True,
         "data": {
             "instance": instance_data(instance),
-            "open_url": base_url,
+            "open_url": extension_proxy_open_url(instance),
             "extension_token": token,
         },
     }
+
+
+@router.api_route("/instances/{instance_id}/proxy/{proxy_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+async def proxy_extension_instance(
+    instance_id: str,
+    proxy_path: str,
+    request: Request,
+    session: DatabaseSession = Depends(get_session),
+) -> Response:
+    instance = session.get(ExtensionInstance, instance_id)
+    if instance is None:
+        raise json_error(404, "NOT_FOUND", "Extension instance not found.")
+    if instance.status != "running":
+        raise json_error(409, "EXTENSION_NOT_RUNNING", "Extension instance is not running.")
+
+    target_url = instance.base_url.rstrip("/")
+    if proxy_path:
+        target_url = f"{target_url}/{proxy_path}"
+    query = str(request.url.query)
+    if query:
+        target_url = f"{target_url}?{query}"
+
+    headers = {
+        key: value
+        for key, value in request.headers.items()
+        if key.lower() in {"accept", "content-type", "user-agent"}
+    }
+    body = await request.body()
+
+    def fetch_upstream() -> tuple[bytes, int, dict[str, str]]:
+        upstream_request = UrlRequest(
+            target_url,
+            data=body if body else None,
+            headers=headers,
+            method=request.method,
+        )
+        try:
+            with urlopen(upstream_request, timeout=30) as upstream_response:
+                return (
+                    upstream_response.read(),
+                    upstream_response.status,
+                    {
+                        key: value
+                        for key, value in upstream_response.headers.items()
+                        if key.lower() in {"content-type", "cache-control"}
+                    },
+                )
+        except HTTPError as error:
+            return (
+                error.read(),
+                error.code,
+                {
+                    key: value
+                    for key, value in error.headers.items()
+                    if key.lower() in {"content-type", "cache-control"}
+                },
+            )
+
+    last_url_error: URLError | None = None
+    for attempt in range(5):
+        try:
+            content, status_code, response_headers = await asyncio.to_thread(fetch_upstream)
+            return Response(content=content, status_code=status_code, headers=response_headers)
+        except URLError as error:
+            last_url_error = error
+            if attempt == 4:
+                break
+            await asyncio.sleep(0.15)
+        except TimeoutError as error:
+            raise json_error(504, "EXTENSION_PROXY_TIMEOUT", "Extension did not respond in time.") from error
+    reason = str(last_url_error.reason) if last_url_error is not None else "Extension proxy failed."
+    raise json_error(502, "EXTENSION_PROXY_FAILED", reason)
 
 
 @router.post("/instances/{instance_id}/stop")
@@ -797,6 +1031,56 @@ def get_extension_context(
         "ok": True,
         "data": {
             "instance": instance_data(instance),
+        },
+    }
+
+
+@extension_api_router.get("/calendar/db-events")
+def list_extension_calendar_db_events(
+    time_min: str | None = Query(default=None),
+    time_max: str | None = Query(default=None),
+    calendar_id: str | None = Query(default=None),
+    limit: int = Query(default=500, ge=1, le=1000),
+    instance: ExtensionInstance = Depends(require_extension_instance),
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    statement = select(CalendarEvent).where(CalendarEvent.sync_status != "missing_from_google")
+    statement = statement.where(CalendarEvent.sync_status != "cancelled")
+    statement = statement.where(
+        (CalendarEvent.google_status.is_(None))
+        | (CalendarEvent.google_status != "cancelled")
+    )
+    if calendar_id is not None and calendar_id.strip() != "":
+        statement = statement.where(CalendarEvent.external_calendar_id == calendar_id.strip())
+    if time_min is not None and time_min.strip() != "":
+        statement = statement.where(CalendarEvent.end_at > time_min.strip())
+    if time_max is not None and time_max.strip() != "":
+        statement = statement.where(CalendarEvent.start_at < time_max.strip())
+    events = session.scalars(
+        statement.order_by(CalendarEvent.start_at.asc(), CalendarEvent.summary.asc()).limit(limit)
+    ).all()
+    extension = session.get(ExtensionDefinition, instance.extension_id)
+    write_extension_audit_log(
+        session,
+        action_type="extension.calendar_events_read",
+        target_type="calendar_event",
+        target_id=None,
+        case_id=instance.case_id,
+        metadata={
+            "extension_instance_id": instance.id,
+            "extension_id": instance.extension_id,
+            "slug": extension.slug if extension is not None else None,
+            "time_min": time_min,
+            "time_max": time_max,
+            "calendar_id": calendar_id,
+            "count": len(events),
+        },
+    )
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "items": [extension_calendar_event_data(event) for event in events],
         },
     }
 
@@ -1003,6 +1287,215 @@ def create_extension_case(
     )
     session.commit()
     return {"ok": True, "data": {"case": case_data(case, session)}}
+
+
+
+
+@extension_api_router.get("/cases/{case_id}/stakeholders")
+def list_extension_case_stakeholders(
+    case_id: str,
+    instance: ExtensionInstance = Depends(require_extension_instance),
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    case = ensure_case_exists(session, case_id)
+    rows = session.execute(
+        select(CaseStakeholder, Contact)
+        .join(Contact, Contact.id == CaseStakeholder.contact_id)
+        .where(CaseStakeholder.case_id == case.id)
+        .where(Contact.deleted_at.is_(None))
+        .order_by(CaseStakeholder.sort_order.asc(), CaseStakeholder.created_at.asc())
+    ).all()
+    extension = session.get(ExtensionDefinition, instance.extension_id)
+    write_extension_audit_log(
+        session,
+        action_type="extension.case_stakeholders_listed",
+        target_type="case",
+        target_id=case.id,
+        case_id=case.id,
+        metadata={
+            "extension_instance_id": instance.id,
+            "extension_id": instance.extension_id,
+            "slug": extension.slug if extension is not None else None,
+            "result_count": len(rows),
+        },
+    )
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "items": [
+                {
+                    "id": stakeholder.id,
+                    "case_id": stakeholder.case_id,
+                    "contact_id": stakeholder.contact_id,
+                    "contact_display_name": contact.display_name,
+                    "contact_tags": list(
+                        session.scalars(
+                            select(ContactTag.tag)
+                            .where(ContactTag.contact_id == contact.id)
+                            .order_by(ContactTag.tag.asc())
+                        ).all()
+                    ),
+                    "role": stakeholder.role,
+                    "sort_order": stakeholder.sort_order,
+                    "created_at": stakeholder.created_at,
+                    "updated_at": stakeholder.updated_at,
+                    "version": stakeholder.version,
+                }
+                for stakeholder, contact in rows
+            ]
+        },
+    }
+
+
+@extension_api_router.post("/cases/{case_id}/stakeholders")
+def create_extension_case_stakeholder(
+    case_id: str,
+    payload: ExtensionCaseStakeholderCreate,
+    instance: ExtensionInstance = Depends(require_extension_instance),
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    case = ensure_case_exists(session, case_id)
+    contact = session.get(Contact, payload.contact_id)
+    if contact is None or contact.deleted_at is not None:
+        raise json_error(422, "VALIDATION_ERROR", "Contact not found.")
+    duplicate = session.scalar(
+        select(CaseStakeholder)
+        .where(CaseStakeholder.case_id == case.id)
+        .where(CaseStakeholder.contact_id == contact.id)
+        .limit(1)
+    )
+    if duplicate is not None:
+        raise json_error(409, "CONFLICT", "Contact is already linked to this Case.")
+    next_order = (
+        session.scalar(
+            select(CaseStakeholder.sort_order)
+            .where(CaseStakeholder.case_id == case.id)
+            .order_by(CaseStakeholder.sort_order.desc())
+            .limit(1)
+        )
+        or 0
+    ) + 1
+    now = jst_iso()
+    role = payload.role.strip() if payload.role.strip() != "" else "stakeholder"
+    stakeholder = CaseStakeholder(
+        id=new_id("case_stakeholder"),
+        case_id=case.id,
+        contact_id=contact.id,
+        role=role,
+        sort_order=next_order,
+        created_at=now,
+        updated_at=now,
+        version=1,
+    )
+    session.add(stakeholder)
+    extension = session.get(ExtensionDefinition, instance.extension_id)
+    write_extension_audit_log(
+        session,
+        action_type="extension.case_stakeholder_created",
+        target_type="case_stakeholder",
+        target_id=stakeholder.id,
+        case_id=case.id,
+        metadata={
+            "extension_instance_id": instance.id,
+            "extension_id": instance.extension_id,
+            "slug": extension.slug if extension is not None else None,
+            "contact_id": contact.id,
+            "role": role,
+        },
+    )
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "stakeholder": {
+                "id": stakeholder.id,
+                "case_id": stakeholder.case_id,
+                "contact_id": stakeholder.contact_id,
+                "contact_display_name": contact.display_name,
+                "contact_tags": list(
+                    session.scalars(
+                        select(ContactTag.tag)
+                        .where(ContactTag.contact_id == contact.id)
+                        .order_by(ContactTag.tag.asc())
+                    ).all()
+                ),
+                "role": stakeholder.role,
+                "sort_order": stakeholder.sort_order,
+                "created_at": stakeholder.created_at,
+                "updated_at": stakeholder.updated_at,
+                "version": stakeholder.version,
+            }
+        },
+    }
+
+
+@extension_api_router.post("/cases/{case_id}/auto-assign-rules")
+def create_extension_case_auto_assign_rule(
+    case_id: str,
+    payload: ExtensionCaseAutoAssignRuleCreate,
+    instance: ExtensionInstance = Depends(require_extension_instance),
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    case = ensure_case_exists(session, case_id)
+    sender_email = normalize_email_address(payload.sender_email)
+    if sender_email == "" or "@" not in sender_email:
+        raise json_error(422, "VALIDATION_ERROR", "Sender email is invalid.")
+    existing = session.scalar(
+        select(CaseAutoAssignRule)
+        .where(CaseAutoAssignRule.case_id == case.id)
+        .where(CaseAutoAssignRule.rule_type == "sender_email")
+        .where(CaseAutoAssignRule.rule_value == sender_email)
+        .limit(1)
+    )
+    created = False
+    if existing is None:
+        now = jst_iso()
+        existing = CaseAutoAssignRule(
+            id=new_id("case_auto_assign_rule"),
+            case_id=case.id,
+            rule_type="sender_email",
+            rule_value=sender_email,
+            label=(payload.label.strip() if payload.label and payload.label.strip() else None),
+            is_enabled=1,
+            created_at=now,
+            updated_at=now,
+            version=1,
+        )
+        session.add(existing)
+        created = True
+    extension = session.get(ExtensionDefinition, instance.extension_id)
+    write_extension_audit_log(
+        session,
+        action_type="extension.case_auto_assign_rule_created" if created else "extension.case_auto_assign_rule_reused",
+        target_type="case_auto_assign_rule",
+        target_id=existing.id,
+        case_id=case.id,
+        metadata={
+            "extension_instance_id": instance.id,
+            "extension_id": instance.extension_id,
+            "slug": extension.slug if extension is not None else None,
+            "sender_email": sender_email,
+        },
+    )
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "rule": {
+                "id": existing.id,
+                "case_id": existing.case_id,
+                "rule_type": existing.rule_type,
+                "rule_value": existing.rule_value,
+                "label": existing.label,
+                "is_enabled": bool(existing.is_enabled),
+                "created_at": existing.created_at,
+                "updated_at": existing.updated_at,
+                "version": existing.version,
+            },
+            "created": created,
+        },
+    }
 
 
 @extension_api_router.get("/cases/genres")

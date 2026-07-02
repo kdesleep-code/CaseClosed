@@ -2,7 +2,7 @@
   "slug": "caseclosed-extension-template",
   "name": "CaseClosed Extension Template",
   "description": "Official template showing Case, file, mail query, and output upload APIs.",
-  "command": ["python", "app.py"],
+  "command": ["python3", "app.py"],
   "url_path": "/",
   "tags": ["default", "template", "api-sample"]
 }

@@ -23,6 +23,7 @@ from caseclosed.external_tools import router as external_tools_router
 from caseclosed.followups import router as followups_router
 from caseclosed.extensions import ExtensionIdleSupervisor
 from caseclosed.extensions import bootstrap_default_extensions
+from caseclosed.extensions import mark_active_extension_instances_stopped_on_startup
 from caseclosed.extensions import extension_api_router
 from caseclosed.extensions import router as extensions_router
 from caseclosed.google_integration import router as google_integration_router
@@ -52,6 +53,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     bootstrap_mail_drafts_database()
     with SessionLocal() as session:
         bootstrap_default_extensions(session)
+        mark_active_extension_instances_stopped_on_startup(session)
+        session.commit()
     storage_root()
     background_worker = None
     calendar_auto_sync = CalendarAutoSyncSupervisor()

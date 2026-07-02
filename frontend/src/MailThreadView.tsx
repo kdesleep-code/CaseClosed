@@ -8,6 +8,7 @@ import defaultMailingListAvatarUrl from './assets/default-mailing-list-avatar.sv
 import defaultServiceAvatarUrl from './assets/default-service-avatar.svg'
 import defaultSpamAvatarUrl from './assets/default-spam-avatar.webp'
 import gmailIconUrl from './assets/gmail-icon-2020.svg'
+import settingsGearIconUrl from './assets/settings-gear.svg'
 import paperclipDiagonalUrl from './assets/paperclip-diagonal.svg'
 import unknownContactAvatarUrl from './assets/default-unknown-contact-avatar.svg'
 import {
@@ -2392,7 +2393,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                   title={t('mail.thread.caseAssignSettings')}
                   type="button"
                 >
-                  {t('mail.thread.caseAssignSettingsShort')}
+                  <img alt="" aria-hidden="true" src={settingsGearIconUrl} />
                 </button>
               </div>
               <div className="mail-thread-case-links mail-thread-task-links">

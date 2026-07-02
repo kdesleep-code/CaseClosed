@@ -73,6 +73,28 @@ export type StorageObject = {
   file_updated_at: string
 }
 
+export type StoragePdfOcrStatus = {
+  id: string
+  storage_object_id: string
+  status: 'native_text' | 'ocr_needed' | 'ocr_done' | 'ocr_failed' | 'unknown' | string
+  text_quality: 'good' | 'suspect' | 'missing' | 'unknown' | string
+  page_count: number | null
+  native_char_count: number
+  ocr_engine: string | null
+  error_message: string | null
+  details: Record<string, unknown>
+  created_at: string
+  updated_at: string
+  version: number
+}
+
+export type StoragePdfOcrResponse = {
+  storage_object: StorageObject
+  ocr_status: StoragePdfOcrStatus
+  version?: StorageObjectVersion | null
+  skipped?: boolean
+}
+
 export type PaperBibtexEntry = {
   id: string
   paper_id: string
@@ -645,6 +667,23 @@ export async function getStorageObject(storageObjectId: string): Promise<Storage
     `/api/v1/storage/objects/${encodeURIComponent(storageObjectId)}`,
   )
   return data.storage_object
+}
+
+export async function getStorageObjectPdfOcrStatus(
+  storageObjectId: string,
+  refresh = false,
+): Promise<StoragePdfOcrResponse> {
+  const suffix = refresh ? '?refresh=true' : ''
+  return request<StoragePdfOcrResponse>(
+    `/api/v1/storage/objects/${encodeURIComponent(storageObjectId)}/pdf-ocr/status${suffix}`,
+  )
+}
+
+export function runStorageObjectPdfOcr(storageObjectId: string): Promise<StoragePdfOcrResponse> {
+  return request<StoragePdfOcrResponse>(
+    `/api/v1/storage/objects/${encodeURIComponent(storageObjectId)}/pdf-ocr/run`,
+    { method: 'POST' },
+  )
 }
 
 export function getStorageObjectArchiveTree(

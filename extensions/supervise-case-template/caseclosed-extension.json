@@ -1,0 +1,8 @@
+{
+  "slug": "supervise-case-template",
+  "name": "Supervise Case Template",
+  "description": "Create Supervise Cases from supervised-student Contacts.",
+  "command": ["python3", "app.py"],
+  "url_path": "/",
+  "tags": ["default", "case-template", "supervise"]
+}

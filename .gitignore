@@ -32,4 +32,6 @@ extensions/*
 !extensions/.gitkeep
 !extensions/caseclosed-extension-template/
 !extensions/caseclosed-extension-template/**
+!extensions/supervise-case-template/
+!extensions/supervise-case-template/**
 extensions/user-extensions/

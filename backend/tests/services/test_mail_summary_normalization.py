@@ -58,3 +58,4 @@ def test_mail_summary_prompt_marks_quoted_reply_as_context_only() -> None:
     instructions = mail_summary_instructions()
     assert "Summarize only the current/new message body" in instructions
     assert "quoted replies" in instructions
+    assert "reference/supporting material" in instructions

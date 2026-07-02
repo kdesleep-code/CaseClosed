@@ -62,6 +62,7 @@ from caseclosed.db.models import StorageDirectory
 from caseclosed.db.models import StorageLocation
 from caseclosed.db.models import StorageObject
 from caseclosed.db.models import StorageObjectVersion
+from caseclosed.db.models import StoragePdfOcrStatus
 from caseclosed.db.models import StorageOperationHistory
 from caseclosed.db.models import Task
 from caseclosed.db.runtime import BOOKSHELF_STORAGE_DIRECTORY_ID
@@ -1229,6 +1230,147 @@ async def update_storage_object_from_upload(
     return version
 
 
+def update_storage_object_from_bytes(
+    session: DatabaseSession,
+    storage_object: StorageObject,
+    *,
+    data: bytes,
+    filename: str | None,
+    content_type: str,
+    now: str,
+    operation_type: str = "updated",
+    operation_details: dict[str, object] | None = None,
+) -> StorageObjectVersion | None:
+    if len(data) == 0:
+        raise json_error(422, "VALIDATION_ERROR", "Storage object is empty.")
+    current_path = storage_object_absolute_path(storage_object, session)
+    if not current_path.is_file():
+        raise json_error(404, "NOT_FOUND", "Storage object file not found.")
+
+    new_sha256_hex = sha256(data).hexdigest()
+    if len(data) == storage_object.byte_size and new_sha256_hex == storage_object.sha256_hex:
+        record_storage_operation(
+            session,
+            operation_type="update_skipped",
+            now=now,
+            storage_object=storage_object,
+            details={
+                "reason": "duplicate_content",
+                "incoming_filename": filename,
+                "incoming_content_type": content_type,
+                "incoming_byte_size": len(data),
+            },
+        )
+        return None
+
+    root = storage_location_root(session, storage_object.location_id).resolve()
+    new_relative_path = object_relative_path(
+        scope=storage_object.scope,
+        storage_object_id=storage_object.id,
+        content_type=content_type,
+    )
+    new_path = (root / new_relative_path).resolve()
+    if not new_path.is_relative_to(root):
+        raise RuntimeError("Storage object path escapes storage root.")
+
+    incoming_path = (
+        root
+        / storage_object.scope
+        / "_incoming"
+        / f"{new_id('storage_upload')}.tmp"
+    ).resolve()
+    if not incoming_path.is_relative_to(root):
+        raise RuntimeError("Storage upload path escapes storage root.")
+    incoming_path.parent.mkdir(parents=True, exist_ok=True)
+    incoming_path.write_bytes(data)
+
+    version_number = next_storage_object_version_number(session, storage_object.id)
+    version_id = new_id("storage_object_version")
+    version_relative_path = storage_object_version_relative_path(
+        storage_object,
+        version_id=version_id,
+        version_number=version_number,
+    )
+    version_path = (root / version_relative_path).resolve()
+    if not version_path.is_relative_to(root):
+        raise RuntimeError("Storage object version path escapes storage root.")
+
+    previous_original_filename = storage_object.original_filename
+    previous_content_type = storage_object.content_type
+    previous_byte_size = storage_object.byte_size
+    previous_sha256_hex = storage_object.sha256_hex
+    previous_storage_path = storage_object.storage_path
+    previous_file_updated_at = storage_object.file_updated_at
+
+    version_path.parent.mkdir(parents=True, exist_ok=True)
+    moved_current = False
+    try:
+        current_path.replace(version_path)
+        moved_current = True
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        if new_path.is_file():
+            new_path.unlink()
+        incoming_path.replace(new_path)
+    except Exception:
+        if incoming_path.is_file():
+            incoming_path.unlink()
+        if moved_current and version_path.is_file() and not current_path.exists():
+            version_path.replace(current_path)
+        raise
+
+    version = StorageObjectVersion(
+        id=version_id,
+        storage_object_id=storage_object.id,
+        version_number=version_number,
+        original_filename=previous_original_filename,
+        content_type=previous_content_type,
+        byte_size=previous_byte_size,
+        sha256_hex=previous_sha256_hex,
+        storage_path=version_relative_path.as_posix(),
+        created_at=previous_file_updated_at,
+    )
+    session.add(version)
+
+    storage_object.original_filename = filename
+    storage_object.content_type = content_type
+    storage_object.byte_size = len(data)
+    storage_object.sha256_hex = new_sha256_hex
+    storage_object.storage_path = new_relative_path.as_posix()
+    storage_object.updated_at = now
+    storage_object.file_updated_at = now
+    storage_object.version += 1
+    reassign_current_file_summaries_to_version(
+        session,
+        storage_object=storage_object,
+        previous_version=version,
+        previous_sha256_hex=previous_sha256_hex,
+        now=now,
+    )
+    prepare_file_version_diff(
+        session,
+        storage_object=storage_object,
+        previous_version=version,
+        now=now,
+    )
+    details = {
+        "previous_version_id": version.id,
+        "previous_version_number": version.version_number,
+        "previous_storage_path": previous_storage_path,
+        "previous_file_updated_at": previous_file_updated_at,
+        "new_filename": filename,
+    }
+    if operation_details is not None:
+        details.update(operation_details)
+    record_storage_operation(
+        session,
+        operation_type=operation_type,
+        now=now,
+        storage_object=storage_object,
+        details=details,
+    )
+    return version
+
+
 def delete_storage_object_file(
     storage_object: StorageObject,
     session: DatabaseSession,
@@ -2315,6 +2457,300 @@ def extract_pdf_for_summary(path: Path) -> FileTextExtraction:
         truncated=truncated,
         limitations=limitations,
     )
+
+
+def pdf_text_quality_data(path: Path) -> dict[str, object]:
+    limitations: list[str] = []
+    page_count: int | None = None
+    extracted = extract_pdf_with_fitz(path)
+    extractor = "fitz"
+    if extracted is None:
+        extracted = extract_pdf_with_pypdf(path)
+        extractor = "pypdf"
+    if extracted is None:
+        source_text = primitive_pdf_text(path)
+        extractor = "primitive_pdf"
+    else:
+        source_text, page_count = extracted
+    text_value = source_text.strip()
+    compact_text = re.sub(r"\s+", "", text_value)
+    native_char_count = len(compact_text)
+    replacement_ratio = (text_value.count("�") / max(len(text_value), 1)) if text_value else 0.0
+    useful_chars = re.findall(r"[A-Za-z0-9ぁ-んァ-ン一-龯々〆〤ー]", text_value)
+    useful_ratio = len(useful_chars) / max(native_char_count, 1)
+    whitespace_ratio = (sum(1 for char in text_value if char.isspace()) / max(len(text_value), 1)) if text_value else 1.0
+    minimum_chars = max(40, (page_count or 1) * 24)
+    reasons: list[str] = []
+    if native_char_count == 0:
+        reasons.append("no_native_text")
+    elif native_char_count < minimum_chars:
+        reasons.append("too_little_native_text")
+    if replacement_ratio > 0.01:
+        reasons.append("replacement_character_noise")
+    if native_char_count >= 40 and useful_ratio < 0.45:
+        reasons.append("low_useful_character_ratio")
+    if len(text_value) >= 100 and whitespace_ratio > 0.58:
+        reasons.append("excessive_whitespace")
+    if extractor == "primitive_pdf":
+        reasons.append("primitive_extractor")
+    text_quality = "missing" if native_char_count == 0 else "suspect" if reasons else "good"
+    status = "native_text" if text_quality == "good" else "ocr_needed"
+    return {
+        "status": status,
+        "text_quality": text_quality,
+        "page_count": page_count,
+        "native_char_count": native_char_count,
+        "read_scope": f"pdf_text_extraction:{extractor}",
+        "reasons": reasons,
+        "replacement_ratio": replacement_ratio,
+        "useful_ratio": useful_ratio,
+        "whitespace_ratio": whitespace_ratio,
+        "limitations": limitations,
+    }
+
+
+def pdf_ocr_status_data(status: StoragePdfOcrStatus) -> dict[str, object]:
+    try:
+        details = json.loads(status.details_json or "{}")
+    except json.JSONDecodeError:
+        details = {}
+    return {
+        "id": status.id,
+        "storage_object_id": status.storage_object_id,
+        "status": status.status,
+        "text_quality": status.text_quality,
+        "page_count": status.page_count,
+        "native_char_count": status.native_char_count,
+        "ocr_engine": status.ocr_engine,
+        "error_message": status.error_message,
+        "details": details if isinstance(details, dict) else {},
+        "created_at": status.created_at,
+        "updated_at": status.updated_at,
+        "version": status.version,
+    }
+
+
+def upsert_pdf_ocr_status(
+    session: DatabaseSession,
+    storage_object: StorageObject,
+    *,
+    now: str,
+    status: str,
+    text_quality: str,
+    page_count: int | None,
+    native_char_count: int,
+    ocr_engine: str | None = None,
+    error_message: str | None = None,
+    details: dict[str, object] | None = None,
+) -> StoragePdfOcrStatus:
+    row = session.scalar(
+        select(StoragePdfOcrStatus)
+        .where(StoragePdfOcrStatus.storage_object_id == storage_object.id)
+        .limit(1)
+    )
+    details_json = json.dumps(details or {}, ensure_ascii=False, sort_keys=True)
+    if row is None:
+        row = StoragePdfOcrStatus(
+            id=new_id("storage_pdf_ocr"),
+            storage_object_id=storage_object.id,
+            status=status,
+            text_quality=text_quality,
+            page_count=page_count,
+            native_char_count=native_char_count,
+            ocr_engine=ocr_engine,
+            error_message=error_message,
+            details_json=details_json,
+            created_at=now,
+            updated_at=now,
+            version=1,
+        )
+        session.add(row)
+        return row
+    row.status = status
+    row.text_quality = text_quality
+    row.page_count = page_count
+    row.native_char_count = native_char_count
+    row.ocr_engine = ocr_engine
+    row.error_message = error_message
+    row.details_json = details_json
+    row.updated_at = now
+    row.version += 1
+    return row
+
+
+def ensure_pdf_ocr_status(
+    session: DatabaseSession,
+    storage_object: StorageObject,
+    *,
+    refresh: bool = False,
+) -> StoragePdfOcrStatus:
+    existing = session.scalar(
+        select(StoragePdfOcrStatus)
+        .where(StoragePdfOcrStatus.storage_object_id == storage_object.id)
+        .limit(1)
+    )
+    if existing is not None and not refresh:
+        try:
+            details = json.loads(existing.details_json or "{}")
+        except json.JSONDecodeError:
+            details = {}
+        if details.get("sha256_hex") == storage_object.sha256_hex:
+            return existing
+    now = jst_iso()
+    object_path = storage_object_absolute_path(storage_object, session)
+    quality = pdf_text_quality_data(object_path)
+    details = {
+        "sha256_hex": storage_object.sha256_hex,
+        "read_scope": quality["read_scope"],
+        "reasons": quality["reasons"],
+        "replacement_ratio": quality["replacement_ratio"],
+        "useful_ratio": quality["useful_ratio"],
+        "whitespace_ratio": quality["whitespace_ratio"],
+        "limitations": quality["limitations"],
+    }
+    return upsert_pdf_ocr_status(
+        session,
+        storage_object,
+        now=now,
+        status=str(quality["status"]),
+        text_quality=str(quality["text_quality"]),
+        page_count=quality["page_count"] if isinstance(quality["page_count"], int) else None,
+        native_char_count=int(quality["native_char_count"]),
+        details=details,
+    )
+
+
+def require_pdf_storage_object_for_ocr(
+    session: DatabaseSession,
+    storage_object_id: str,
+) -> StorageObject:
+    storage_object = session.get(StorageObject, storage_object_id)
+    if (
+        storage_object is None
+        or storage_object.status != "active"
+        or storage_object.scope != "managed"
+        or not is_pdf_storage_file(storage_object.content_type, storage_object.original_filename)
+    ):
+        raise json_error(404, "NOT_FOUND", "PDF storage object not found.")
+    return storage_object
+
+
+def run_ocrmypdf_for_storage_object(
+    session: DatabaseSession,
+    storage_object: StorageObject,
+    *,
+    now: str,
+) -> tuple[StorageObjectVersion | None, StoragePdfOcrStatus]:
+    ocrmypdf_path = shutil.which("ocrmypdf")
+    if ocrmypdf_path is None:
+        status_row = upsert_pdf_ocr_status(
+            session,
+            storage_object,
+            now=now,
+            status="ocr_failed",
+            text_quality="unknown",
+            page_count=None,
+            native_char_count=0,
+            error_message="ocrmypdf is not installed.",
+            details={"sha256_hex": storage_object.sha256_hex, "reason": "ocrmypdf_unavailable"},
+        )
+        session.commit()
+        raise json_error(503, "OCR_UNAVAILABLE", "ocrmypdf is not installed.")
+    object_path = storage_object_absolute_path(storage_object, session)
+    with tempfile.TemporaryDirectory(prefix="caseclosed-ocr-") as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        output_path = tmp_path / "ocr.pdf"
+        command = [
+            ocrmypdf_path,
+            "--force-ocr",
+            "--deskew",
+            "--optimize",
+            "0",
+            "-l",
+            "jpn+eng",
+            str(object_path),
+            str(output_path),
+        ]
+        try:
+            result = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600)
+        except subprocess.TimeoutExpired as error:
+            upsert_pdf_ocr_status(
+                session,
+                storage_object,
+                now=now,
+                status="ocr_failed",
+                text_quality="unknown",
+                page_count=None,
+                native_char_count=0,
+                ocr_engine="ocrmypdf",
+                error_message="OCR timed out.",
+                details={"sha256_hex": storage_object.sha256_hex, "reason": "timeout"},
+            )
+            session.commit()
+            raise json_error(504, "OCR_TIMEOUT", "OCR timed out.") from error
+        except subprocess.CalledProcessError as error:
+            detail = (error.stderr or error.stdout or b"").decode("utf-8", errors="replace").strip()
+            message = detail[:1200] or "OCR failed."
+            upsert_pdf_ocr_status(
+                session,
+                storage_object,
+                now=now,
+                status="ocr_failed",
+                text_quality="unknown",
+                page_count=None,
+                native_char_count=0,
+                ocr_engine="ocrmypdf",
+                error_message=message,
+                details={"sha256_hex": storage_object.sha256_hex, "reason": "process_failed"},
+            )
+            session.commit()
+            raise json_error(500, "OCR_FAILED", message) from error
+        if not output_path.is_file() or output_path.stat().st_size == 0:
+            upsert_pdf_ocr_status(
+                session,
+                storage_object,
+                now=now,
+                status="ocr_failed",
+                text_quality="unknown",
+                page_count=None,
+                native_char_count=0,
+                ocr_engine="ocrmypdf",
+                error_message="OCR did not produce a PDF.",
+                details={"sha256_hex": storage_object.sha256_hex, "reason": "empty_output"},
+            )
+            session.commit()
+            raise json_error(500, "OCR_FAILED", "OCR did not produce a PDF.")
+        output_data = output_path.read_bytes()
+    version = update_storage_object_from_bytes(
+        session,
+        storage_object,
+        data=output_data,
+        filename=storage_object.original_filename,
+        content_type="application/pdf",
+        now=now,
+        operation_type="pdf_ocr_completed",
+        operation_details={"engine": "ocrmypdf"},
+    )
+    quality = pdf_text_quality_data(storage_object_absolute_path(storage_object, session))
+    status_row = upsert_pdf_ocr_status(
+        session,
+        storage_object,
+        now=now,
+        status="ocr_done",
+        text_quality=str(quality["text_quality"]),
+        page_count=quality["page_count"] if isinstance(quality["page_count"], int) else None,
+        native_char_count=int(quality["native_char_count"]),
+        ocr_engine="ocrmypdf",
+        error_message=None,
+        details={
+            "sha256_hex": storage_object.sha256_hex,
+            "read_scope": quality["read_scope"],
+            "reasons": quality["reasons"],
+            "ocr_stdout": result.stdout.decode("utf-8", errors="replace")[:1200],
+            "ocr_stderr": result.stderr.decode("utf-8", errors="replace")[:1200],
+        },
+    )
+    return version, status_row
 
 
 def extract_docx_for_summary(path: Path) -> FileTextExtraction:
@@ -3885,6 +4321,11 @@ async def upload_managed_object_multipart(
         directory_id=directory.id if directory is not None else None,
         source_type="direct_upload",
     )
+    if (
+        storage_object.directory_id == BOOKSHELF_STORAGE_DIRECTORY_ID
+        and is_pdf_storage_file(storage_object.content_type, storage_object.original_filename)
+    ):
+        ensure_pdf_ocr_status(session, storage_object)
     session.commit()
     return {
         "ok": True,
@@ -4228,6 +4669,7 @@ async def upload_bookshelf_material(
             directory_id=directory.id if directory is not None else None,
             source_type="bookshelf_material",
         )
+    ensure_pdf_ocr_status(session, storage_object)
     session.commit()
     return {
         "ok": True,
@@ -4557,6 +4999,45 @@ def delete_managed_storage_object(
                 else None
             ),
             "source_type": storage_object.source_type or "direct_upload",
+        },
+    }
+
+
+@router.get("/objects/{storage_object_id}/pdf-ocr/status")
+def read_storage_object_pdf_ocr_status(
+    storage_object_id: str,
+    refresh: bool = Query(False),
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    storage_object = require_pdf_storage_object_for_ocr(session, storage_object_id)
+    status_row = ensure_pdf_ocr_status(session, storage_object, refresh=refresh)
+    if session.dirty or session.new:
+        session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "ocr_status": pdf_ocr_status_data(status_row),
+            "storage_object": storage_object_data(storage_object, session),
+        },
+    }
+
+
+@router.post("/objects/{storage_object_id}/pdf-ocr/run")
+def run_storage_object_pdf_ocr(
+    storage_object_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    storage_object = require_pdf_storage_object_for_ocr(session, storage_object_id)
+    now = jst_iso()
+    version, status_row = run_ocrmypdf_for_storage_object(session, storage_object, now=now)
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "storage_object": storage_object_data(storage_object, session),
+            "ocr_status": pdf_ocr_status_data(status_row),
+            "version": storage_object_version_data(version) if version is not None else None,
+            "skipped": version is None,
         },
     }
 

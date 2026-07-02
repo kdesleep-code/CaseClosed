@@ -6,6 +6,8 @@ import AcademicCalendarView from './AcademicCalendarView'
 import loginDoorTanuki from './assets/login-door-tanuki.png'
 import settingsGearIconUrl from './assets/settings-gear.svg'
 import pomodoroBellUrl from './assets/pomodoro-school-bell.mp3'
+import topMailTanukiIconUrl from './assets/top-mail-tanuki-icon.png'
+import topPomodoroTanukiIconUrl from './assets/top-pomodoro-tanuki-icon.png'
 import CalendarView from './CalendarView'
 import BookshelfView from './BookshelfView'
 import BookshelfReaderView from './BookshelfReaderView'
@@ -95,6 +97,7 @@ type LinkItem = {
   href: string
   target?: '_blank'
   rel?: string
+  iconUrl?: string
 }
 
 type LinkRenderItem = LinkItem & {
@@ -118,7 +121,7 @@ type PageSlot = LinkItem | { blank: true; key: string }
 const pomodoroSettingsStorageKey = 'caseclosed.pomodoroSettings'
 
 const pageLinks: LinkItem[] = [
-  { labelKey: 'nav.mail', href: '/mail' },
+  { labelKey: 'nav.mail', href: '/mail', iconUrl: topMailTanukiIconUrl },
   { labelKey: 'nav.cases', href: '/cases' },
   { labelKey: 'nav.tasks', href: '/tasks' },
   { labelKey: 'nav.calendar', href: '/calendar' },
@@ -126,9 +129,9 @@ const pageLinks: LinkItem[] = [
   { labelKey: 'nav.files', href: '/files' },
   { labelKey: 'nav.bookshelf', href: '/bookshelf' },
   { labelKey: 'nav.papers', href: '/papers' },
+  { labelKey: 'nav.pomodoro', href: '/pomodoro', target: '_blank', rel: 'noopener noreferrer', iconUrl: topPomodoroTanukiIconUrl },
   { labelKey: 'nav.externalTools', href: '/external-tools' },
   { labelKey: 'nav.extensions', href: '/extensions' },
-  { labelKey: 'nav.pomodoro', href: '/pomodoro', target: '_blank', rel: 'noopener noreferrer' },
 ]
 
 const mainPageSlots: PageSlot[] = [
@@ -660,7 +663,14 @@ function TopView({
 
     return (
       <>
-        {linkLabel(link)}
+        {link.iconUrl !== undefined ? (
+          <span className="hub-link-content-with-icon">
+            <img alt="" aria-hidden="true" src={link.iconUrl} />
+            <span>{linkLabel(link)}</span>
+          </span>
+        ) : (
+          linkLabel(link)
+        )}
         {showAttention && (
           <small
             aria-label={attentionTitle}

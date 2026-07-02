@@ -462,7 +462,6 @@ function CaseStakeholdersPanel({
   const [role, setRole] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
   useEffect(() => {
     setStakeholders(initialStakeholders)
   }, [initialStakeholders])
@@ -1169,6 +1168,7 @@ function CaseListView() {
   const [selectedTag, setSelectedTag] = useState<string | null>(null)
   const [isTagFilterOpen, setIsTagFilterOpen] = useState(false)
   const [sortMode, setSortMode] = useState('genre_name')
+  const [newCaseGenreId, setNewCaseGenreId] = useState('')
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -1244,6 +1244,7 @@ function CaseListView() {
     return counts
   }, new Map<string, number>())
   const genreOrder = new Map(genres.map((genre, index) => [genre.id, index]))
+  const selectedNewCaseGenre = genres.find((genre) => genre.id === newCaseGenreId) ?? null
   const visibleCases = cases
     .filter((item) => {
       if (
@@ -1436,9 +1437,47 @@ function CaseListView() {
           </section>
           <aside aria-label={t('cases.gadgets')} className="case-gadget-column">
             <div className="case-gadget-card">
-              <AppLink className="case-gadget-action" href="/cases/new">
-                {t('cases.gadget.newCases')}
-              </AppLink>
+              <h2>{t('cases.gadget.newCases')}</h2>
+              <label className="case-create-gadget-field">
+                <span>{t('cases.genre.select')}</span>
+                <select onChange={(event) => setNewCaseGenreId(event.target.value)} value={newCaseGenreId}>
+                  <option value="">{t('cases.genre.none')}</option>
+                  {genres.map((genre) => (
+                    <option key={genre.id} value={genre.id}>
+                      {genre.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {selectedNewCaseGenre?.template_extension_id !== undefined &&
+                selectedNewCaseGenre.template_extension_id !== null && (
+                  <p className="task-gadget-empty">
+                    {t('cases.create.templateGenreHint', { genre: selectedNewCaseGenre.title })}
+                  </p>
+                )}
+              <button
+                className="case-gadget-action"
+                onClick={() => {
+                  if (selectedNewCaseGenre?.template_extension_id !== undefined && selectedNewCaseGenre.template_extension_id !== null) {
+                    const params = new URLSearchParams({
+                      extension_id: selectedNewCaseGenre.template_extension_id,
+                      genre_id: selectedNewCaseGenre.id,
+                      genre_title: selectedNewCaseGenre.title,
+                      context_mode: 'case_template',
+                    })
+                    navigateTo(`/extensions/launch?${params.toString()}`)
+                    return
+                  }
+                  const params = new URLSearchParams()
+                  if (newCaseGenreId !== '') params.set('genre_id', newCaseGenreId)
+                  navigateTo(`/cases/new${params.toString() === '' ? '' : `?${params.toString()}`}`)
+                }}
+                type="button"
+              >
+                {selectedNewCaseGenre?.template_extension_id !== undefined && selectedNewCaseGenre.template_extension_id !== null
+                  ? t('cases.create.openTemplate')
+                  : t('cases.create')}
+              </button>
             </div>
             <CaseGenreGadget
               genres={genres}
@@ -2223,13 +2262,12 @@ function CaseCreateView() {
   const [closedWhenText, setClosedWhenText] = useState('')
   const [tagText, setTagText] = useState('')
   const [genres, setGenres] = useState<CaseGenre[]>([])
-  const [genreId, setGenreId] = useState('')
+  const [genreId, setGenreId] = useState(() => new URLSearchParams(window.location.search).get('genre_id')?.trim() ?? '')
   const [llmPrompt, setLlmPrompt] = useState('')
   const [llmNotice, setLlmNotice] = useState<string | null>(null)
   const [isPrefilling, setIsPrefilling] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
   useEffect(() => {
     let isMounted = true
     listCaseGenres()
@@ -3022,6 +3060,62 @@ function CaseMailListView({ caseId }: { caseId: string }) {
                   </form>
                 </section>
 
+                            <section className="case-mail-auto-rule-panel">
+                              <div className="section-heading">
+                                <div>
+                                  <h2>{t('cases.mail.autoRule.heading')}</h2>
+                                  <p>{t('cases.mail.autoRule.body')}</p>
+                                </div>
+                              </div>
+                              <form className="case-mail-auto-rule-form" onSubmit={handleCreateAutoAssignRule}>
+                                <label>
+                                  <span>{t('cases.mail.autoRule.senderEmail')}</span>
+                                  <SuggestInput
+                                    ariaLabel={t('cases.mail.autoRule.senderEmail')}
+                                    maxItems={1}
+                                    onChange={setAutoRuleSenderEmail}
+                                    options={autoRuleStakeholderSuggestions.map((suggestion) => ({
+                                      key: suggestion.email,
+                                      value: suggestion.email,
+                                      label: suggestion.label,
+                                      badgeLabel: suggestion.email,
+                                    }))}
+                                    placeholder={t('cases.mail.autoRule.placeholder')}
+                                    value={autoRuleSenderEmail}
+                                  />
+                                </label>
+                                <button
+                                  className={`button-loading-dot${isAutoRuleSaving ? ' is-loading' : ''}`}
+                                  disabled={isAutoRuleSaving || autoRuleSenderEmail.trim() === ''}
+                                  type="submit"
+                                >
+                                  {t('cases.mail.autoRule.add')}
+                                </button>
+                              </form>
+                              {autoAssignRules.length === 0 ? (
+                                <p className="case-mail-auto-rule-empty">
+                                  {t('cases.mail.autoRule.empty')}
+                                </p>
+                              ) : (
+                                <div className="case-mail-auto-rule-list">
+                                  {autoAssignRules.map((rule) => (
+                                    <div className="case-mail-auto-rule-item" key={rule.id}>
+                                      <span>{rule.rule_value}</span>
+                                      <button
+                                        disabled={isAutoRuleSaving}
+                                        onClick={() => {
+                                          void handleDeleteAutoAssignRule(rule)
+                                        }}
+                                        type="button"
+                                      >
+                                        {t('cases.mail.autoRule.delete')}
+                                      </button>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </section>
+
                 <section aria-labelledby="case-mail-special-import-heading" className="mail-panel mail-search-panel">
                   <div className="section-heading">
                     <div>
@@ -3120,62 +3214,6 @@ function CaseMailListView({ caseId }: { caseId: string }) {
                   value={searchQuery}
                 />
               </label>
-            </section>
-
-            <section className="case-mail-auto-rule-panel">
-              <div className="section-heading">
-                <div>
-                  <h2>{t('cases.mail.autoRule.heading')}</h2>
-                  <p>{t('cases.mail.autoRule.body')}</p>
-                </div>
-              </div>
-              <form className="case-mail-auto-rule-form" onSubmit={handleCreateAutoAssignRule}>
-                <label>
-                  <span>{t('cases.mail.autoRule.senderEmail')}</span>
-                  <SuggestInput
-                    ariaLabel={t('cases.mail.autoRule.senderEmail')}
-                    maxItems={1}
-                    onChange={setAutoRuleSenderEmail}
-                    options={autoRuleStakeholderSuggestions.map((suggestion) => ({
-                      key: suggestion.email,
-                      value: suggestion.email,
-                      label: suggestion.label,
-                      badgeLabel: suggestion.email,
-                    }))}
-                    placeholder={t('cases.mail.autoRule.placeholder')}
-                    value={autoRuleSenderEmail}
-                  />
-                </label>
-                <button
-                  className={`button-loading-dot${isAutoRuleSaving ? ' is-loading' : ''}`}
-                  disabled={isAutoRuleSaving || autoRuleSenderEmail.trim() === ''}
-                  type="submit"
-                >
-                  {t('cases.mail.autoRule.add')}
-                </button>
-              </form>
-              {autoAssignRules.length === 0 ? (
-                <p className="case-mail-auto-rule-empty">
-                  {t('cases.mail.autoRule.empty')}
-                </p>
-              ) : (
-                <div className="case-mail-auto-rule-list">
-                  {autoAssignRules.map((rule) => (
-                    <div className="case-mail-auto-rule-item" key={rule.id}>
-                      <span>{rule.rule_value}</span>
-                      <button
-                        disabled={isAutoRuleSaving}
-                        onClick={() => {
-                          void handleDeleteAutoAssignRule(rule)
-                        }}
-                        type="button"
-                      >
-                        {t('cases.mail.autoRule.delete')}
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
             </section>
 
             <section className="case-mail-assignment-panel">

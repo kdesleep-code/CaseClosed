@@ -542,7 +542,7 @@ function ExtensionGroup({
                         </span>
                       </div>
                       <div className="extension-instance-actions">
-                        <a href={instance.base_url} rel="noreferrer" target="_blank">{t('extensions.open')}</a>
+                        <a href={instance.open_url} rel="noreferrer" target="_blank">{t('extensions.open')}</a>
                         <button
                           disabled={busyId === `stop-${instance.id}`}
                           onClick={() => { void onStop(instance) }}

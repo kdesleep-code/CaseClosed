@@ -49,6 +49,18 @@ def test_default_extension_template_is_registered(client) -> None:
     )
     assert template["name"] == "CaseClosed Extension Template"
     assert template["source"] == "default"
+    supervise_template = next(
+        item for item in extensions if item["slug"] == "supervise-case-template"
+    )
+    assert supervise_template["name"] == "Supervise Case Template"
+    assert supervise_template["source"] == "default"
+
+    genres_response = client.get("/api/v1/cases/genres")
+    assert genres_response.status_code == 200
+    supervise_genre = next(
+        item for item in genres_response.json()["data"]["items"] if item["title"] == "Supervise"
+    )
+    assert supervise_genre["template_extension_id"] == supervise_template["id"]
 
 
 def test_case_template_extension_can_be_linked_to_genre(client, tmp_path: Path) -> None:
@@ -145,6 +157,11 @@ def test_extension_can_register_start_use_case_api_and_stop(client, tmp_path: Pa
     assert instance["case_id"] == case["id"]
     assert instance["status"] == "running"
     assert isinstance(instance["process_id"], int)
+    assert start_data["open_url"] == (
+        f"/api/v1/extensions/instances/{instance['id']}/proxy/"
+    )
+    assert instance["open_url"] == start_data["open_url"]
+    assert "127.0.0.1" not in start_data["open_url"]
 
     reused_response = client.post(
         f"/api/v1/extensions/{extension['id']}/start",
@@ -162,6 +179,18 @@ def test_extension_can_register_start_use_case_api_and_stop(client, tmp_path: Pa
     assert context_response.status_code == 200
     assert context_response.json()["data"]["instance"]["launch_context"]["context"] == {
         "assignment": "report-1",
+    }
+
+    recontext_response = client.post(
+        f"/api/v1/extensions/{extension['id']}/start",
+        json={"case_id": case["id"], "context": {"assignment": "report-2"}},
+    )
+    assert recontext_response.status_code == 200
+    assert recontext_response.json()["data"]["reused"] is True
+    context_response = client.get("/api/v1/extension-api/context", headers=headers)
+    assert context_response.status_code == 200
+    assert context_response.json()["data"]["instance"]["launch_context"]["context"] == {
+        "assignment": "report-2",
     }
 
     case_response = client.get("/api/v1/extension-api/case", headers=headers)
@@ -356,6 +385,43 @@ def test_extension_api_can_create_cases_and_search_contacts_without_case_context
     assert contacts[0]["display_name"] == "Ada Lovelace"
     assert contacts[0]["email_addresses"][0]["email_address"] == "ada@example.com"
 
+    stakeholder_response = client.post(
+        f"/api/v1/extension-api/cases/{created_case['id']}/stakeholders",
+        headers=headers,
+        json={"contact_id": contacts[0]["id"], "role": "student"},
+    )
+    assert stakeholder_response.status_code == 200
+    assert stakeholder_response.json()["data"]["stakeholder"]["role"] == "student"
+    stakeholders_response = client.get(
+        f"/api/v1/extension-api/cases/{created_case['id']}/stakeholders",
+        headers=headers,
+    )
+    assert stakeholders_response.status_code == 200
+    assert [
+        item["contact_display_name"]
+        for item in stakeholders_response.json()["data"]["items"]
+    ] == ["Ada Lovelace"]
+    assert stakeholders_response.json()["data"]["items"][0]["contact_tags"] == [
+        "template-contact",
+    ]
+
+    auto_rule_response = client.post(
+        f"/api/v1/extension-api/cases/{created_case['id']}/auto-assign-rules",
+        headers=headers,
+        json={"sender_email": "Ada@Example.com", "label": "Ada Lovelace"},
+    )
+    assert auto_rule_response.status_code == 200
+    auto_rule_data = auto_rule_response.json()["data"]
+    assert auto_rule_data["created"] is True
+    assert auto_rule_data["rule"]["rule_value"] == "ada@example.com"
+    duplicate_rule_response = client.post(
+        f"/api/v1/extension-api/cases/{created_case['id']}/auto-assign-rules",
+        headers=headers,
+        json={"sender_email": "ada@example.com"},
+    )
+    assert duplicate_rule_response.status_code == 200
+    assert duplicate_rule_response.json()["data"]["created"] is False
+
     no_context_case_response = client.get("/api/v1/extension-api/case", headers=headers)
     assert no_context_case_response.status_code == 409
 
@@ -370,4 +436,8 @@ def test_extension_api_can_create_cases_and_search_contacts_without_case_context
         "extension.case_created",
         "extension.cases_listed",
         "extension.contacts_searched",
+        "extension.case_stakeholder_created",
+        "extension.case_stakeholders_listed",
+        "extension.case_auto_assign_rule_created",
+        "extension.case_auto_assign_rule_reused",
     } <= action_types

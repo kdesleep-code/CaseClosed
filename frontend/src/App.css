@@ -514,8 +514,8 @@
 .hub-links-main a,
 .hub-links-utility a,
 .work-links a,
-.hub-links-main span,
-.hub-links-utility span,
+.hub-links-main > span,
+.hub-links-utility > span,
 .work-links span {
   border: 1px solid var(--surface-warm-border);
   border-radius: var(--radius-card);
@@ -526,7 +526,7 @@
 }
 
 .hub-links-main a,
-.hub-links-main span {
+.hub-links-main > span {
   min-height: 94px;
   padding: 18px;
   display: flex;
@@ -535,8 +535,30 @@
   font-weight: 680;
 }
 
+.hub-link-content-with-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.hub-link-content-with-icon img {
+  width: min(56px, calc(94px - 36px));
+  height: min(56px, calc(94px - 36px));
+  border-radius: 8px;
+  object-fit: cover;
+  flex: 0 0 auto;
+  box-shadow: 0 5px 12px rgba(112, 75, 47, 0.12);
+}
+
+.hub-link-content-with-icon span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .hub-links-utility a,
-.hub-links-utility span {
+.hub-links-utility > span {
   min-height: 47px;
   padding: 10px 12px;
   display: flex;
@@ -549,8 +571,8 @@
 
 .hub-links-main a,
 .hub-links-utility a,
-.hub-links-main span:not(.hub-link-placeholder),
-.hub-links-utility span:not(.hub-link-placeholder) {
+.hub-links-main > span:not(.hub-link-placeholder),
+.hub-links-utility > span:not(.hub-link-placeholder) {
   position: relative;
 }
 
@@ -646,8 +668,8 @@
   outline-offset: 2px;
 }
 
-.top-shell-locked .hub-links-main span:not(.hub-link-placeholder),
-.top-shell-locked .hub-links-utility span:not(.hub-link-placeholder),
+.top-shell-locked .hub-links-main > span:not(.hub-link-placeholder),
+.top-shell-locked .hub-links-utility > span:not(.hub-link-placeholder),
 .top-shell-locked .top-today-link span {
   color: rgba(84, 41, 31, 0.42);
   background: rgba(246, 222, 187, 0.34);
@@ -2531,6 +2553,12 @@
   border-color: rgba(177, 93, 62, 0.28);
   background: rgba(255, 244, 228, 0.56);
   color: rgba(80, 48, 35, 0.68);
+}
+
+.mail-thread-case-settings img {
+  width: 14px;
+  height: 14px;
+  opacity: 0.72;
 }
 
 .mail-thread-case-editor {
@@ -15631,12 +15659,12 @@ button.task-gadget-action:disabled {
   }
 
   .hub-links-main a,
-  .hub-links-main span {
+  .hub-links-main > span {
     min-height: 72px;
   }
 
   .hub-links-utility a,
-  .hub-links-utility span {
+  .hub-links-utility > span {
     min-height: 42px;
   }
 
@@ -17070,6 +17098,90 @@ button.task-gadget-action:disabled {
   font-size: 0.72rem;
   font-weight: 700;
   text-align: right;
+}
+
+.bookshelf-reader-ocr {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 28;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: min(520px, 42vw);
+  border: 1px solid rgba(30, 30, 30, 0.12);
+  border-radius: 8px;
+  padding: 5px;
+  background: rgba(255, 255, 255, 0.88);
+  opacity: 0.1;
+  pointer-events: auto;
+  transition: opacity 140ms ease;
+}
+
+.bookshelf-reader-ocr:hover,
+.bookshelf-reader-ocr:focus-within {
+  opacity: 1;
+}
+
+.bookshelf-reader-ocr > span {
+  color: #1f1f1f;
+  font-size: 0.74rem;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.bookshelf-reader-ocr small {
+  max-width: 220px;
+  overflow: hidden;
+  color: rgba(120, 42, 32, 0.82);
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bookshelf-reader-ocr button {
+  min-height: 28px;
+  border: 1px solid rgba(30, 30, 30, 0.12);
+  border-radius: 6px;
+  padding: 4px 7px;
+  color: #1f1f1f;
+  background: rgba(255, 255, 255, 0.72);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 760;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.bookshelf-reader-ocr button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.bookshelf-reader-ocr.is-ocr_needed,
+.bookshelf-reader-ocr.is-ocr_failed {
+  opacity: 0.72;
+}
+
+@media (max-width: 760px) {
+  .bookshelf-reader-search {
+    left: 16px;
+    right: 16px;
+    bottom: 14px;
+    max-width: none;
+    transform: none;
+  }
+
+  .bookshelf-reader-search input {
+    width: min(100%, 38vw);
+  }
+
+  .bookshelf-reader-ocr {
+    right: 16px;
+    bottom: 58px;
+    max-width: calc(100vw - 32px);
+  }
 }
 
 .bookshelf-reader-error {

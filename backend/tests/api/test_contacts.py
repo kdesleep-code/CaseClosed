@@ -86,6 +86,47 @@ def test_reserved_contact_role_tags_can_be_used(client) -> None:
     ]
 
 
+def test_tsukuba_student_email_adds_year_tag_on_create(client) -> None:
+    response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Tsukuba Student",
+            "status": "active",
+            "kind": "person",
+            "sender_resolution_mode": "self",
+            "tags": ["supervised-student"],
+            "email_addresses": [
+                {"email_address": "S24abcde@u.tsukuba.ac.jp", "is_primary": True}
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["tags"] == ["2024-", "supervised-student"]
+
+
+def test_tsukuba_student_email_adds_year_tag_when_address_is_added(client) -> None:
+    create_response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Student Without Address",
+            "status": "active",
+            "kind": "person",
+            "sender_resolution_mode": "self",
+            "tags": ["supervised-student"],
+        },
+    )
+    contact_id = create_response.json()["data"]["id"]
+
+    add_response = client.post(
+        f"{CONTACTS_URL}/{contact_id}/email-addresses",
+        json={"email_address": "s23second@u.tsukuba.ac.jp", "is_primary": True},
+    )
+
+    assert add_response.status_code == 200
+    assert add_response.json()["data"]["tags"] == ["2023-", "supervised-student"]
+
+
 def test_mailing_list_reserved_tag_is_still_rejected(client) -> None:
     response = client.post(
         CONTACTS_URL,
@@ -255,6 +296,51 @@ def test_service_contact_allows_multiple_addresses_and_tags(
         ).fetchone()
 
     assert row == ("service", "self", None, "fixed", "low")
+
+
+def test_service_contact_can_choose_fixed_importance(client, database_path: Path) -> None:
+    create_response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Important Service",
+            "status": "active",
+            "kind": "service",
+            "sender_resolution_mode": "self",
+            "mail_importance_rule_action": "fixed",
+            "mail_importance_rule_importance": "middle",
+            "email_addresses": [
+                {"email_address": "important-service@example.com", "is_primary": True}
+            ],
+        },
+    )
+
+    assert create_response.status_code == 200
+    data = create_response.json()["data"]
+    assert data["mail_importance_rule_action"] == "fixed"
+    assert data["mail_importance_rule_importance"] == "middle"
+
+    update_response = client.patch(
+        f"{CONTACTS_URL}/{data['id']}",
+        json={
+            "mail_importance_rule_action": "fixed",
+            "mail_importance_rule_importance": "high",
+        },
+    )
+
+    assert update_response.status_code == 200
+    assert update_response.json()["data"]["mail_importance_rule_importance"] == "high"
+
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT mail_importance_rule_action, mail_importance_rule_importance
+            FROM contacts
+            WHERE id = ?
+            """,
+            (data["id"],),
+        ).fetchone()
+
+    assert row == ("fixed", "high")
 
 
 def test_service_contact_rejects_reply_to_sender_resolution(client) -> None:

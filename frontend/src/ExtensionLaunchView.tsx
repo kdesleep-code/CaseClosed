@@ -13,6 +13,21 @@ function queryParam(search: string, name: string) {
   return new URLSearchParams(search).get(name)?.trim() ?? ''
 }
 
+function launchContextFromSettings(search: string) {
+  const params = new URLSearchParams(search)
+  const genreId = queryParam(search, 'genre_id')
+  const genreTitle = queryParam(search, 'genre_title')
+  const context: Record<string, unknown> = {}
+  for (const [key, value] of params.entries()) {
+    if (key.startsWith('context_')) {
+      context[key.slice('context_'.length)] = value
+    }
+  }
+  if (genreId !== '') context.genre_id = genreId
+  if (genreTitle !== '') context.genre_title = genreTitle
+  return Object.keys(context).length === 0 ? null : context
+}
+
 function idleTimeoutSecondsFromSettings(search: string) {
   const extensionId = queryParam(search, 'extension_id')
   const queryValue = Number.parseInt(queryParam(search, 'idle_timeout_seconds'), 10)
@@ -50,10 +65,13 @@ export default function ExtensionLaunchView() {
       return
     }
     const idleTimeoutSeconds = idleTimeoutSecondsFromSettings(window.location.search)
-    const launchKey = `${extensionId}:${caseId}:${idleTimeoutSeconds}`
+    const launchContext = launchContextFromSettings(window.location.search)
+    const launchContextKey = JSON.stringify(launchContext ?? {})
+    const launchKey = `${extensionId}:${caseId}:${idleTimeoutSeconds}:${launchContextKey}`
     const existingPromise = launchPromises.get(launchKey)
     const launchPromise = existingPromise ?? startExtension(extensionId, {
       case_id: caseId === '' ? null : caseId,
+      context: launchContext ?? undefined,
       idle_timeout_seconds: idleTimeoutSeconds,
     })
     if (existingPromise === undefined) {

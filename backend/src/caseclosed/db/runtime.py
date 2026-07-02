@@ -19,6 +19,7 @@ from caseclosed.db.models import Case
 from caseclosed.db.models import MailAutoState
 from caseclosed.db.models import StorageDirectory
 from caseclosed.db.models import StorageLocation
+from caseclosed.db.models import StoragePdfOcrStatus
 from caseclosed.db.models import Task
 from caseclosed.settings import get_database_url
 from caseclosed.settings import get_storage_root
@@ -98,6 +99,28 @@ def ensure_runtime_schema() -> None:
                 connection.execute(text("ALTER TABLE cases ADD COLUMN closed_when_text TEXT"))
             if "tags_json" not in case_columns:
                 connection.execute(text("ALTER TABLE cases ADD COLUMN tags_json TEXT"))
+    if "storage_pdf_ocr_statuses" not in table_names:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE storage_pdf_ocr_statuses (
+                        id TEXT PRIMARY KEY,
+                        storage_object_id TEXT NOT NULL UNIQUE REFERENCES storage_objects(id),
+                        status TEXT NOT NULL DEFAULT 'unknown',
+                        text_quality TEXT NOT NULL DEFAULT 'unknown',
+                        page_count INTEGER,
+                        native_char_count INTEGER NOT NULL DEFAULT 0,
+                        ocr_engine TEXT,
+                        error_message TEXT,
+                        details_json TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+            )
     if "papers" in table_names:
         paper_columns = {column["name"] for column in inspector.get_columns("papers")}
         with engine.begin() as connection:

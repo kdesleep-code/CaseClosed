@@ -2179,7 +2179,7 @@ def mail_summary_instructions() -> str:
         "Full-body translation is disabled; always set translation to null. "
         "Keep the summary concise but preserve deadlines, requests, and decisions. "
         "Summarize only the current/new message body. Treat quoted replies, "
-        "forwarded history, previous messages, signatures, and mailing-list footers "
+        "forwarded history, previous messages, signatures, mailing-list footers, and appended reference/supporting material for a reply draft "
         "as context only, not as facts to summarize. If the current message is short "
         "or only acknowledges a previous message, summarize that short current "
         "message and do not fill the summary from quoted history. Use quoted reply "

@@ -269,6 +269,9 @@ function ContactsView({
   const [pendingSenderResolutions, setPendingSenderResolutions] = useState<
     Record<string, SenderResolutionMode>
   >({})
+  const [pendingServiceImportances, setPendingServiceImportances] = useState<
+    Record<string, ContactMailImportanceRuleValue>
+  >({})
   const [displayName, setDisplayName] = useState('')
   const [emailAddress, setEmailAddress] = useState('')
   const [status, setStatus] = useState<PendingContactStatus>('active')
@@ -532,6 +535,10 @@ function ContactsView({
     )
   }
 
+  function pendingServiceImportance(item: UnresolvedFromAddress): ContactMailImportanceRuleValue {
+    return pendingServiceImportances[item.email_address] ?? 'low'
+  }
+
   function matchingMergeTargetContact(displayName: string, kind: ContactKind) {
     const normalizedDisplayName = displayName.trim().toLocaleLowerCase()
     if (normalizedDisplayName === '' || kind === 'mailing_list') {
@@ -579,6 +586,11 @@ function ContactsView({
       delete nextResolutions[emailAddress]
       return nextResolutions
     })
+    setPendingServiceImportances((currentImportances) => {
+      const nextImportances = { ...currentImportances }
+      delete nextImportances[emailAddress]
+      return nextImportances
+    })
   }
 
   async function handleCreatePendingContact(
@@ -614,7 +626,8 @@ function ContactsView({
         sender_resolution_mode: kind === 'mailing_list' ? senderResolution : 'self',
         mailing_list_recipient_expression: null,
         mail_importance_rule_action: kind === 'service' ? 'fixed' : 'llm',
-        mail_importance_rule_importance: kind === 'service' ? 'low' : null,
+        mail_importance_rule_importance:
+          kind === 'service' ? pendingServiceImportance(item) : null,
         mail_importance_rule_instruction: null,
         tags: [],
         email_addresses: [
@@ -1443,6 +1456,36 @@ function ContactsView({
                       >
                         {t('contacts.pending.sender.replyTo')}
                       </button>
+                    </div>
+                    </div>
+                    <div
+                      className={`pending-toggle-field${
+                        pendingKind(item) !== 'service'
+                          ? ' pending-toggle-field-disabled'
+                          : ''
+                      }`}
+                    >
+                      <span>{t('contacts.importanceRule.value')}</span>
+                    <div className="pending-contact-buttons">
+                      {(['pinned', 'high', 'middle', 'low'] as const).map((importance) => (
+                        <button
+                          aria-pressed={
+                            pendingKind(item) === 'service' &&
+                            pendingServiceImportance(item) === importance
+                          }
+                          disabled={pendingKind(item) !== 'service'}
+                          key={importance}
+                          onClick={() =>
+                            setPendingServiceImportances((currentImportances) => ({
+                              ...currentImportances,
+                              [item.email_address]: importance,
+                            }))
+                          }
+                          type="button"
+                        >
+                          {importance}
+                        </button>
+                      ))}
                     </div>
                     </div>
                     <button

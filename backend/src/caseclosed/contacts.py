@@ -50,6 +50,10 @@ MAIL_IMPORTANCE_RULE_VALUES = {"pinned", "high", "middle", "low"}
 CONTACT_CUSTOM_TABS_KEY = "contact_custom_tabs"
 MAX_CONTACT_CUSTOM_TABS = 4
 MAX_CONTACT_CUSTOM_TAB_NAME_LENGTH = 12
+TSUKUBA_STUDENT_EMAIL_PATTERN = re.compile(
+    r"^s(?P<year>\d{2})[^@]*@u\.tsukuba\.ac\.jp$",
+    re.IGNORECASE,
+)
 
 
 class ContactEmailAddressInput(BaseModel):
@@ -344,6 +348,15 @@ def validate_email_address(email_address: str) -> str:
     return normalized
 
 
+def student_year_tag_for_email_address(email_address: str | None) -> str | None:
+    if email_address is None:
+        return None
+    match = TSUKUBA_STUDENT_EMAIL_PATTERN.match(email_address.strip())
+    if match is None:
+        return None
+    return f"20{match.group('year')}-"
+
+
 def contact_tags(session: DatabaseSession, contact_id: str) -> list[str]:
     return sorted(
         session.scalars(
@@ -507,6 +520,42 @@ def set_contact_tags(
                 created_at=created_at,
             )
         )
+
+
+def sync_contact_student_year_tags(
+    session: DatabaseSession,
+    contact: Contact,
+    *,
+    now: str,
+) -> list[str]:
+    if contact.kind == "mailing_list":
+        return []
+
+    existing_tags = contact_tags(session, contact.id)
+    existing_lookup = {tag.lower() for tag in existing_tags}
+    tags_to_add = sorted(
+        {
+            tag
+            for email_address in contact_email_addresses(session, contact.id)
+            for tag in [
+                student_year_tag_for_email_address(
+                    email_address.normalized_email_address
+                )
+            ]
+            if tag is not None and tag.lower() not in existing_lookup
+        }
+    )
+    for tag in tags_to_add:
+        session.add(
+            ContactTag(
+                id=new_id("contact_tag"),
+                contact_id=contact.id,
+                tag=tag,
+                created_at=now,
+            )
+        )
+        existing_lookup.add(tag.lower())
+    return tags_to_add
 
 
 def mark_source_suggestion_adopted(
@@ -953,6 +1002,7 @@ def create_contact(
     set_contact_tags(session, contact.id, payload.tags, now)
     for email_address in payload.email_addresses:
         link_email_address(session, contact, email_address, now=now, source="manual")
+    sync_contact_student_year_tags(session, contact, now=now)
     recalculate_contact_inbound_message_count(session, contact)
     if contact.status == "spam":
         apply_spam_status_to_existing_contact_mail(
@@ -1077,6 +1127,7 @@ def update_contact(
         set_contact_tags(session, contact.id, payload.tags, now)
     elif next_kind == "mailing_list":
         set_contact_tags(session, contact.id, [], now)
+    sync_contact_student_year_tags(session, contact, now=now)
 
     contact.version += 1
     contact.updated_at = now
@@ -1144,6 +1195,7 @@ def add_contact_email_address(
 
     now = jst_iso()
     link_email_address(session, contact, payload, now=now, source="manual")
+    sync_contact_student_year_tags(session, contact, now=now)
     recalculate_contact_inbound_message_count(session, contact)
     if contact.status == "spam":
         apply_spam_status_to_existing_contact_mail(
@@ -1217,6 +1269,7 @@ def activate_contact_email_address(
     email_address.is_primary = 0 if had_active_email_addresses else 1
     email_address.updated_at = now
     email_address.version += 1
+    sync_contact_student_year_tags(session, contact, now=now)
     contact.version += 1
     contact.updated_at = now
     session.commit()
@@ -1292,6 +1345,7 @@ def move_contact_email_address(
     )
     recalculate_contact_inbound_message_count(session, source_contact)
     recalculate_contact_inbound_message_count(session, target_contact)
+    sync_contact_student_year_tags(session, target_contact, now=now)
 
     source_contact.version += 1
     source_contact.updated_at = now
@@ -1382,6 +1436,7 @@ def merge_contact(
         | set(contact_tags(session, target_contact.id))
     )
     set_contact_tags(session, target_contact.id, merged_tags, now)
+    sync_contact_student_year_tags(session, target_contact, now=now)
     set_contact_tags(session, source_contact.id, [], now)
     source_contact.deleted_at = now
     source_contact.version += 1

@@ -3,8 +3,8 @@ import type { MouseEvent } from 'react'
 import * as pdfjsLib from 'pdfjs-dist'
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.mjs?url'
 import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
-import { getStorageObject } from './phase3Api'
-import type { StorageObject } from './phase3Api'
+import { getStorageObject, getStorageObjectPdfOcrStatus, runStorageObjectPdfOcr } from './phase3Api'
+import type { StorageObject, StoragePdfOcrStatus } from './phase3Api'
 import { t } from './i18n'
 import { navigateTo, TopNav } from './navigation'
 
@@ -13,12 +13,45 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl
 type RenderTask = { cancel: () => void; promise: Promise<unknown> }
 type TextLayerTask = InstanceType<typeof pdfjsLib.TextLayer>
 
-function bookshelfContentUrl(storageObjectId: string) {
-  return `/api/v1/storage/objects/${encodeURIComponent(storageObjectId)}/content`
+function bookshelfContentUrl(storageObjectId: string, versionKey: string | null = null) {
+  const suffix = versionKey === null ? '' : `?v=${encodeURIComponent(versionKey)}`
+  return `/api/v1/storage/objects/${encodeURIComponent(storageObjectId)}/content${suffix}`
 }
 
 function pdfPageKey(storageObjectId: string) {
   return `caseclosed.bookshelf.reader.pdfPage.${storageObjectId}`
+}
+
+function pdfSearchIndexKey(storageObject: StorageObject) {
+  return `caseclosed.bookshelf.reader.searchIndex.${storageObject.id}.${storageObject.sha256_hex}`
+}
+
+function readCachedSearchIndex(storageObject: StorageObject) {
+  try {
+    const rawValue = window.localStorage.getItem(pdfSearchIndexKey(storageObject))
+    if (rawValue === null) return []
+    const parsed = JSON.parse(rawValue)
+    if (!Array.isArray(parsed)) return []
+    return parsed.map((item) => (typeof item === 'string' ? item : ''))
+  } catch {
+    return []
+  }
+}
+
+function writeCachedSearchIndex(storageObject: StorageObject, pageTexts: string[], pageCount: number) {
+  if (pageCount === 0) return
+  const complete = Array.from({ length: pageCount }, (_, index) => pageTexts[index] ?? '')
+  try {
+    window.localStorage.setItem(pdfSearchIndexKey(storageObject), JSON.stringify(complete))
+  } catch {
+    // Search cache is an optimization only.
+  }
+}
+
+function isSearchIndexComplete(pageTexts: string[], pageCount: number) {
+  return pageCount > 0 && Array.from({ length: pageCount }, (_, index) => pageTexts[index]).every(
+    (value) => typeof value === 'string',
+  )
 }
 
 function displayTitle(storageObject: StorageObject | null) {
@@ -50,6 +83,19 @@ function textContentToString(textContent: Awaited<ReturnType<PDFPageProxy['getTe
     .trim()
 }
 
+function ocrStatusLabel(status: StoragePdfOcrStatus | null) {
+  if (status === null) return t('bookshelf.reader.ocr.unknown')
+  if (status.status === 'native_text') return t('bookshelf.reader.ocr.native')
+  if (status.status === 'ocr_needed') return t('bookshelf.reader.ocr.needed')
+  if (status.status === 'ocr_done') return t('bookshelf.reader.ocr.done')
+  if (status.status === 'ocr_failed') return t('bookshelf.reader.ocr.failed')
+  return t('bookshelf.reader.ocr.unknown')
+}
+
+function shouldShowOcrRun(_status: StoragePdfOcrStatus | null) {
+  return true
+}
+
 export default function BookshelfReaderView({ storageObjectId }: { storageObjectId: string }) {
   const leftPageRef = useRef<HTMLDivElement | null>(null)
   const rightPageRef = useRef<HTMLDivElement | null>(null)
@@ -60,7 +106,11 @@ export default function BookshelfReaderView({ storageObjectId }: { storageObject
   const pdfRef = useRef<PDFDocumentProxy | null>(null)
   const renderTasksRef = useRef<RenderTask[]>([])
   const textLayerTasksRef = useRef<TextLayerTask[]>([])
+  const searchIndexRunRef = useRef(0)
   const [storageObject, setStorageObject] = useState<StorageObject | null>(null)
+  const [ocrStatus, setOcrStatus] = useState<StoragePdfOcrStatus | null>(null)
+  const [isRunningOcr, setIsRunningOcr] = useState(false)
+  const [pdfReloadKey, setPdfReloadKey] = useState(0)
   const [pdfPageNumber, setPdfPageNumber] = useState(1)
   const [pdfPageCount, setPdfPageCount] = useState(0)
   const [pageTexts, setPageTexts] = useState<string[]>([])
@@ -79,11 +129,19 @@ export default function BookshelfReaderView({ storageObjectId }: { storageObject
     setIsReady(false)
     setError(null)
     setStorageObject(null)
+    setOcrStatus(null)
     setPageTexts([])
     setSearchQuery('')
     setSearchMatches([])
     getStorageObject(storageObjectId)
-      .then((nextObject) => setStorageObject(nextObject))
+      .then((nextObject) => {
+        setStorageObject(nextObject)
+        setPageTexts(readCachedSearchIndex(nextObject))
+        return getStorageObjectPdfOcrStatus(storageObjectId)
+      })
+      .then((response) => {
+        setOcrStatus(response.ocr_status)
+      })
       .catch((caught) => {
         setError(caught instanceof Error ? caught.message : t('app.requestFailed'))
         setIsLoading(false)
@@ -97,11 +155,10 @@ export default function BookshelfReaderView({ storageObjectId }: { storageObject
     setIsReady(false)
     setError(null)
     setPdfPageCount(0)
-    setPageTexts([])
     const savedPage = Number(window.localStorage.getItem(pdfPageKey(storageObjectId)) ?? '1')
 
     const loadingTask = pdfjsLib.getDocument({
-      url: bookshelfContentUrl(storageObjectId),
+      url: bookshelfContentUrl(storageObjectId, `${storageObject.sha256_hex}-${pdfReloadKey}`),
       cMapUrl: '/pdfjs/cmaps/',
       cMapPacked: true,
       standardFontDataUrl: '/pdfjs/standard_fonts/',
@@ -131,33 +188,74 @@ export default function BookshelfReaderView({ storageObjectId }: { storageObject
       textLayerTasksRef.current = []
       pdfRef.current = null
     }
-  }, [storageObject, storageObjectId])
+  }, [pdfReloadKey, storageObject, storageObjectId])
+
+  async function indexPages(pageNumbers: number[], options: { background: boolean } = { background: false }) {
+    const pdf = pdfRef.current
+    if (pdf === null || storageObject === null || pageNumbers.length === 0) return
+    const runId = ++searchIndexRunRef.current
+    if (options.background) setIsIndexing(true)
+    try {
+      const nextEntries: Array<[number, string]> = []
+      for (const pageNumber of pageNumbers) {
+        if (searchIndexRunRef.current !== runId) return
+        const page = await pdf.getPage(pageNumber)
+        const textContent = await page.getTextContent()
+        nextEntries.push([pageNumber, textContentToString(textContent)])
+        if (options.background) {
+          setPageTexts((current) => {
+            const nextTexts = current.slice()
+            for (const [entryPageNumber, textValue] of nextEntries.splice(0)) {
+              nextTexts[entryPageNumber - 1] = textValue
+            }
+            return nextTexts
+          })
+        }
+      }
+      if (nextEntries.length > 0) {
+        setPageTexts((current) => {
+          const nextTexts = current.slice()
+          for (const [entryPageNumber, textValue] of nextEntries) {
+            nextTexts[entryPageNumber - 1] = textValue
+          }
+          return nextTexts
+        })
+      }
+    } catch (caught: unknown) {
+      if (!isExpectedPdfCancellation(caught)) {
+        setError(caught instanceof Error ? caught.message : t('app.requestFailed'))
+      }
+    } finally {
+      if (options.background && searchIndexRunRef.current === runId) setIsIndexing(false)
+    }
+  }
 
   useEffect(() => {
-    if (pdfRef.current === null || pdfPageCount === 0) return undefined
-    let isCancelled = false
-    const pdf = pdfRef.current
-    setIsIndexing(true)
-    Promise.all(Array.from({ length: pdfPageCount }, async (_, index) => {
-      const page = await pdf.getPage(index + 1)
-      const textContent = await page.getTextContent()
-      return textContentToString(textContent)
-    }))
-      .then((texts) => {
-        if (!isCancelled) setPageTexts(texts)
-      })
-      .catch((caught: unknown) => {
-        if (!isExpectedPdfCancellation(caught)) {
-          setError(caught instanceof Error ? caught.message : t('app.requestFailed'))
-        }
-      })
-      .finally(() => {
-        if (!isCancelled) setIsIndexing(false)
-      })
-    return () => {
-      isCancelled = true
+    if (pdfRef.current === null || pdfPageCount === 0) return
+    const visiblePages = [pdfPageNumber, pdfPageNumber + 1].filter((pageNumber) => (
+      pageNumber <= pdfPageCount && typeof pageTexts[pageNumber - 1] !== 'string'
+    ))
+    if (visiblePages.length > 0) {
+      void indexPages(visiblePages)
     }
-  }, [pdfPageCount])
+  }, [pageTexts, pdfPageCount, pdfPageNumber, storageObject])
+
+  useEffect(() => {
+    if (storageObject === null || pdfPageCount === 0) return
+    if (isSearchIndexComplete(pageTexts, pdfPageCount)) {
+      writeCachedSearchIndex(storageObject, pageTexts, pdfPageCount)
+    }
+  }, [pageTexts, pdfPageCount, storageObject])
+
+  useEffect(() => {
+    if (searchQuery.trim() === '' || isIndexing || pdfRef.current === null || pdfPageCount === 0) return
+    const missingPages = Array.from({ length: pdfPageCount }, (_, index) => index + 1).filter(
+      (pageNumber) => typeof pageTexts[pageNumber - 1] !== 'string',
+    )
+    if (missingPages.length > 0) {
+      void indexPages(missingPages, { background: true })
+    }
+  }, [isIndexing, pageTexts, pdfPageCount, searchQuery, storageObject])
 
   useEffect(() => {
     const normalizedQuery = searchQuery.trim().toLowerCase()
@@ -167,7 +265,7 @@ export default function BookshelfReaderView({ storageObjectId }: { storageObject
       return
     }
     const nextMatches = pageTexts.flatMap((textValue, index) => (
-      textValue.toLowerCase().includes(normalizedQuery) ? [index + 1] : []
+      typeof textValue === 'string' && textValue.toLowerCase().includes(normalizedQuery) ? [index + 1] : []
     ))
     setSearchMatches(nextMatches)
     setSelectedSearchIndex(0)
@@ -289,6 +387,38 @@ export default function BookshelfReaderView({ storageObjectId }: { storageObject
     setPdfPageNumber(spreadStartForPage(searchMatches[nextIndex]))
   }
 
+  async function runOcr() {
+    setIsRunningOcr(true)
+    setError(null)
+    try {
+      const response = await runStorageObjectPdfOcr(storageObjectId)
+      setStorageObject(response.storage_object)
+      setOcrStatus(response.ocr_status)
+      searchIndexRunRef.current += 1
+      try {
+        window.localStorage.removeItem(pdfSearchIndexKey(response.storage_object))
+      } catch {
+        // Search cache is an optimization only.
+      }
+      setPageTexts([])
+      setSearchQuery('')
+      setSearchMatches([])
+      setSelectedSearchIndex(0)
+      setPdfPageNumber(1)
+      setPdfReloadKey((current) => current + 1)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : t('app.requestFailed'))
+      try {
+        const response = await getStorageObjectPdfOcrStatus(storageObjectId, true)
+        setOcrStatus(response.ocr_status)
+      } catch {
+        // Keep the visible request error.
+      }
+    } finally {
+      setIsRunningOcr(false)
+    }
+  }
+
   function handleBookClick(event: MouseEvent<HTMLDivElement>) {
     const selection = window.getSelection()?.toString() ?? ''
     if (selection.trim() !== '') return
@@ -388,6 +518,24 @@ export default function BookshelfReaderView({ storageObjectId }: { storageObject
               <button disabled={searchMatches.length === 0} onClick={() => goToSearchMatch(1)} type="button">Next</button>
               {searchStatus !== '' && <small>{searchStatus}</small>}
             </label>
+            <div className={`bookshelf-reader-ocr is-${ocrStatus?.status ?? 'unknown'}`}>
+              <span>{ocrStatusLabel(ocrStatus)}</span>
+              {ocrStatus?.error_message != null && <small>{ocrStatus.error_message}</small>}
+              {shouldShowOcrRun(ocrStatus) && (
+                <button
+                  className={`button-loading-dot${isRunningOcr ? ' is-loading' : ''}`}
+                  disabled={!isReady || isRunningOcr}
+                  onClick={() => { void runOcr() }}
+                  type="button"
+                >
+                  {isRunningOcr
+                    ? t('bookshelf.reader.ocr.running')
+                    : ocrStatus?.status === 'ocr_done'
+                      ? t('bookshelf.reader.ocr.rerun')
+                      : t('bookshelf.reader.ocr.run')}
+                </button>
+              )}
+            </div>
             <span className="bookshelf-reader-page-count-right">{isLoading ? t('common.loading') : progressText}</span>
           </div>
           <div className="bookshelf-reader-book" onClick={handleBookClick}>

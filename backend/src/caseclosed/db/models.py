@@ -753,6 +753,27 @@ class StorageObjectVersion(Base):
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class StoragePdfOcrStatus(Base):
+    __tablename__ = "storage_pdf_ocr_statuses"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    storage_object_id: Mapped[str] = mapped_column(
+        ForeignKey("storage_objects.id"),
+        nullable=False,
+        unique=True,
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="unknown")
+    text_quality: Mapped[str] = mapped_column(Text, nullable=False, default="unknown")
+    page_count: Mapped[int | None] = mapped_column(Integer)
+    native_char_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ocr_engine: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    details_json: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
 class FileSummary(Base):
     __tablename__ = "file_summaries"
 

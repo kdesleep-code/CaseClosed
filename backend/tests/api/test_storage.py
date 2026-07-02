@@ -1129,6 +1129,61 @@ def test_bookshelf_epub_upload_reports_missing_converter(client, monkeypatch) ->
     assert response.json()["error"]["code"] == "EPUB_CONVERTER_UNAVAILABLE"
 
 
+def test_bookshelf_pdf_ocr_status_and_run(client, monkeypatch) -> None:
+    pdf_response = client.post(
+        "/api/v1/storage/bookshelf/materials/upload",
+        files={
+            "file": (
+                "ocr-book.pdf",
+                simple_pdf_bytes(["This page has enough searchable native text for OCR status checks."]),
+                "application/pdf",
+            )
+        },
+    )
+    assert pdf_response.status_code == 200
+    storage_object = pdf_response.json()["data"]["storage_object"]
+
+    status_response = client.get(f"/api/v1/storage/objects/{storage_object['id']}/pdf-ocr/status")
+    assert status_response.status_code == 200
+    status = status_response.json()["data"]["ocr_status"]
+    assert status["status"] in {"native_text", "ocr_needed"}
+    assert status["native_char_count"] > 0
+
+    def fake_run(command, check, stdout, stderr, timeout):
+        assert command[1] == "--force-ocr"
+        Path(command[-1]).write_bytes(simple_pdf_bytes(["OCR text layer regenerated successfully."]))
+        return subprocess.CompletedProcess(command, 0, stdout=b"ocr ok", stderr=b"")
+
+    monkeypatch.setattr(storage_module.shutil, "which", lambda name: "/usr/bin/ocrmypdf")
+    monkeypatch.setattr(storage_module.subprocess, "run", fake_run)
+
+    run_response = client.post(f"/api/v1/storage/objects/{storage_object['id']}/pdf-ocr/run")
+    assert run_response.status_code == 200
+    run_data = run_response.json()["data"]
+    assert run_data["ocr_status"]["status"] == "ocr_done"
+    assert run_data["ocr_status"]["ocr_engine"] == "ocrmypdf"
+    assert run_data["version"] is not None
+    assert run_data["storage_object"]["sha256_hex"] != storage_object["sha256_hex"]
+
+
+def test_bookshelf_pdf_ocr_reports_missing_ocrmypdf(client, monkeypatch) -> None:
+    pdf_response = client.post(
+        "/api/v1/storage/bookshelf/materials/upload",
+        files={"file": ("scan.pdf", simple_pdf_bytes(["scan"]), "application/pdf")},
+    )
+    assert pdf_response.status_code == 200
+    storage_object = pdf_response.json()["data"]["storage_object"]
+    monkeypatch.setattr(storage_module.shutil, "which", lambda name: None)
+
+    run_response = client.post(f"/api/v1/storage/objects/{storage_object['id']}/pdf-ocr/run")
+    assert run_response.status_code == 503
+    assert run_response.json()["error"]["code"] == "OCR_UNAVAILABLE"
+
+    status_response = client.get(f"/api/v1/storage/objects/{storage_object['id']}/pdf-ocr/status")
+    assert status_response.status_code == 200
+    assert status_response.json()["data"]["ocr_status"]["status"] == "ocr_failed"
+
+
 def test_bookshelf_pdf_can_be_physically_deleted(client, database_path: Path) -> None:
     upload_response = client.post(
         "/api/v1/storage/bookshelf/materials/upload",
