@@ -3586,6 +3586,71 @@
   white-space: pre-wrap;
 }
 
+
+.mail-thread-datetime-highlight {
+  border-radius: 4px;
+  padding: 0 2px;
+  background: rgba(255, 236, 199, 0.72);
+  color: var(--danger-text);
+  cursor: default;
+  font-weight: 820;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.mail-thread-calendar-hover {
+  position: fixed;
+  z-index: 1200;
+  width: min(320px, calc(100vw - 28px));
+  border: 1px solid var(--surface-warm-border-strong);
+  border-radius: 8px;
+  padding: 10px;
+  display: grid;
+  gap: 7px;
+  background: rgba(255, 253, 247, 0.98);
+  box-shadow: var(--shadow-lg);
+  color: var(--text-strong);
+  font-size: 0.82rem;
+  font-weight: 680;
+  line-height: 1.35;
+  pointer-events: none;
+  white-space: normal;
+}
+
+.mail-thread-calendar-hover-title {
+  color: var(--text-heading);
+  font-weight: 820;
+}
+
+.mail-thread-calendar-hover-list {
+  display: grid;
+  gap: 6px;
+}
+
+.mail-thread-calendar-hover-event {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+
+.mail-thread-calendar-hover-event time {
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  font-weight: 760;
+  white-space: nowrap;
+}
+
+.mail-thread-calendar-hover-event span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .mail-thread-body a,
 .mail-thread-mail-summary a {
   color: var(--accent-strong);

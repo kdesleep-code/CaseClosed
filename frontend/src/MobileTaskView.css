@@ -1,0 +1,216 @@
+.mobile-task-shell {
+  gap: 12px;
+}
+
+.mobile-task-groups {
+  display: grid;
+  gap: 14px;
+}
+
+.mobile-task-day {
+  display: grid;
+  gap: 8px;
+}
+
+.mobile-task-day h2 {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-weight: 780;
+}
+
+.mobile-task-list {
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+  list-style: none;
+}
+
+.mobile-task-list a {
+  min-width: 0;
+  min-height: 70px;
+  padding: 10px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--surface-warm-border);
+  border-radius: 8px;
+  background: var(--surface-panel);
+  color: var(--text-strong);
+  text-decoration: none;
+  box-shadow: var(--shadow-sm);
+}
+
+.mobile-task-row-main {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.mobile-task-row-main strong,
+.mobile-task-row-main span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mobile-task-row-main strong {
+  color: var(--text-heading);
+  font-size: 0.96rem;
+  font-weight: 800;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.mobile-task-row-main span {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 680;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.mobile-task-due,
+.mobile-task-detail-due {
+  min-width: 78px;
+  display: grid;
+  justify-items: end;
+  gap: 3px;
+}
+
+.mobile-task-due span,
+.mobile-task-detail-due span {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-weight: 760;
+}
+
+.mobile-task-due strong,
+.mobile-task-detail-due strong {
+  color: var(--text-heading);
+  font-size: 0.82rem;
+  font-weight: 820;
+  white-space: nowrap;
+}
+
+.mobile-task-due.overdue strong,
+.mobile-task-detail-due.overdue strong {
+  color: var(--danger-text);
+}
+
+.mobile-task-due.today strong,
+.mobile-task-detail-due.today strong {
+  color: var(--success-text);
+}
+
+.mobile-task-detail-card {
+  gap: 12px;
+}
+
+.mobile-task-detail-card button,
+.mobile-task-memo-panel button {
+  min-height: 42px;
+  border: 1px solid var(--surface-warm-border-strong);
+  border-radius: 8px;
+  background: rgba(255, 250, 242, 0.92);
+  color: var(--text-heading);
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 780;
+}
+
+.mobile-task-detail-card button:disabled,
+.mobile-task-memo-panel button:disabled {
+  opacity: 0.56;
+}
+
+.mobile-task-detail-meta {
+  margin: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.mobile-task-detail-meta div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.mobile-task-detail-meta dt {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 740;
+}
+
+.mobile-task-detail-meta dd {
+  margin: 0;
+  color: var(--text-heading);
+  font-size: 0.84rem;
+  font-weight: 780;
+}
+
+.mobile-task-memo-panel h2 {
+  margin: 0;
+}
+
+.mobile-task-progress-list {
+  display: grid;
+  gap: 8px;
+}
+
+.mobile-task-progress-list article {
+  padding: 9px 10px;
+  display: grid;
+  gap: 4px;
+  border-radius: 8px;
+  background: rgba(255, 252, 247, 0.72);
+}
+
+.mobile-task-progress-list time {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 760;
+}
+
+.mobile-task-progress-list p {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.mobile-task-memo-panel textarea {
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+  border: 1px solid var(--surface-warm-border);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(255, 252, 247, 0.9);
+  color: var(--text-strong);
+  font: inherit;
+  line-height: 1.45;
+}
+
+.mobile-task-case-badge {
+  width: fit-content;
+  max-width: 100%;
+  min-width: 0;
+  border: 1px solid rgba(122, 83, 57, 0.18);
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: rgba(255, 250, 242, 0.88);
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 760;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-task-case-badge-detail {
+  max-width: 100%;
+}

@@ -1,4 +1,4 @@
-﻿import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, FormEvent } from 'react'
 import { AuthApiError, login, readSession } from './authApi'
 import type { SessionData } from './authApi'
@@ -30,6 +30,12 @@ import MailView from './MailView'
 import type { MailInitialData } from './MailView'
 import type { MailTab } from './MailView'
 import MailThreadView from './MailThreadView'
+import MobileTopView from './MobileTopView'
+import MobileCalendarDayView from './MobileCalendarDayView'
+import MobileMailDayView from './MobileMailDayView'
+import MobileMailThreadView from './MobileMailThreadView'
+import MobileSettingsView from './MobileSettingsView'
+import { MobileTaskDetailView, MobileTaskListView } from './MobileTaskView'
 import MaintenanceView from './MaintenanceView'
 import PaperShelfView from './PaperShelfView'
 import PaperDetailView from './PaperDetailView'
@@ -119,6 +125,44 @@ const emptyTopAttentionState: TopAttentionState = {
 type PageSlot = LinkItem | { blank: true; key: string }
 
 const pomodoroSettingsStorageKey = 'caseclosed.pomodoroSettings'
+const viewModeStorageKey = 'caseclosed.viewMode'
+
+type ViewModePreference = 'desktop' | 'mobile'
+
+function requestedViewModeFromLocation(): ViewModePreference | null {
+  const value = new URLSearchParams(window.location.search).get('view')
+  return value === 'desktop' || value === 'mobile' ? value : null
+}
+
+function rememberedViewMode(): ViewModePreference | null {
+  try {
+    const value = window.localStorage.getItem(viewModeStorageKey)
+    return value === 'desktop' || value === 'mobile' ? value : null
+  } catch {
+    return null
+  }
+}
+
+function rememberViewMode(value: ViewModePreference) {
+  try {
+    window.localStorage.setItem(viewModeStorageKey, value)
+  } catch {
+    // localStorage can be unavailable in private or restricted contexts.
+  }
+}
+
+function isMobileTopViewport() {
+  return window.matchMedia('(max-width: 720px), (pointer: coarse) and (max-width: 900px)').matches
+}
+
+function shouldOpenMobileTop(requested: ViewModePreference | null) {
+  if (requested === 'desktop') return false
+  if (requested === 'mobile') return true
+  const remembered = rememberedViewMode()
+  if (remembered === 'desktop') return false
+  if (remembered === 'mobile') return true
+  return isMobileTopViewport()
+}
 
 const pageLinks: LinkItem[] = [
   { labelKey: 'nav.mail', href: '/mail', iconUrl: topMailTanukiIconUrl },
@@ -1963,6 +2007,19 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (session === null || !isSessionChecked) {
+      return
+    }
+    const requested = requestedViewModeFromLocation()
+    if (requested !== null) {
+      rememberViewMode(requested)
+    }
+    if (path === '/' && shouldOpenMobileTop(requested)) {
+      transitionToPreparedRoute('/m', 'replace')
+    }
+  }, [path, session, isSessionChecked])
+
+  useEffect(() => {
     function handleNavigation() {
       transitionToPreparedRoute(currentBrowserPath(), 'none')
     }
@@ -2124,6 +2181,80 @@ function App() {
   }
 
   if (session !== null) {
+    if (path === '/m/calendar' || path === '/mobile/calendar') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <MobileCalendarDayView />
+        </>
+      )
+    }
+    if (path === '/m/mail/action-needed' || path === '/mobile/mail/action-needed') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <MobileMailDayView mode="action-needed" />
+        </>
+      )
+    }
+    if (path.startsWith('/m/mail/') || path.startsWith('/mobile/mail/')) {
+      const prefix = path.startsWith('/m/mail/') ? '/m/mail/' : '/mobile/mail/'
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <MobileMailThreadView messageId={decodeURIComponent(path.slice(prefix.length))} />
+        </>
+      )
+    }
+    if (path === '/m/mail' || path === '/mobile/mail') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <MobileMailDayView />
+        </>
+      )
+    }
+    if (path.startsWith('/m/tasks/') || path.startsWith('/mobile/tasks/')) {
+      const prefix = path.startsWith('/m/tasks/') ? '/m/tasks/' : '/mobile/tasks/'
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <MobileTaskDetailView taskId={decodeURIComponent(path.slice(prefix.length))} />
+        </>
+      )
+    }
+    if (path === '/m/tasks' || path === '/mobile/tasks') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <MobileTaskListView />
+        </>
+      )
+    }
+    if (path === '/m/settings' || path === '/mobile/settings') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <MobileSettingsView />
+        </>
+      )
+    }
+    if (path === '/m' || path === '/mobile') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <MobileTopView />
+        </>
+      )
+    }
     if (path === '/maintenance') {
       return (
         <>

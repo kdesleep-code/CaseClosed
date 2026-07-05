@@ -1,0 +1,178 @@
+.mobile-mail-shell {
+  touch-action: pan-y;
+}
+
+.mobile-mail-topbar h1 {
+  font-size: 1.28rem;
+}
+
+.mobile-mail-list {
+  display: grid;
+  gap: 8px;
+}
+
+.mobile-mail-entry {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.mobile-mail-group {
+  margin: 6px 0 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 840;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.mobile-mail-group::after {
+  height: 1px;
+  flex: 1 1 auto;
+  background: rgba(145, 78, 43, 0.14);
+  content: '';
+}
+
+.mobile-mail-group span {
+  border: 1px solid var(--surface-warm-border);
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: rgba(255, 250, 242, 0.78);
+}
+
+.mobile-mail-card {
+  min-width: 0;
+  border: 1px solid rgba(145, 78, 43, 0.14);
+  border-left: 4px solid #b9875c;
+  border-radius: 8px;
+  padding: 11px 12px;
+  display: grid;
+  gap: 6px;
+  background: rgba(255, 253, 247, 0.86);
+  box-shadow: var(--shadow-sm);
+  color: inherit;
+  text-decoration: none;
+}
+
+.mobile-mail-card:active {
+  transform: translateY(1px);
+}
+
+.mobile-mail-card.group-pending,
+.mobile-mail-card.group-pinned,
+.mobile-mail-card.group-high {
+  border-left-color: #b8493d;
+}
+
+.mobile-mail-card.group-middle {
+  border-left-color: #c57a35;
+}
+
+.mobile-mail-card.group-low {
+  border-left-color: #8d9b68;
+}
+
+.mobile-mail-card.group-skip {
+  border-left-color: #8a8a8a;
+  opacity: 0.72;
+  box-shadow: none;
+}
+
+.mobile-mail-card.group-done {
+  border-left-color: #6d8f79;
+  opacity: 0.58;
+  box-shadow: none;
+}
+
+.mobile-mail-card.group-unclassified {
+  border-left-color: #7b8fbd;
+}
+
+.mobile-mail-card.read-read {
+  background: rgba(255, 250, 242, 0.66);
+}
+
+.mobile-mail-card-head {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mobile-mail-card-head time,
+.mobile-mail-card-head span {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.mobile-mail-card-head span {
+  border: 1px solid rgba(145, 78, 43, 0.14);
+  border-radius: 999px;
+  padding: 2px 7px;
+  background: rgba(255, 250, 242, 0.7);
+}
+
+.mobile-mail-card strong {
+  min-width: 0;
+  color: var(--text-heading);
+  font-size: 0.95rem;
+  font-weight: 820;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.mobile-mail-card p {
+  min-width: 0;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-weight: 720;
+  overflow-wrap: anywhere;
+}
+
+.mobile-mail-card .mobile-mail-summary {
+  color: var(--text-strong);
+  font-size: 0.84rem;
+  font-weight: 620;
+  line-height: 1.45;
+}
+
+.mobile-mail-meta {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.mobile-mail-meta span {
+  border: 1px solid rgba(145, 78, 43, 0.12);
+  border-radius: 999px;
+  padding: 2px 7px;
+  color: var(--text-muted);
+  background: rgba(255, 250, 242, 0.66);
+  font-size: 0.68rem;
+  font-weight: 760;
+}
+
+.mobile-mail-action-empty {
+  min-height: 260px;
+  padding: 18px 14px 20px;
+  place-items: center;
+  text-align: center;
+}
+
+.mobile-mail-action-empty img {
+  width: min(230px, 78vw);
+  height: auto;
+  display: block;
+}
+
+.mobile-mail-action-empty .mobile-empty {
+  margin-top: 4px;
+}

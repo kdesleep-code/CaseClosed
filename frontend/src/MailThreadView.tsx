@@ -18,6 +18,7 @@ import {
   createGoogleCalendarEvent,
   enqueueMailAttachmentFetchJob,
   getMailDetail,
+  listCalendarDbEvents,
   markMailRead,
   moveMailAttachmentToStorage,
   prefillCalendarEventFromMail,
@@ -30,7 +31,7 @@ import {
   unprocessMail,
   updateMailImportance,
 } from './phase4Api'
-import type { MailAttachment, MailDetail, MailSendRequest, MailThreadMessage } from './phase4Api'
+import type { GoogleCalendarEvent, MailAttachment, MailDetail, MailSendRequest, MailThreadMessage } from './phase4Api'
 import type { CalendarEventFromMailPrefill } from './phase4Api'
 import type { MailRecipient } from './phase4Api'
 import { isCaseOpenForSuggestion, listCases } from './phase7Api'
@@ -361,42 +362,430 @@ function displayedUrlText(url: string) {
   return `${url.slice(0, maxDisplayedUrlLength)}...`
 }
 
-function linkifiedNodes(text: string): ReactNode[] {
+type MailDateTimeCandidate = {
+  label: string
+  startIso: string
+  endIso: string
+}
+
+type CalendarHoverState =
+  | { status: 'loading'; events: GoogleCalendarEvent[]; error: string | null; x: number; y: number }
+  | { status: 'loaded'; events: GoogleCalendarEvent[]; error: string | null; x: number; y: number }
+
+function referenceDateParts(referenceDate?: string | null) {
+  const fallback = new Date()
+  const value = referenceDate ?? fallback.toISOString()
+  const year = Number(value.slice(0, 4))
+  const month = Number(value.slice(5, 7))
+  return {
+    year: Number.isFinite(year) && year > 0 ? year : fallback.getFullYear(),
+    month: Number.isFinite(month) && month >= 1 && month <= 12 ? month : fallback.getMonth() + 1,
+  }
+}
+
+function padDatePart(value: string | number) {
+  return String(value).padStart(2, '0')
+}
+
+function jstIso(year: number, month: number, day: number, hour: number, minute: number) {
+  return `${year}-${padDatePart(month)}-${padDatePart(day)}T${padDatePart(hour)}:${padDatePart(minute)}:00+09:00`
+}
+
+function addMinutesToJstIso(value: string, minutes: number) {
+  const [datePartValue, timePartValue] = value.split('T')
+  const [year, month, day] = datePartValue.split('-').map(Number)
+  const [hour, minute] = timePartValue.slice(0, 5).split(':').map(Number)
+  const date = new Date(Date.UTC(year, month - 1, day, hour - 9, minute + minutes))
+  const jstDate = new Date(date.getTime() + 9 * 60 * 60 * 1000)
+  return `${jstDate.getUTCFullYear()}-${padDatePart(jstDate.getUTCMonth() + 1)}-${padDatePart(jstDate.getUTCDate())}T${padDatePart(jstDate.getUTCHours())}:${padDatePart(jstDate.getUTCMinutes())}:00+09:00`
+}
+
+
+const japaneseWeekdayIndex: Record<string, number> = {
+  月: 1,
+  火: 2,
+  水: 3,
+  木: 4,
+  金: 5,
+  土: 6,
+  日: 0,
+}
+
+type RelativeWeekContext = 'this' | 'next'
+
+function referenceDateAtJstMidnight(referenceDate?: string | null) {
+  const value = referenceDate ?? new Date().toISOString()
+  const year = Number(value.slice(0, 4))
+  const month = Number(value.slice(5, 7))
+  const day = Number(value.slice(8, 10))
+  if (
+    Number.isFinite(year) &&
+    Number.isFinite(month) &&
+    Number.isFinite(day) &&
+    year > 0 &&
+    month >= 1 &&
+    month <= 12 &&
+    day >= 1 &&
+    day <= 31
+  ) {
+    return new Date(Date.UTC(year, month - 1, day))
+  }
+  const now = new Date()
+  return new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()))
+}
+
+function jstDateFromUtcDate(date: Date) {
+  return {
+    year: date.getUTCFullYear(),
+    month: date.getUTCMonth() + 1,
+    day: date.getUTCDate(),
+  }
+}
+
+function dateForWeekday(referenceDate: string | null | undefined, weekday: number, context: RelativeWeekContext) {
+  const base = referenceDateAtJstMidnight(referenceDate)
+  const baseWeekday = base.getUTCDay()
+  const daysSinceMonday = (baseWeekday + 6) % 7
+  const monday = new Date(base.getTime() - daysSinceMonday * 24 * 60 * 60 * 1000)
+  const offset = (context === 'next' ? 7 : 0) + ((weekday + 6) % 7)
+  const target = new Date(monday.getTime() + offset * 24 * 60 * 60 * 1000)
+  return jstDateFromUtcDate(target)
+}
+
+function relativeWeekContextFromLine(line: string): RelativeWeekContext | null {
+  if (/来週|翌週|次週/.test(line)) return 'next'
+  if (/今週/.test(line)) return 'this'
+  return null
+}
+
+function parseJapaneseTime(value: string, inheritedMeridiem?: string): { hour: number; minute: number } | null {
+  const text = value.trim()
+  const match = /^(午前|午後)?\s*(\d{1,2})(?::(\d{2})|時(?:(半)|(\d{1,2})分?)?)?$/.exec(text)
+  if (match === null) return null
+  const marker = match[1] ?? inheritedMeridiem
+  let hour = Number(match[2])
+  const minute = match[3] !== undefined ? Number(match[3]) : match[4] !== undefined ? 30 : Number(match[5] ?? 0)
+  if (marker === '午後' && hour < 12) hour += 12
+  if (marker === '午前' && hour === 12) hour = 0
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null
+  return { hour, minute }
+}
+
+function candidateFromWeekdayTime(
+  label: string,
+  referenceDate: string | null | undefined,
+  weekdayText: string,
+  timeText: string,
+  context: RelativeWeekContext,
+): MailDateTimeCandidate | null {
+  const weekday = japaneseWeekdayIndex[weekdayText]
+  if (weekday === undefined) return null
+  const date = dateForWeekday(referenceDate, weekday, context)
+  const normalizedTimeText = timeText.trim()
+  if (/終日|全日/.test(normalizedTimeText)) {
+    const startIso = jstIso(date.year, date.month, date.day, 0, 0)
+    return { label, startIso, endIso: addMinutesToJstIso(startIso, 24 * 60) }
+  }
+  if (/午前中?|午前/.test(normalizedTimeText) && !/\d/.test(normalizedTimeText)) {
+    return {
+      label,
+      startIso: jstIso(date.year, date.month, date.day, 8, 0),
+      endIso: jstIso(date.year, date.month, date.day, 12, 0),
+    }
+  }
+  if (/午後/.test(normalizedTimeText) && !/\d/.test(normalizedTimeText)) {
+    return {
+      label,
+      startIso: jstIso(date.year, date.month, date.day, 12, 0),
+      endIso: jstIso(date.year, date.month, date.day, 18, 0),
+    }
+  }
+  if (/夕方/.test(normalizedTimeText) && !/\d/.test(normalizedTimeText)) {
+    return {
+      label,
+      startIso: jstIso(date.year, date.month, date.day, 16, 0),
+      endIso: jstIso(date.year, date.month, date.day, 19, 0),
+    }
+  }
+  if (/夜/.test(normalizedTimeText) && !/\d/.test(normalizedTimeText)) {
+    return {
+      label,
+      startIso: jstIso(date.year, date.month, date.day, 18, 0),
+      endIso: jstIso(date.year, date.month, date.day, 22, 0),
+    }
+  }
+  const rangeParts = normalizedTimeText.split(/\s*(?:-|~|〜|～|－)\s*/)
+  const start = parseJapaneseTime(rangeParts[0])
+  if (start === null) return null
+  const inheritedMeridiem = /^(午前|午後)/.exec(rangeParts[0].trim())?.[1]
+  const end = rangeParts[1] !== undefined ? parseJapaneseTime(rangeParts[1], inheritedMeridiem) : null
+  const startIso = jstIso(date.year, date.month, date.day, start.hour, start.minute)
+  const endIso = end === null
+    ? addMinutesToJstIso(startIso, 60)
+    : jstIso(date.year, date.month, date.day, end.hour, end.minute)
+  return { label, startIso, endIso: endIso <= startIso ? addMinutesToJstIso(startIso, 60) : endIso }
+}
+
+function findRelativeWeekdayCandidates(text: string, referenceDate?: string | null) {
+  const candidates: Array<{ start: number; end: number; candidate: MailDateTimeCandidate }> = []
+  const linePattern = /.*(?:\n|$)/g
+  const lines: Array<{ text: string; start: number }> = []
+  for (const match of text.matchAll(linePattern)) {
+    const line = match[0]
+    if (line === '') continue
+    lines.push({ text: line.replace(/\n$/, ''), start: match.index ?? 0 })
+  }
+
+  let inheritedContext: { value: RelativeWeekContext; remainingLines: number } | null = null
+  for (const line of lines) {
+    const contextOnLine = relativeWeekContextFromLine(line.text)
+    if (contextOnLine !== null) {
+      inheritedContext = { value: contextOnLine, remainingLines: 4 }
+    }
+    const context = contextOnLine ?? inheritedContext?.value ?? null
+    if (context !== null) {
+      const weekdayPattern = /([月火水木金土日])(?:曜日|曜)?\s*[：:]\s*(終日|全日|午前中?|午後|夕方|夜|(?:午前|午後)?\s*\d{1,2}(?::\d{2}|時(?:半|\d{1,2}分?)?)(?:\s*(?:-|~|〜|～|－)\s*(?:午前|午後)?\s*\d{1,2}(?::\d{2}|時(?:半|\d{1,2}分?)?))?)/g
+      for (const match of line.text.matchAll(weekdayPattern)) {
+        const matchIndex = match.index ?? 0
+        const raw = match[0]
+        const candidate = candidateFromWeekdayTime(raw, referenceDate, match[1], match[2], context)
+        if (candidate !== null) {
+          candidates.push({ start: line.start + matchIndex, end: line.start + matchIndex + raw.length, candidate })
+        }
+      }
+    }
+    if (inheritedContext !== null) {
+      inheritedContext = inheritedContext.remainingLines <= 1
+        ? null
+        : { ...inheritedContext, remainingLines: inheritedContext.remainingLines - 1 }
+    }
+  }
+  return candidates
+}
+
+function normalizeMailDateTimeMatch(raw: string, fallbackYear: number, fallbackMonth: number): MailDateTimeCandidate | null {
+  const value = raw.trim()
+  const dateTimeJoinPattern = '\\s*(?:[（(][月火水木金土日][）)])?\\s*(?:の|に|から|、|,)?\\s*'
+  const slashMatch = new RegExp(`^(?:(\\d{4})[\\/-](\\d{1,2})[\\/-](\\d{1,2})|(\\d{1,2})[\\/-](\\d{1,2}))${dateTimeJoinPattern}(午前|午後)?\\s*(\\d{1,2})(?::(\\d{2})|時(?:(\\d{1,2})分?)?)(?:\\s*(?:-|~|〜|～|－)\\s*(午前|午後)?\\s*(\\d{1,2})(?::(\\d{2})|時(?:(\\d{1,2})分?)?))?`).exec(value)
+  const japaneseMatch = new RegExp(`^(?:(\\d{4})年)?(?:(\\d{1,2})月)?(\\d{1,2})日${dateTimeJoinPattern}(午前|午後)?\\s*(\\d{1,2})(?::(\\d{2})|時(?:(\\d{1,2})分?)?)(?:\\s*(?:-|~|〜|～|－)\\s*(午前|午後)?\\s*(\\d{1,2})(?::(\\d{2})|時(?:(\\d{1,2})分?)?))?`).exec(value)
+  let year = fallbackYear
+  let month = 0
+  let day = 0
+  let meridiem: string | undefined
+  let hour = 0
+  let minute = 0
+  let endMeridiem: string | undefined
+  let endHour: number | null = null
+  let endMinute = 0
+
+  if (slashMatch !== null) {
+    year = slashMatch[1] !== undefined ? Number(slashMatch[1]) : fallbackYear
+    month = Number(slashMatch[2] ?? slashMatch[4])
+    day = Number(slashMatch[3] ?? slashMatch[5])
+    meridiem = slashMatch[6]
+    hour = Number(slashMatch[7])
+    minute = Number(slashMatch[8] ?? slashMatch[9] ?? 0)
+    endMeridiem = slashMatch[10]
+    endHour = slashMatch[11] !== undefined ? Number(slashMatch[11]) : null
+    endMinute = Number(slashMatch[12] ?? slashMatch[13] ?? 0)
+  } else if (japaneseMatch !== null) {
+    year = japaneseMatch[1] !== undefined ? Number(japaneseMatch[1]) : fallbackYear
+    month = japaneseMatch[2] !== undefined ? Number(japaneseMatch[2]) : fallbackMonth
+    day = Number(japaneseMatch[3])
+    meridiem = japaneseMatch[4]
+    hour = Number(japaneseMatch[5])
+    minute = Number(japaneseMatch[6] ?? japaneseMatch[7] ?? 0)
+    endMeridiem = japaneseMatch[8]
+    endHour = japaneseMatch[9] !== undefined ? Number(japaneseMatch[9]) : null
+    endMinute = Number(japaneseMatch[10] ?? japaneseMatch[11] ?? 0)
+  } else {
+    return null
+  }
+
+  function applyMeridiem(timeHour: number, marker: string | undefined) {
+    if (marker === '午後' && timeHour < 12) return timeHour + 12
+    if (marker === '午前' && timeHour === 12) return 0
+    return timeHour
+  }
+
+  hour = applyMeridiem(hour, meridiem)
+  if (endHour !== null) endHour = applyMeridiem(endHour, endMeridiem ?? meridiem)
+  if (month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 || hour > 23 || minute < 0 || minute > 59) return null
+  const startIso = jstIso(year, month, day, hour, minute)
+  const endIso = endHour === null ? addMinutesToJstIso(startIso, 60) : jstIso(year, month, day, endHour, endMinute)
+  return { label: value, startIso, endIso: endIso <= startIso ? addMinutesToJstIso(startIso, 60) : endIso }
+}
+
+function findMailDateTimeCandidates(text: string, referenceDate?: string | null) {
+  const candidates: Array<{ start: number; end: number; candidate: MailDateTimeCandidate }> = []
+  const reference = referenceDateParts(referenceDate)
+  const pattern = /(?:\d{4}[\/-]\d{1,2}[\/-]\d{1,2}|\d{1,2}[\/-]\d{1,2}|(?:\d{4}年)?(?:\d{1,2}月)?\d{1,2}日)\s*(?:[（(][月火水木金土日][）)])?\s*(?:の|に|から|、|,)?\s*(?:午前|午後)?\s*\d{1,2}(?::\d{2}|時(?:\d{1,2}分?)?)(?:\s*(?:-|~|〜|～|－)\s*(?:午前|午後)?\s*\d{1,2}(?::\d{2}|時(?:\d{1,2}分?)?))?/g
+  for (const match of text.matchAll(pattern)) {
+    const startIndex = match.index ?? 0
+    const raw = match[0]
+    const candidate = normalizeMailDateTimeMatch(raw, reference.year, reference.month)
+    if (candidate !== null) candidates.push({ start: startIndex, end: startIndex + raw.length, candidate })
+  }
+  candidates.push(...findRelativeWeekdayCandidates(text, referenceDate))
+  return candidates.sort((left, right) => left.start - right.start || right.end - left.end)
+}
+
+function calendarEventStartValue(event: GoogleCalendarEvent) {
+  return typeof event.start.dateTime === 'string'
+    ? event.start.dateTime
+    : typeof event.start.date === 'string'
+      ? event.start.date
+      : ''
+}
+
+function calendarEventEndValue(event: GoogleCalendarEvent) {
+  return typeof event.end.dateTime === 'string'
+    ? event.end.dateTime
+    : typeof event.end.date === 'string'
+      ? event.end.date
+      : ''
+}
+
+function calendarHoverTime(event: GoogleCalendarEvent) {
+  const startValue = calendarEventStartValue(event)
+  const endValue = calendarEventEndValue(event)
+  if (startValue.length <= 10) return t('calendar.allDay')
+  const end = endValue.length > 10 ? endValue.slice(11, 16) : ''
+  return end === '' ? startValue.slice(11, 16) : `${startValue.slice(11, 16)}-${end}`
+}
+
+function dateLabelWithWeekday(isoValue: string) {
+  const [year, month, day] = isoValue.slice(0, 10).split('-').map(Number)
+  const date = new Date(Date.UTC(year, month - 1, day))
+  const weekday = ['日', '月', '火', '水', '木', '金', '土'][date.getUTCDay()]
+  return isoValue.slice(0, 10).replaceAll('-', '/') + '(' + weekday + ')'
+}
+
+function candidateResolvedLabel(candidate: MailDateTimeCandidate) {
+  const date = dateLabelWithWeekday(candidate.startIso)
+  const startDate = candidate.startIso.slice(0, 10)
+  const endDateKey = candidate.endIso.slice(0, 10)
+  const startTime = candidate.startIso.slice(11, 16)
+  const endTime = candidate.endIso.slice(11, 16)
+  if (startTime === '00:00' && endTime === '00:00' && endDateKey !== startDate) {
+    return date + ' ' + t('calendar.allDay')
+  }
+  if (endDateKey !== startDate) {
+    return date + ' ' + startTime + ' - ' + dateLabelWithWeekday(candidate.endIso) + ' ' + endTime
+  }
+  return date + ' ' + startTime + '-' + endTime
+}
+
+function MailDateTimeHighlight({ candidate }: { candidate: MailDateTimeCandidate }) {
+  const [hover, setHover] = useState<CalendarHoverState | null>(null)
+
+  function updatePosition(event: MouseEvent<HTMLElement>) {
+    setHover((current) => current === null ? current : { ...current, x: event.clientX + 14, y: event.clientY + 14 })
+  }
+
+  function handleEnter(event: MouseEvent<HTMLElement>) {
+    const x = event.clientX + 14
+    const y = event.clientY + 14
+    setHover({ status: 'loading', events: [], error: null, x, y })
+    listCalendarDbEvents({ time_min: candidate.startIso, time_max: candidate.endIso })
+      .then((page) => {
+        setHover((current) => current === null ? current : { ...current, status: 'loaded', events: page.items, error: null })
+      })
+      .catch((error) => {
+        setHover((current) => current === null ? current : {
+          ...current,
+          status: 'loaded',
+          events: [],
+          error: error instanceof Error ? error.message : t('mail.thread.calendarHover.loadFailed'),
+        })
+      })
+  }
+
+  return (
+    <>
+      <strong
+        className="mail-thread-datetime-highlight"
+        onMouseEnter={handleEnter}
+        onMouseLeave={() => setHover(null)}
+        onMouseMove={updatePosition}
+        tabIndex={0}
+      >
+        {candidate.label}
+      </strong>
+      {hover !== null && (
+        <span className="mail-thread-calendar-hover" style={{ left: hover.x, top: hover.y }}>
+          <span className="mail-thread-calendar-hover-title">{candidateResolvedLabel(candidate)}</span>
+          {hover.status === 'loading' ? <span>{t('common.loading')}</span> : null}
+          {hover.status === 'loaded' && hover.error !== null ? <span>{hover.error}</span> : null}
+          {hover.status === 'loaded' && hover.error === null && hover.events.length === 0 ? (
+            <span>{t('mail.thread.calendarHover.empty')}</span>
+          ) : null}
+          {hover.status === 'loaded' && hover.events.length > 0 ? (
+            <span className="mail-thread-calendar-hover-list">
+              {hover.events.slice(0, 6).map((event, index) => (
+                <span className="mail-thread-calendar-hover-event" key={event.id ?? `${event.summary}-${index}`}>
+                  <time>{calendarHoverTime(event)}</time>
+                  <span>{event.summary || t('mobile.noTitle')}</span>
+                </span>
+              ))}
+            </span>
+          ) : null}
+        </span>
+      )}
+    </>
+  )
+}
+
+function dateTimeHighlightedNodes(text: string, referenceDate?: string | null): ReactNode[] {
+  const nodes: ReactNode[] = []
+  const candidates = findMailDateTimeCandidates(text, referenceDate)
+  if (candidates.length === 0) return [text]
+  let lastIndex = 0
+  for (const item of candidates) {
+    if (item.start < lastIndex) continue
+    if (item.start > lastIndex) nodes.push(text.slice(lastIndex, item.start))
+    nodes.push(<MailDateTimeHighlight candidate={item.candidate} key={`${item.start}-${item.candidate.startIso}`} />)
+    lastIndex = item.end
+  }
+  if (lastIndex < text.length) nodes.push(text.slice(lastIndex))
+  return nodes
+}
+
+function linkifiedNodes(text: string, referenceDate?: string | null): ReactNode[] {
   const nodes: ReactNode[] = []
   const matcher = new RegExp(urlPattern)
   let lastIndex = 0
+
+  function pushTextSegment(segment: string, keyPrefix: string) {
+    const highlighted = dateTimeHighlightedNodes(segment, referenceDate)
+    highlighted.forEach((node, index) => {
+      nodes.push(typeof node === 'string' ? node : <Fragment key={`${keyPrefix}-${index}`}>{node}</Fragment>)
+    })
+  }
 
   for (const match of text.matchAll(matcher)) {
     const rawUrl = match[0]
     const matchIndex = match.index ?? 0
     const trailingPunctuation = rawUrl.match(trailingUrlPunctuationPattern)?.[0] ?? ''
     const matchedUrl = rawUrl.slice(0, rawUrl.length - trailingPunctuation.length)
-    if (matchedUrl === '') {
-      continue
-    }
+    if (matchedUrl === '') continue
 
-    if (matchIndex > lastIndex) {
-      nodes.push(text.slice(lastIndex, matchIndex))
-    }
+    if (matchIndex > lastIndex) pushTextSegment(text.slice(lastIndex, matchIndex), `text-${lastIndex}`)
     nodes.push(
       <a href={urlHref(matchedUrl)} key={`${matchIndex}-${matchedUrl}`} rel="noreferrer" target="_blank">
         {displayedUrlText(matchedUrl)}
       </a>,
     )
-    if (trailingPunctuation !== '') {
-      nodes.push(trailingPunctuation)
-    }
+    if (trailingPunctuation !== '') pushTextSegment(trailingPunctuation, `punct-${matchIndex}`)
     lastIndex = matchIndex + rawUrl.length
   }
 
-  if (lastIndex < text.length) {
-    nodes.push(text.slice(lastIndex))
-  }
+  if (lastIndex < text.length) pushTextSegment(text.slice(lastIndex), `text-${lastIndex}`)
   return nodes.length > 0 ? nodes : [text]
 }
 
-function LinkifiedText({ text }: { text: string }) {
-  return <>{linkifiedNodes(text)}</>
+function LinkifiedText({ referenceDate, text }: { referenceDate?: string | null; text: string }) {
+  return <>{linkifiedNodes(text, referenceDate)}</>
 }
 
 const unsafeHtmlTags = [
@@ -652,7 +1041,7 @@ function splitQuotedReply(text: string): SplitBody {
   return { mainText, quotedText }
 }
 
-function MailBodyContent({ html, text }: { html?: string | null; text: string }) {
+function MailBodyContent({ html, referenceDate, text }: { html?: string | null; referenceDate?: string | null; text: string }) {
   const body = text || t('mail.thread.noBody')
   if (bodyContainsMarkdownTable(body)) {
     return <MarkdownMailBody text={body} />
@@ -663,7 +1052,8 @@ function MailBodyContent({ html, text }: { html?: string | null; text: string })
     html !== undefined &&
     html !== null &&
     html.trim() !== '' &&
-    htmlRepresentsPlainText(html, text)
+    htmlRepresentsPlainText(html, text) &&
+    findMailDateTimeCandidates(body, referenceDate).length === 0
   ) {
     return <HtmlMailBody html={html} />
   }
@@ -671,7 +1061,7 @@ function MailBodyContent({ html, text }: { html?: string | null; text: string })
   if (splitBody.quotedText === null) {
     return (
       <pre className="mail-thread-body">
-        <LinkifiedText text={body} />
+        <LinkifiedText referenceDate={referenceDate} text={body} />
       </pre>
     )
   }
@@ -679,12 +1069,12 @@ function MailBodyContent({ html, text }: { html?: string | null; text: string })
   return (
     <>
       <pre className="mail-thread-body">
-        <LinkifiedText text={splitBody.mainText} />
+        <LinkifiedText referenceDate={referenceDate} text={splitBody.mainText} />
       </pre>
       <details className="mail-thread-section mail-thread-head-details mail-thread-quoted-details">
         <summary>{t('mail.thread.quotedReply')}</summary>
         <pre className="mail-thread-body mail-thread-quoted-body">
-          <LinkifiedText text={splitBody.quotedText} />
+          <LinkifiedText referenceDate={referenceDate} text={splitBody.quotedText} />
         </pre>
       </details>
     </>
@@ -2567,7 +2957,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
           {detail.summary == null ? (
             <p>{t('mail.thread.summaryEmpty')}</p>
           ) : (
-            <p>{detail.summary.summary_text}</p>
+            <p><LinkifiedText referenceDate={detail.thread_messages[0]?.received_at ?? null} text={detail.summary.summary_text} /></p>
           )}
           <AttachmentBadges
             attachments={detail.attachments ?? []}
@@ -2646,7 +3036,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                       </details>
                       <section className="mail-thread-section">
                         <h3>{t('mail.thread.body')}</h3>
-                        <MailBodyContent text={sendRequest.body_text} />
+                        <MailBodyContent referenceDate={sendRequest.scheduled_at ?? sendRequest.created_at ?? null} text={sendRequest.body_text} />
                       </section>
                       {(sendRequest.attachments ?? []).length > 0 && (
                         <section className="mail-thread-section">
@@ -2865,7 +3255,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                   {messageSummary !== undefined && (
                     <section className="mail-thread-section mail-thread-mail-summary">
                       <h3>{t('mail.thread.mailSummary')}</h3>
-                      <p><LinkifiedText text={messageSummary.summary_text} /></p>
+                      <p><LinkifiedText referenceDate={message.received_at} text={messageSummary.summary_text} /></p>
                     </section>
                   )}
 
@@ -2882,12 +3272,12 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
                   {messageSummary === undefined ? (
                     <section className="mail-thread-section">
                       <h3>{t('mail.thread.body')}</h3>
-                      <MailBodyContent html={message.body_html} text={mailBody(message)} />
+                      <MailBodyContent html={message.body_html} referenceDate={message.received_at} text={mailBody(message)} />
                     </section>
                   ) : (
                     <details className="mail-thread-section mail-thread-head-details">
                       <summary>{t('mail.thread.originalBody')}</summary>
-                      <MailBodyContent html={message.body_html} text={mailBody(message)} />
+                      <MailBodyContent html={message.body_html} referenceDate={message.received_at} text={mailBody(message)} />
                     </details>
                   )}
                   {renderCalendarDraftForm(message)}

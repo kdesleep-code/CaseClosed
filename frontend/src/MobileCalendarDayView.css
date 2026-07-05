@@ -1,0 +1,204 @@
+.mobile-calendar-shell {
+  touch-action: pan-y;
+}
+
+.mobile-calendar-topbar h1 {
+  font-size: 1.28rem;
+}
+
+.mobile-day-switcher {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.mobile-day-switcher button {
+  min-height: 42px;
+  border: 1px solid var(--surface-warm-border);
+  border-radius: 8px;
+  padding: 9px 8px;
+  color: var(--text-strong);
+  background: var(--surface-panel);
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 740;
+}
+
+.mobile-swipe-hint {
+  margin: -4px 0 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  text-align: center;
+}
+
+.mobile-calendar-all-day {
+  border: 1px solid var(--surface-warm-border);
+  border-radius: 8px;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+  background: rgba(255, 253, 247, 0.72);
+}
+
+.mobile-calendar-all-day h2,
+.mobile-calendar-day-section h2 {
+  margin: 0;
+  color: var(--text-heading);
+  font-size: 0.98rem;
+  font-weight: 780;
+}
+
+.mobile-calendar-all-day > div {
+  display: grid;
+  gap: 6px;
+}
+
+.mobile-calendar-all-day-chip {
+  min-width: 0;
+  border: 1px solid rgba(196, 96, 62, 0.2);
+  border-radius: 7px;
+  padding: 8px 10px;
+  color: var(--text-heading);
+  background: rgba(255, 239, 212, 0.86);
+  font-size: 0.86rem;
+  font-weight: 800;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.mobile-calendar-all-day-chip.source-secondary {
+  border-color: rgba(89, 112, 164, 0.22);
+  background: rgba(221, 232, 255, 0.86);
+}
+
+.mobile-day-timeline {
+  min-width: 0;
+  border: 1px solid rgba(145, 78, 43, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 253, 247, 0.58);
+  overflow: hidden;
+}
+
+.mobile-day-grid {
+  min-height: var(--mobile-day-grid-height);
+  position: relative;
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+}
+
+.mobile-day-row {
+  display: contents;
+}
+
+.mobile-day-row time {
+  min-width: 0;
+  min-height: 48px;
+  border-right: 1px solid rgba(145, 78, 43, 0.12);
+  border-bottom: 1px solid rgba(145, 78, 43, 0.1);
+  padding: 5px 5px;
+  color: var(--text-soft);
+  background: rgba(255, 250, 242, 0.58);
+  font-size: 0.68rem;
+  font-weight: 760;
+  text-align: right;
+}
+
+.mobile-day-row span {
+  min-width: 0;
+  min-height: 48px;
+  border-bottom: 1px solid rgba(145, 78, 43, 0.08);
+}
+
+.mobile-calendar-now-line {
+  height: 2px;
+  position: absolute;
+  left: 48px;
+  right: 0;
+  z-index: 5;
+  background: #b8493d;
+  box-shadow: 0 0 0 1px rgba(184, 73, 61, 0.12);
+  pointer-events: none;
+}
+
+.mobile-calendar-now-line::before {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  position: absolute;
+  left: -5px;
+  top: -3px;
+  background: #b8493d;
+  content: '';
+}
+
+.mobile-day-event {
+  min-width: 0;
+  border: 1px solid rgba(196, 96, 62, 0.2);
+  border-radius: 6px;
+  padding: 4px 5px;
+  position: absolute;
+  z-index: 3;
+  display: grid;
+  align-content: start;
+  gap: 1px;
+  color: inherit;
+  background: rgba(255, 239, 212, 0.9);
+  box-shadow: var(--shadow-sm);
+  text-decoration: none;
+  overflow: hidden;
+}
+
+.mobile-day-event.source-secondary {
+  border-color: rgba(89, 112, 164, 0.22);
+  background: rgba(221, 232, 255, 0.9);
+}
+
+.mobile-day-event.is-muted,
+.mobile-calendar-all-day-chip.is-muted {
+  opacity: 0.52;
+  filter: saturate(0.68);
+  box-shadow: none;
+}
+
+.mobile-day-event strong,
+.mobile-day-event span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mobile-day-event strong {
+  color: var(--text-heading);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  font-size: 0.72rem;
+  font-weight: 820;
+  line-height: 1.12;
+  overflow-wrap: anywhere;
+}
+
+.mobile-day-event span {
+  color: var(--text-muted);
+  font-size: 0.62rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.mobile-day-event.is-narrow {
+  padding: 3px 4px;
+}
+
+.mobile-day-event.is-narrow strong {
+  font-size: 0.66rem;
+  line-height: 1.08;
+}
+
+.mobile-day-event.is-narrow span {
+  font-size: 0.58rem;
+}
+
+.mobile-day-agenda-list a {
+  grid-template-columns: 82px minmax(0, 1fr);
+}

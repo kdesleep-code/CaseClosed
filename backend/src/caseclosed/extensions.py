@@ -111,6 +111,7 @@ DEFAULT_EXTENSION_MANIFESTS = [
     / "caseclosed-extension.json",
     Path(__file__).resolve().parents[3]
     / "extensions"
+    / "user-extensions"
     / "supervise-case-template"
     / "caseclosed-extension.json",
 ]

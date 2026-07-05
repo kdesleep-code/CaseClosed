@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import sys
 from pathlib import Path
 
@@ -61,6 +62,48 @@ def test_default_extension_template_is_registered(client) -> None:
         item for item in genres_response.json()["data"]["items"] if item["title"] == "Supervise"
     )
     assert supervise_genre["template_extension_id"] == supervise_template["id"]
+
+
+def test_supervise_template_registration_moves_from_legacy_parent_path(client) -> None:
+    from caseclosed.db.models import ExtensionDefinition
+    from caseclosed.db.runtime import SessionLocal
+    from caseclosed.extensions import bootstrap_default_extensions
+
+    response = client.get("/api/v1/extensions")
+    assert response.status_code == 200
+    supervise_template = next(
+        item
+        for item in response.json()["data"]["items"]
+        if item["slug"] == "supervise-case-template"
+    )
+    legacy_root = str(
+        Path(__file__).resolve().parents[3]
+        / "extensions"
+        / "supervise-case-template"
+    )
+
+    with SessionLocal() as session:
+        extension = session.get(ExtensionDefinition, supervise_template["id"])
+        assert extension is not None
+        extension.root_path = legacy_root
+        manifest = json.loads(extension.manifest_json)
+        manifest["caseclosed_source"] = "default"
+        extension.manifest_json = json.dumps(manifest, ensure_ascii=False)
+        session.commit()
+
+    with SessionLocal() as session:
+        bootstrap_default_extensions(session)
+
+    response = client.get("/api/v1/extensions")
+    assert response.status_code == 200
+    moved_template = next(
+        item
+        for item in response.json()["data"]["items"]
+        if item["slug"] == "supervise-case-template"
+    )
+    assert moved_template["root_path"].endswith(
+        "extensions/user-extensions/supervise-case-template"
+    )
 
 
 def test_case_template_extension_can_be_linked_to_genre(client, tmp_path: Path) -> None:
