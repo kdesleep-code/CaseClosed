@@ -23,7 +23,7 @@ function isPaperFile(file: File) {
 
 function isCitationFile(file: File) {
   const filename = file.name.trim().toLowerCase()
-  return filename.endsWith('.bib') || filename.endsWith('.bibtex') || filename.endsWith('.ris')
+  return filename.endsWith('.bib') || filename.endsWith('.bibtex') || filename.endsWith('.ris') || filename.endsWith('.nbib')
 }
 
 function normalizeTag(tag: string) {
@@ -412,7 +412,7 @@ export default function PaperShelfView() {
               <label>
                 <span>{t('papers.upload.bibtex')}</span>
                 <input
-                  accept=".bib,.bibtex,.ris,text/plain,application/x-research-info-systems"
+                  accept=".bib,.bibtex,.ris,.nbib,text/plain,application/x-research-info-systems,application/x-nbib"
                   disabled={isUploading}
                   onChange={handleBibtexFileChange}
                   type="file"

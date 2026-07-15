@@ -44,8 +44,10 @@ from caseclosed.db.models import AuditLog
 from caseclosed.db.models import StorageDirectory
 from caseclosed.db.models import StorageObject
 from caseclosed.db.models import Task
+from caseclosed.db.runtime import archive_case_genre_storage_directory
 from caseclosed.db.runtime import case_handover_storage_directory_id
 from caseclosed.db.runtime import case_storage_directory_id
+from caseclosed.db.runtime import ensure_case_genre_storage_directory
 from caseclosed.db.runtime import ensure_case_storage_directory
 from caseclosed.db.runtime import get_session
 from caseclosed.db.runtime import jst_iso
@@ -1423,6 +1425,7 @@ def create_case_genre(
         version=1,
     )
     session.add(genre)
+    ensure_case_genre_storage_directory(session, genre.id, now=now)
     session.commit()
     return {"ok": True, "data": {"genre": genre_data(genre)}}
 
@@ -1500,8 +1503,10 @@ def update_case_genre(
             else None
         )
 
-    genre.updated_at = jst_iso()
+    now = jst_iso()
+    genre.updated_at = now
     genre.version += 1
+    ensure_case_genre_storage_directory(session, genre.id, now=now)
     session.commit()
     return {"ok": True, "data": {"genre": genre_data(genre)}}
 
@@ -1514,7 +1519,14 @@ def delete_case_genre(
     genre = session.get(CaseGenre, genre_id)
     if genre is None:
         raise json_error(404, "NOT_FOUND", "Case genre not found.")
-    session.execute(update(Case).where(Case.genre_id == genre.id).values(genre_id=None))
+    now = jst_iso()
+    cases = session.scalars(select(Case).where(Case.genre_id == genre.id)).all()
+    for case in cases:
+        case.genre_id = None
+        case.updated_at = now
+        case.version += 1
+        ensure_case_storage_directory(session, case, now=now)
+    archive_case_genre_storage_directory(session, genre.id, now=now)
     session.delete(genre)
     session.commit()
     return {"ok": True, "data": {"deleted": True}}
@@ -2325,6 +2337,7 @@ def reopen_case(
             title="Case reopened",
             now=now,
         )
+        ensure_case_storage_directory(session, case, now=now)
         session.commit()
     return {"ok": True, "data": {"case": case_data(case, session)}}
 
@@ -2355,6 +2368,7 @@ def archive_case(
                 "previous_ball_status": previous_ball_status,
             },
         )
+        ensure_case_storage_directory(session, case, now=now)
         session.commit()
     return {"ok": True, "data": {"case": case_data(case, session)}}
 

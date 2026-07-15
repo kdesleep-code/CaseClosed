@@ -851,3 +851,92 @@ def test_mock_mail_ingestion_uses_reply_to_for_reply_to_mailing_list(
     assert pending_item["inferred_display_name"] == "Real Sender"
     assert pending_item["inferred_kind"] == "person"
     assert pending_item["inferred_sender_resolution"] == "self"
+
+
+def test_thread_future_low_rule_skips_llm_and_manual_message_importance_wins(
+    client,
+    database_path,
+) -> None:
+    contact_response = client.post(
+        "/api/v1/contacts",
+        json={
+            "display_name": "Thread Rule Sender",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "thread.rule@example.com", "is_primary": True}
+            ],
+        },
+    )
+    assert contact_response.status_code == 200
+    first_response = client.post(
+        "/api/v1/mails/mock-ingest",
+        json={
+            "gmail_message_id": "gmail_thread_rule_1",
+            "gmail_thread_id": "thread_future_low",
+            "subject": "Thread rule",
+            "from_address": "thread.rule@example.com",
+            "received_at": "2026-07-14T09:00:00+09:00",
+            "body_text": "First message.",
+        },
+    )
+    first_id = first_response.json()["data"]["message_id"]
+    first_job_id = first_response.json()["data"]["queued_job_id"]
+    rule_response = client.patch(
+        f"/api/v1/mails/{first_id}/thread-importance-rule",
+        json={"future_importance_rule": "low"},
+    )
+    assert rule_response.status_code == 200
+    assert rule_response.json()["data"]["future_importance_rule"] == "low"
+
+    second_response = client.post(
+        "/api/v1/mails/mock-ingest",
+        json={
+            "gmail_message_id": "gmail_thread_rule_2",
+            "gmail_thread_id": "thread_future_low",
+            "subject": "Thread rule follow-up",
+            "from_address": "thread.rule@example.com",
+            "received_at": "2026-07-14T10:00:00+09:00",
+            "body_text": "Second message.",
+        },
+    )
+    second_id = second_response.json()["data"]["message_id"]
+    assert second_response.json()["data"]["queued_job_id"] is None
+
+    from caseclosed.services.orchestrator import Orchestrator
+
+    assert Orchestrator(worker_id="thread-rule-worker").run_once() == first_job_id
+    with sqlite3.connect(database_path) as connection:
+        rows = connection.execute(
+            "SELECT message_id, effective_importance, llm_run_id "
+            "FROM mail_auto_state WHERE message_id IN (?, ?) ORDER BY message_id",
+            (first_id, second_id),
+        ).fetchall()
+    assert {row[0]: row[1:] for row in rows} == {
+        first_id: ("low", None),
+        second_id: ("low", None),
+    }
+
+    manual_response = client.post(
+        f"/api/v1/mails/{second_id}/importance",
+        json={"importance": "high"},
+    )
+    assert manual_response.status_code == 200
+    assert manual_response.json()["data"]["message"]["effective_importance"] == "high"
+
+    disable_response = client.patch(
+        f"/api/v1/mails/{second_id}/thread-importance-rule",
+        json={"future_importance_rule": None},
+    )
+    assert disable_response.status_code == 200
+    third_response = client.post(
+        "/api/v1/mails/mock-ingest",
+        json={
+            "gmail_message_id": "gmail_thread_rule_3",
+            "gmail_thread_id": "thread_future_low",
+            "subject": "Automatic again",
+            "from_address": "thread.rule@example.com",
+            "received_at": "2026-07-14T11:00:00+09:00",
+            "body_text": "Third message.",
+        },
+    )
+    assert third_response.json()["data"]["queued_job_id"] is not None

@@ -38,6 +38,13 @@ def get_bootstrap_password() -> str | None:
     return os.environ.get("CASECLOSED_BOOTSTRAP_PASSWORD")
 
 
+def get_low_mail_review_password() -> str | None:
+    value = os.environ.get("CASECLOSED_LOW_MAIL_REVIEW_PASSWORD")
+    if value is None or value.strip() == "":
+        return None
+    return value
+
+
 def is_secure_cookie_enabled() -> bool:
     return os.environ.get("CASECLOSED_ENV", "development") == "production"
 

@@ -16,6 +16,7 @@ function shouldAttachReturnTo(nextUrl: URL) {
     return false
   }
 
+  if (nextUrl.pathname.startsWith('/mail/review')) return false
   if (nextUrl.pathname === '/mail/compose') return true
   if (nextUrl.pathname.startsWith('/mail/') && nextUrl.pathname !== '/mail/action-needed') {
     return true

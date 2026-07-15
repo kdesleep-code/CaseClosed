@@ -79,3 +79,37 @@ def test_profile_rejects_invalid_email_address(client) -> None:
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_mobile_quick_slot_is_persisted_and_can_be_cleared(
+    client,
+    database_path: Path,
+) -> None:
+    url = f"{PROFILE_URL}/mobile-quick-slot"
+    assert client.get(url).json()["data"]["slot"] is None
+
+    save_response = client.put(
+        url,
+        json={"label": "Files", "href": "/files"},
+    )
+    assert save_response.status_code == 200
+    assert save_response.json()["data"]["slot"] == {
+        "label": "Files",
+        "href": "/files",
+    }
+    assert client.get(url).json()["data"]["slot"] == {
+        "label": "Files",
+        "href": "/files",
+    }
+
+    with sqlite3.connect(database_path) as connection:
+        stored = connection.execute(
+            "SELECT value_json FROM app_settings WHERE key = 'mobile_quick_slot'"
+        ).fetchone()
+    assert stored is not None
+    assert json.loads(stored[0]) == {"label": "Files", "href": "/files"}
+
+    clear_response = client.put(url, json={"label": "", "href": ""})
+    assert clear_response.status_code == 200
+    assert clear_response.json()["data"]["slot"] is None
+    assert client.get(url).json()["data"]["slot"] is None

@@ -19,6 +19,38 @@ export type MaintenanceStatus = {
   mail_importance_sent?: number
   mail_importance_unclassified?: number
   backup_status: string
+  system_health?: MaintenanceSystemHealth
+}
+
+export type MaintenanceSystemHealth = {
+  status: 'healthy' | 'warning' | 'attention'
+  checked_at: string
+  queue: {
+    pending: number
+    scheduled: number
+    running: number
+    failed: number
+    stale: number
+  }
+  worker: {
+    enabled: boolean
+    configured_workers: number
+    alive_workers: number
+    status: 'healthy' | 'warning' | 'disabled'
+    last_job_activity_at: string | null
+  }
+  gmail_auto_import: MaintenanceIntegrationHealth
+  calendar_auto_sync: MaintenanceIntegrationHealth
+}
+
+export type MaintenanceIntegrationHealth = {
+  enabled: boolean
+  connected: boolean
+  status: 'healthy' | 'warning' | 'error' | 'pending' | 'disabled'
+  interval_minutes: number
+  last_run_at: string | null
+  last_success_at: string | null
+  last_error: string | null
 }
 
 export type Job = {

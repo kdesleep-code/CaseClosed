@@ -228,3 +228,49 @@ def test_login_attempts_record_failure_then_success(
         ),
         (certificate_headers["X-Client-Cert-Fingerprint"], 1, None),
     ]
+
+
+def test_low_mail_review_password_creates_restricted_session(
+    client,
+    certificate_headers,
+    monkeypatch,
+    database_path: Path,
+) -> None:
+    review_password = "review-only-password"
+    monkeypatch.setenv("CASECLOSED_LOW_MAIL_REVIEW_PASSWORD", review_password)
+
+    response = login(client, certificate_headers, password=review_password)
+
+    assert response.status_code == 200
+    assert response.json()["data"]["access_mode"] == "low_mail_review"
+    session_response = client.get(SESSION_URL, headers=certificate_headers)
+    assert session_response.json()["data"]["access_mode"] == "low_mail_review"
+    with sqlite3.connect(database_path) as connection:
+        password_hash = connection.execute(
+            "SELECT value_json FROM app_settings "
+            "WHERE key = 'auth_low_mail_review_password_hash'"
+        ).fetchone()[0]
+    assert review_password not in password_hash
+    assert password_hash.startswith("$argon2")
+
+
+def test_low_mail_review_password_does_not_count_as_failed_login(
+    client,
+    certificate_headers,
+    monkeypatch,
+    database_path: Path,
+) -> None:
+    monkeypatch.setenv("CASECLOSED_LOW_MAIL_REVIEW_PASSWORD", "review-only-password")
+
+    assert login(
+        client,
+        certificate_headers,
+        password="review-only-password",
+    ).status_code == 200
+
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT success, failure_reason FROM auth_login_attempts "
+            "ORDER BY attempted_at DESC, id DESC LIMIT 1"
+        ).fetchone()
+    assert row == (1, None)

@@ -30,6 +30,7 @@ import {
   unassignMailThreadFromCase,
   unprocessMail,
   updateMailImportance,
+  updateMailThreadImportanceRule,
 } from './phase4Api'
 import type { GoogleCalendarEvent, MailAttachment, MailDetail, MailSendRequest, MailThreadMessage } from './phase4Api'
 import type { CalendarEventFromMailPrefill } from './phase4Api'
@@ -347,19 +348,9 @@ function AttachmentBadges({
   )
 }
 
-const urlPattern = /(https?:\/\/[^\s<>"']+|www\.[^\s<>"']+)/gi
 const trailingUrlPunctuationPattern = /[.,;:!?、。．，）)\]}」』】]+$/
-const maxDisplayedUrlLength = 30
-
 function urlHref(url: string) {
   return url.toLowerCase().startsWith('www.') ? `https://${url}` : url
-}
-
-function displayedUrlText(url: string) {
-  if (url.length <= maxDisplayedUrlLength) {
-    return url
-  }
-  return `${url.slice(0, maxDisplayedUrlLength)}...`
 }
 
 type MailDateTimeCandidate = {
@@ -751,9 +742,25 @@ function dateTimeHighlightedNodes(text: string, referenceDate?: string | null): 
   return nodes
 }
 
+const maxDisplayedUrlLength = 34
+const displayedUrlTailLength = 3
+
+function displayedUrlText(url: string) {
+  if (url.length <= maxDisplayedUrlLength) return url
+  const headLength = maxDisplayedUrlLength - displayedUrlTailLength - 3
+  return `${url.slice(0, headLength)}...${url.slice(-displayedUrlTailLength)}`
+}
+
+function displayTextForLink(label: string | undefined, href: string) {
+  if (label === undefined || label.trim() === '') return displayedUrlText(href)
+  const trimmedLabel = label.trim()
+  if (/^https?:\/\//i.test(trimmedLabel)) return displayedUrlText(href)
+  return trimmedLabel
+}
+
 function linkifiedNodes(text: string, referenceDate?: string | null): ReactNode[] {
   const nodes: ReactNode[] = []
-  const matcher = new RegExp(urlPattern)
+  const matcher = /\[([^\]]+)\]\((https?:\/\/[^)\s]+|www\.[^)\s]+)\)|(https?:\/\/[^\s<>"']+|www\.[^\s<>"']+)/gi
   let lastIndex = 0
 
   function pushTextSegment(segment: string, keyPrefix: string) {
@@ -764,20 +771,26 @@ function linkifiedNodes(text: string, referenceDate?: string | null): ReactNode[
   }
 
   for (const match of text.matchAll(matcher)) {
-    const rawUrl = match[0]
     const matchIndex = match.index ?? 0
-    const trailingPunctuation = rawUrl.match(trailingUrlPunctuationPattern)?.[0] ?? ''
-    const matchedUrl = rawUrl.slice(0, rawUrl.length - trailingPunctuation.length)
+    const markdownLabel = match[1]
+    const markdownUrl = match[2]
+    const rawUrl = match[3]
+    const rawMatchedUrl = markdownUrl ?? rawUrl ?? ''
+    const trailingPunctuation = markdownUrl === undefined
+      ? rawMatchedUrl.match(trailingUrlPunctuationPattern)?.[0] ?? ''
+      : ''
+    const matchedUrl = rawMatchedUrl.slice(0, rawMatchedUrl.length - trailingPunctuation.length)
     if (matchedUrl === '') continue
 
     if (matchIndex > lastIndex) pushTextSegment(text.slice(lastIndex, matchIndex), `text-${lastIndex}`)
+    const href = urlHref(matchedUrl)
     nodes.push(
-      <a href={urlHref(matchedUrl)} key={`${matchIndex}-${matchedUrl}`} rel="noreferrer" target="_blank">
-        {displayedUrlText(matchedUrl)}
+      <a href={href} key={`${matchIndex}-${matchedUrl}`} rel="noreferrer" target="_blank" title={href}>
+        {displayTextForLink(markdownLabel, matchedUrl)}
       </a>,
     )
     if (trailingPunctuation !== '') pushTextSegment(trailingPunctuation, `punct-${matchIndex}`)
-    lastIndex = matchIndex + rawUrl.length
+    lastIndex = matchIndex + match[0].length
   }
 
   if (lastIndex < text.length) pushTextSegment(text.slice(lastIndex), `text-${lastIndex}`)
@@ -1649,6 +1662,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
   const [notice, setNotice] = useState<string | null>(null)
   const [busyAction, setBusyAction] = useState<string | null>(null)
   const [importanceMenuId, setImportanceMenuId] = useState<string | null>(null)
+  const [threadImportanceMenuOpen, setThreadImportanceMenuOpen] = useState(false)
   const [movingAttachmentId, setMovingAttachmentId] = useState<string | null>(null)
   const [ownedEmailAddresses, setOwnedEmailAddresses] = useState<string[]>([])
   const [caseAssignEditing, setCaseAssignEditing] = useState(false)
@@ -2582,6 +2596,31 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
     }))
   }
 
+  async function cancelSendAndEdit(sendRequest: MailSendRequest) {
+    setBusyAction(`${sendRequest.id}-cancel`)
+    setError(null)
+    setNotice(null)
+    try {
+      await cancelMailSendRequest(sendRequest.id)
+      const params = new URLSearchParams({ canceled_send_request_id: sendRequest.id })
+      navigateTo(`/mail/compose?${params.toString()}`)
+    } catch (requestError) {
+      setError(describeError(requestError))
+      setBusyAction(null)
+    }
+  }
+
+  function handleThreadImportanceRuleChange(rule: 'low' | null) {
+    setThreadImportanceMenuOpen(false)
+    void runAction(
+      'thread-low-rule',
+      () => updateMailThreadImportanceRule(messageId, rule),
+      rule === 'low'
+        ? t('mail.thread.futureLowEnabled')
+        : t('mail.thread.futureLowDisabled'),
+    )
+  }
+
   function scheduledActionsFor(sendRequest: MailSendRequest): IncomingAction[] {
     return [
       {
@@ -2635,14 +2674,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
         className: 'mail-thread-action-subtle',
         title: t('mail.thread.action.cancelSend'),
         onClick: () => {
-          void runAction(
-            `${sendRequest.id}-cancel`,
-            async () => {
-              await cancelMailSendRequest(sendRequest.id)
-              return getMailDetail(messageId)
-            },
-            t('mail.thread.sendCanceled'),
-          )
+          void cancelSendAndEdit(sendRequest)
         },
       },
     ]
@@ -2953,7 +2985,43 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
         )}
 
         <section className="mail-panel mail-thread-summary">
-          <h2>{t('mail.thread.summary')}</h2>
+          <div className="mail-thread-summary-heading-row">
+            <h2>{t('mail.thread.summary')}</h2>
+            <div className="mail-thread-summary-rule">
+              <span>{t('mail.thread.futureImportanceRule')}</span>
+              <button
+                aria-expanded={threadImportanceMenuOpen}
+                className={`mail-thread-status${
+                  detail.future_importance_rule === 'low' ? ' mail-priority-low' : ''
+                }`}
+                disabled={busyAction !== null}
+                onClick={() => setThreadImportanceMenuOpen((current) => !current)}
+                type="button"
+              >
+                {detail.future_importance_rule === 'low'
+                  ? t('mail.importance.low')
+                  : t('mail.thread.futureImportanceAutomatic')}
+              </button>
+              {threadImportanceMenuOpen && (
+                <div className="mail-thread-importance-menu">
+                  <button
+                    disabled={busyAction !== null}
+                    onClick={() => handleThreadImportanceRuleChange(null)}
+                    type="button"
+                  >
+                    {t('mail.thread.futureImportanceAutomatic')}
+                  </button>
+                  <button
+                    disabled={busyAction !== null}
+                    onClick={() => handleThreadImportanceRuleChange('low')}
+                    type="button"
+                  >
+                    {t('mail.importance.low')}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
           {detail.summary == null ? (
             <p>{t('mail.thread.summaryEmpty')}</p>
           ) : (

@@ -1,32 +1,72 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { t } from './i18n'
 import { AppLink, navigateTo } from './navigation'
-import { readMobileQuickSlot, writeMobileQuickSlot } from './mobileQuickSlot'
+import { loadMobileQuickSlot, readMobileQuickSlot, saveMobileQuickSlot } from './mobileQuickSlot'
 import './MobileTopView.css'
 
 export default function MobileSettingsView() {
   const [label, setLabel] = useState(() => readMobileQuickSlot()?.label ?? '')
   const [href, setHref] = useState(() => readMobileQuickSlot()?.href ?? '')
   const [notice, setNotice] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [isBusy, setIsBusy] = useState(false)
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  useEffect(() => {
+    let canceled = false
+    void loadMobileQuickSlot()
+      .then((slot) => {
+        if (canceled) return
+        setLabel(slot?.label ?? '')
+        setHref(slot?.href ?? '')
+      })
+      .catch((requestError) => {
+        if (!canceled) {
+          setError(requestError instanceof Error ? requestError.message : t('mobile.top.loadFailed'))
+        }
+      })
+    return () => {
+      canceled = true
+    }
+  }, [])
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    const trimmedLabel = label.trim()
-    const trimmedHref = href.trim()
-    writeMobileQuickSlot(
-      trimmedLabel === '' || trimmedHref === ''
-        ? null
-        : { label: trimmedLabel, href: trimmedHref },
-    )
-    setNotice(t('mobile.settings.saved'))
+    setIsBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const trimmedLabel = label.trim()
+      const trimmedHref = href.trim()
+      const slot = await saveMobileQuickSlot(
+        trimmedLabel === '' || trimmedHref === ''
+          ? null
+          : { label: trimmedLabel, href: trimmedHref },
+      )
+      setLabel(slot?.label ?? '')
+      setHref(slot?.href ?? '')
+      setNotice(t('mobile.settings.saved'))
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : t('mobile.top.loadFailed'))
+    } finally {
+      setIsBusy(false)
+    }
   }
 
-  function handleClear() {
-    setLabel('')
-    setHref('')
-    writeMobileQuickSlot(null)
-    setNotice(t('mobile.settings.cleared'))
+  async function handleClear() {
+    setIsBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      await saveMobileQuickSlot(null)
+      setLabel('')
+      setHref('')
+      setNotice(t('mobile.settings.cleared'))
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : t('mobile.top.loadFailed'))
+    } finally {
+      setIsBusy(false)
+    }
   }
 
   return (
@@ -42,6 +82,7 @@ export default function MobileSettingsView() {
       </header>
 
       {notice !== null && <p className="mobile-alert mobile-notice">{notice}</p>}
+      {error !== null && <p className="mobile-alert" role="alert">{error}</p>}
 
       <section className="mobile-panel mobile-settings-panel">
         <div>
@@ -69,8 +110,8 @@ export default function MobileSettingsView() {
             />
           </label>
           <div className="mobile-settings-actions">
-            <button type="submit">{t('common.save')}</button>
-            <button type="button" onClick={handleClear}>{t('common.clear')}</button>
+            <button disabled={isBusy} type="submit">{t('common.save')}</button>
+            <button disabled={isBusy} type="button" onClick={() => void handleClear()}>{t('common.clear')}</button>
           </div>
         </form>
       </section>

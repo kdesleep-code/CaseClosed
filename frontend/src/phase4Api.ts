@@ -174,6 +174,7 @@ export type MailDetail = {
   message: MailThreadMessage
   thread_messages: MailThreadMessage[]
   scheduled_send_requests?: MailSendRequest[]
+  future_importance_rule?: 'low' | null
   summary_jobs?: Record<
     string,
     {
@@ -320,6 +321,16 @@ export type MailDraftPayload = {
 }
 
 export type ScheduledSendRequest = MailSendRequest
+
+export type LowMailReviewItem = MailListItem & {
+  body_text?: string | null
+  snippet: string | null
+}
+
+export type LowMailReviewPage = {
+  date: string
+  items: LowMailReviewItem[]
+}
 
 export type LlmBlockedMail = {
   id: string
@@ -839,6 +850,29 @@ export function resolveMailDraftAttachments(
   })
 }
 
+export function getMailSendRequest(sendRequestId: string): Promise<MailSendRequest> {
+  return request(`/api/v1/mails/send-requests/${encodeURIComponent(sendRequestId)}`)
+}
+
+export function listTodayLowMailReview(): Promise<LowMailReviewPage> {
+  return request('/api/v1/mails/review/today')
+}
+
+export function getLowMailReviewDetail(
+  messageId: string,
+): Promise<LowMailReviewItem> {
+  return request(`/api/v1/mails/review/${encodeURIComponent(messageId)}`)
+}
+
+export function promoteReviewMailToMiddle(
+  messageId: string,
+): Promise<{ id: string; importance: 'middle' }> {
+  return request(
+    `/api/v1/mails/review/${encodeURIComponent(messageId)}/promote-to-middle`,
+    { method: 'POST' },
+  )
+}
+
 export function sendMailRequestNow(
   sendRequestId: string,
 ): Promise<MailSendRequest> {
@@ -1177,6 +1211,20 @@ export function prefillCalendarEventFromMail(payload: {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
+}
+
+export function updateMailThreadImportanceRule(
+  messageId: string,
+  futureImportanceRule: 'low' | null,
+): Promise<MailDetail> {
+  return request(
+    `/api/v1/mails/${encodeURIComponent(messageId)}/thread-importance-rule`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ future_importance_rule: futureImportanceRule }),
+    },
+  )
 }
 
 export function updateMailImportance(

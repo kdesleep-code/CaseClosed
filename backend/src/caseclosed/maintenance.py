@@ -31,8 +31,11 @@ from caseclosed.google_integration import calendar_api_get_json
 from caseclosed.google_integration import encoded_calendar_path
 from caseclosed.google_integration import gmail_api_get_json
 from caseclosed.google_integration import google_calendar_auto_sync_settings_data
+from caseclosed.google_integration import google_gmail_auto_import_settings_data
+from caseclosed.google_integration import google_gmail_status_data
 from caseclosed.google_integration import google_gmail_access_token
 from caseclosed.google_integration import read_setting_json
+from caseclosed.services.background_worker import background_worker_runtime_status
 
 router = APIRouter(prefix="/api/v1/maintenance", tags=["maintenance"])
 
@@ -49,6 +52,7 @@ def maintenance_status(
 ) -> dict[str, object]:
     llm_cost = llm_cost_summary(session)
     dashboard = maintenance_dashboard_summary(session, llm_cost)
+    health = maintenance_health_summary(session)
     return {
         "ok": True,
         "data": {
@@ -72,8 +76,116 @@ def maintenance_status(
             "llm_cost_month_used": llm_cost["month_used"],
             "llm_cost_month_remaining": llm_cost["month_remaining"],
             "backup_status": "not_configured",
+            "system_health": health,
             **dashboard,
         },
+    }
+
+
+def maintenance_health_summary(session: DatabaseSession) -> dict[str, object]:
+    now = jst_iso()
+    queue = {
+        "pending": count_rows(
+            session,
+            Job,
+            (Job.status == "pending")
+            & (or_(Job.available_at.is_(None), Job.available_at <= now)),
+        ),
+        "scheduled": count_rows(
+            session,
+            Job,
+            (Job.status == "pending") & (Job.available_at > now),
+        ),
+        **{
+            status: count_rows(session, Job, Job.status == status)
+            for status in ("running", "failed", "stale")
+        },
+    }
+    worker = background_worker_runtime_status()
+    worker["status"] = (
+        "disabled"
+        if not worker["enabled"]
+        else "healthy"
+        if worker["alive_workers"] >= worker["configured_workers"]
+        else "warning"
+    )
+    job_activity_values = [
+        session.scalar(select(func.max(column)))
+        for column in (Job.started_at, Job.heartbeat_at, Job.finished_at)
+    ]
+    worker["last_job_activity_at"] = max(
+        (value for value in job_activity_values if value is not None),
+        default=None,
+    )
+
+    google_status = google_gmail_status_data(session)
+    gmail = integration_health_data(
+        google_gmail_auto_import_settings_data(session),
+        connected=bool(google_status["connected"]),
+    )
+    calendar = integration_health_data(
+        google_calendar_auto_sync_settings_data(session),
+        connected=bool(
+            google_status["connected"] and google_status["calendar_read_enabled"]
+        ),
+    )
+    external_unknown = count_rows(
+        session,
+        ExternalOperation,
+        ExternalOperation.status == "unknown",
+    )
+    pending_writes = count_rows(
+        session,
+        WriteRequest,
+        WriteRequest.status == "pending",
+    )
+    if queue["failed"] + queue["stale"] + external_unknown > 0:
+        overall_status = "attention"
+    elif (
+        worker["status"] == "warning"
+        or gmail["status"] in {"warning", "error"}
+        or calendar["status"] in {"warning", "error"}
+        or pending_writes > 0
+        or (queue["pending"] > 0 and worker["status"] != "healthy")
+    ):
+        overall_status = "warning"
+    else:
+        overall_status = "healthy"
+    return {
+        "status": overall_status,
+        "checked_at": jst_iso(),
+        "queue": queue,
+        "worker": worker,
+        "gmail_auto_import": gmail,
+        "calendar_auto_sync": calendar,
+    }
+
+
+def integration_health_data(
+    settings: dict[str, object],
+    *,
+    connected: bool,
+) -> dict[str, object]:
+    enabled = bool(settings.get("enabled"))
+    last_error = settings.get("last_error")
+    if not enabled:
+        status = "disabled"
+    elif not connected:
+        status = "warning"
+    elif last_error:
+        status = "error"
+    elif settings.get("last_success_at") is None:
+        status = "pending"
+    else:
+        status = "healthy"
+    return {
+        "enabled": enabled,
+        "connected": connected,
+        "status": status,
+        "interval_minutes": settings.get("interval_minutes"),
+        "last_run_at": settings.get("last_run_at"),
+        "last_success_at": settings.get("last_success_at"),
+        "last_error": last_error,
     }
 
 

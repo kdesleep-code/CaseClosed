@@ -2834,6 +2834,41 @@
   gap: 6px;
 }
 
+.mail-thread-summary-heading-row {
+  align-items: center;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.mail-thread-summary-rule {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  position: relative;
+}
+
+.mail-thread-summary-rule > span {
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.mail-thread-summary-rule .mail-thread-status {
+  min-width: 104px;
+}
+
+.mail-thread-summary-rule .mail-thread-importance-menu {
+  top: calc(100% + 5px);
+}
+
+@media (max-width: 640px) {
+  .mail-thread-summary-heading-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
 .mail-thread-summary h2,
 .mail-thread-summary p {
   margin: 0;
@@ -3656,6 +3691,7 @@
   color: var(--accent-strong);
   font-weight: 700;
   overflow-wrap: anywhere;
+  word-break: break-word;
   text-decoration: underline;
   text-decoration-thickness: 1px;
   text-underline-offset: 2px;
@@ -5565,12 +5601,17 @@
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.pending-contact-importance-buttons {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .pending-contact-kind-buttons button {
   padding-inline: 5px;
   font-size: 0.76rem;
 }
 
-.pending-contact-decision-buttons button {
+.pending-contact-decision-buttons button,
+.pending-contact-importance-buttons button {
   padding-inline: 5px;
   font-size: 0.76rem;
 }
@@ -6230,6 +6271,100 @@
 
 #maintenance-usage-panel {
   gap: 18px;
+}
+
+.maintenance-health {
+  border: 1px solid var(--surface-warm-border);
+  border-radius: var(--radius-card);
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+  background: var(--surface-soft);
+}
+
+.maintenance-health-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.maintenance-health-title h3 {
+  margin: 0;
+}
+
+.maintenance-health-badge {
+  min-height: 24px;
+  border: 1px solid var(--surface-warm-border);
+  border-radius: 999px;
+  padding: 2px 9px;
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-muted);
+  background: var(--surface-panel);
+  font-size: 0.78rem;
+  font-weight: 720;
+  white-space: nowrap;
+}
+
+.maintenance-health-badge[data-health='healthy'] {
+  border-color: rgba(45, 125, 83, 0.35);
+  color: #276f4a;
+  background: rgba(222, 244, 231, 0.8);
+}
+
+.maintenance-health-badge[data-health='warning'],
+.maintenance-health-badge[data-health='pending'] {
+  border-color: rgba(166, 117, 26, 0.35);
+  color: #7c5717;
+  background: rgba(255, 242, 204, 0.82);
+}
+
+.maintenance-health-badge[data-health='attention'],
+.maintenance-health-badge[data-health='error'] {
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+  background: var(--danger-bg);
+}
+
+.maintenance-health-queue {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.maintenance-health-queue > div {
+  min-width: 0;
+  border: 1px solid var(--surface-warm-border);
+  border-radius: var(--radius-ui);
+  padding: 9px 11px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  background: var(--surface-panel);
+}
+
+.maintenance-health-queue span {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.maintenance-health-queue strong {
+  font-size: 1.08rem;
+}
+
+.maintenance-health-queue > div[data-health='attention'] strong,
+.maintenance-health-error {
+  color: var(--danger-text);
+}
+
+.maintenance-health-table th[scope='row'] {
+  color: var(--text-strong);
+  font-weight: 680;
+}
+
+.maintenance-health-table td {
+  vertical-align: middle;
 }
 
 .usage-grid {
@@ -15712,6 +15847,19 @@ button.task-gadget-action:disabled {
     grid-template-columns: 1fr;
   }
 
+  .maintenance-health {
+    padding: 12px;
+  }
+
+  .maintenance-health > .section-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .maintenance-health-queue {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .llm-cost-summary-grid,
   .llm-cost-budget-form,
   .storage-location-card dl {
@@ -17934,5 +18082,274 @@ button.task-gadget-action:disabled {
   .paper-detail-reader-panel,
   .paper-detail-reader {
     min-height: 560px;
+  }
+}
+
+
+/* Low mail review */
+.low-mail-review-shell {
+  min-height: 100vh;
+  overflow-x: hidden;
+  background: #f4f5f2;
+  color: #20231f;
+  padding: 28px clamp(18px, 4vw, 56px) 56px;
+}
+
+.low-mail-review-header {
+  align-items: flex-start;
+  border-bottom: 1px solid #cfd4cc;
+  display: flex;
+  justify-content: space-between;
+  margin: 0 auto 24px;
+  max-width: 760px;
+  padding-bottom: 18px;
+}
+
+.low-mail-review-header p,
+.low-mail-review-header h1 {
+  margin: 0;
+}
+
+.low-mail-review-header p {
+  color: #596257;
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.low-mail-review-header h1 {
+  font-size: clamp(1.45rem, 3vw, 2rem);
+  letter-spacing: 0;
+  margin: 4px 0 6px;
+}
+
+.low-mail-review-header-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.low-mail-review-header button,
+.low-mail-review-card footer button {
+  background: #ffffff;
+  border: 1px solid #aeb6aa;
+  border-radius: 6px;
+  color: #293128;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+  min-height: 42px;
+  padding: 9px 16px;
+}
+
+.low-mail-review-list,
+.low-mail-review-empty,
+.low-mail-review-state,
+.low-mail-review-error {
+  margin-left: auto;
+  margin-right: auto;
+  max-width: 760px;
+}
+
+.low-mail-review-list {
+  display: grid;
+  gap: 14px;
+}
+
+.low-mail-review-list-item {
+  appearance: none;
+  background: #ffffff;
+  border: 1px solid #d7dbd4;
+  border-radius: 8px;
+  color: inherit;
+  cursor: pointer;
+  display: grid;
+  font: inherit;
+  gap: 10px;
+  min-width: 0;
+  padding: 18px 20px;
+  text-align: left;
+  width: 100%;
+}
+
+.low-mail-review-list-item:hover,
+.low-mail-review-list-item:focus-visible {
+  border-color: #778878;
+  box-shadow: 0 2px 8px rgb(42 53 43 / 10%);
+  outline: none;
+}
+
+.low-mail-review-list-item-header {
+  align-items: flex-start;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.low-mail-review-list-item-header > span:first-child {
+  display: grid;
+  min-width: 0;
+}
+
+.low-mail-review-list-item small,
+.low-mail-review-list-subject,
+.low-mail-review-preview {
+  overflow-wrap: anywhere;
+}
+
+.low-mail-review-list-item small {
+  color: #677064;
+}
+
+.low-mail-review-preview {
+  color: #50584e;
+  display: -webkit-box;
+  line-height: 1.55;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.low-mail-review-card {
+  background: #ffffff;
+  border: 1px solid #d7dbd4;
+  border-radius: 8px;
+  min-width: 0;
+  padding: 20px;
+}
+
+.low-mail-review-card > header {
+  align-items: flex-start;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.low-mail-review-card > header > div:first-child {
+  display: grid;
+  min-width: 0;
+}
+
+.low-mail-review-card > header span,
+.low-mail-review-card time {
+  color: #677064;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.low-mail-review-meta {
+  align-items: center;
+  display: flex;
+  flex-shrink: 0;
+  gap: 10px;
+}
+
+.low-mail-review-importance {
+  border: 1px solid #bec4ba;
+  border-radius: 999px;
+  font-weight: 700;
+  padding: 3px 9px;
+}
+
+.low-mail-review-importance.is-low {
+  background: #eef4e9;
+  color: #36542d;
+}
+
+.low-mail-review-importance.is-skip {
+  background: #eeeeec;
+  color: #555a53;
+}
+
+.low-mail-review-card h2 {
+  font-size: 1.05rem;
+  letter-spacing: 0;
+  margin: 18px 0 10px;
+  overflow-wrap: anywhere;
+}
+
+.low-mail-review-body {
+  border-left: 3px solid #c6cec1;
+  line-height: 1.65;
+  max-width: 100%;
+  min-width: 0;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  padding: 2px 0 2px 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.low-mail-review-card footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 18px;
+}
+
+.low-mail-review-card footer button {
+  background: #315b46;
+  border-color: #315b46;
+  color: #ffffff;
+}
+
+.low-mail-review-card button:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+.low-mail-review-empty {
+  padding: 56px 0;
+  text-align: center;
+}
+
+.low-mail-review-empty h2 {
+  letter-spacing: 0;
+}
+
+.low-mail-review-error {
+  background: #fff2ef;
+  border-left: 4px solid #b44335;
+  color: #7e2c22;
+  padding: 12px 16px;
+}
+
+@media (max-width: 640px) {
+  .low-mail-review-shell {
+    padding: 18px 12px 36px;
+  }
+
+  .low-mail-review-header {
+    gap: 12px;
+  }
+
+  .low-mail-review-header button {
+    padding-inline: 11px;
+  }
+
+  .low-mail-review-list-item {
+    padding: 16px;
+  }
+
+  .low-mail-review-list-item-header {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .low-mail-review-card {
+    padding: 16px;
+  }
+
+  .low-mail-review-card > header {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .low-mail-review-meta {
+    justify-content: space-between;
+  }
+
+  .low-mail-review-card footer button {
+    width: 100%;
   }
 }

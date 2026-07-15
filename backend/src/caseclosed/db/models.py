@@ -1082,6 +1082,7 @@ class GmailThread(Base):
     subject_snapshot: Mapped[str | None] = mapped_column(Text)
     first_message_at: Mapped[str | None] = mapped_column(Text)
     last_message_at: Mapped[str | None] = mapped_column(Text)
+    future_importance_rule: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)

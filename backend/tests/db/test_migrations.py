@@ -74,6 +74,10 @@ def test_phase_4_migrations_add_mail_tables(
             row[1]
             for row in connection.execute("PRAGMA table_info(gmail_messages)").fetchall()
         }
+        thread_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(gmail_threads)").fetchall()
+        }
         auto_state_columns = {
             row[1]
             for row in connection.execute("PRAGMA table_info(mail_auto_state)").fetchall()
@@ -112,6 +116,7 @@ def test_phase_4_migrations_add_mail_tables(
         "reply_to_address",
         "list_id",
     } <= message_columns
+    assert "future_importance_rule" in thread_columns
     assert {
         "effective_importance",
         "llm_run_id",

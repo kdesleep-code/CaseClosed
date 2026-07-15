@@ -7,7 +7,9 @@ from sqlalchemy import select
 
 from caseclosed.db.models import AppSetting
 from caseclosed.db import runtime
+from caseclosed.db.models import CaseMailLink
 from caseclosed.db.models import GmailMessage
+from caseclosed.db.models import GmailThread
 from caseclosed.db.models import Job
 from caseclosed.db.models import LlmRun
 from caseclosed.db.models import MailAutoState
@@ -79,6 +81,15 @@ def read_mail_importance_profile_context(session) -> dict[str, object]:
     return context
 
 
+def mail_thread_has_case_link(session, thread_id: str) -> bool:
+    return session.scalar(
+        select(CaseMailLink.id)
+        .join(GmailMessage, GmailMessage.id == CaseMailLink.message_id)
+        .where(GmailMessage.thread_id == thread_id)
+        .limit(1)
+    ) is not None
+
+
 def handle_mail_importance_classification(
     job: Job,
     provider: LlmProvider | None = None,
@@ -110,6 +121,21 @@ def handle_mail_importance_classification(
                 "skipped": True,
                 "reason": "llm_blocked",
                 "effective_importance": "pinned",
+            }
+
+        thread = session.get(GmailThread, message.thread_id)
+        if thread is not None and thread.future_importance_rule == "low":
+            auto_state.effective_importance = (
+                "high" if auto_state.external_importance == "high" else "low"
+            )
+            auto_state.updated_at = now
+            auto_state.version += 1
+            session.commit()
+            return {
+                "message_id": message.id,
+                "skipped": True,
+                "reason": "thread_future_importance_rule",
+                "effective_importance": auto_state.effective_importance,
             }
 
         profile_context = read_mail_importance_profile_context(session)
@@ -187,6 +213,7 @@ def handle_mail_importance_classification(
         auto_state.effective_importance = effective_importance(
             external_importance=auto_state.external_importance,
             suggested_importance=suggested_importance,
+            case_linked=mail_thread_has_case_link(session, message.thread_id),
         )
         auto_state.updated_at = now
         auto_state.version += 1
@@ -207,7 +234,10 @@ def effective_importance(
     *,
     external_importance: str | None,
     suggested_importance: str,
+    case_linked: bool = False,
 ) -> str:
     if external_importance == "high":
         return "high"
+    if case_linked and suggested_importance not in {"pinned", "high", "middle"}:
+        return "middle"
     return suggested_importance

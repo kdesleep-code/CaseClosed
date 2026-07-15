@@ -7,6 +7,7 @@ from datetime import timezone
 
 from sqlalchemy import Engine
 from sqlalchemy import create_engine
+from sqlalchemy import event
 from sqlalchemy import inspect
 from sqlalchemy import select
 from sqlalchemy import text
@@ -16,6 +17,7 @@ from sqlalchemy.orm import sessionmaker
 from caseclosed.db.base import Base
 from caseclosed.db.models import AppSetting
 from caseclosed.db.models import Case
+from caseclosed.db.models import CaseGenre
 from caseclosed.db.models import MailAutoState
 from caseclosed.db.models import StorageDirectory
 from caseclosed.db.models import StorageLocation
@@ -51,7 +53,25 @@ def parse_iso_datetime(value: str) -> datetime:
 
 
 def build_engine() -> Engine:
-    return create_engine(get_database_url(), future=True)
+    database_url = get_database_url()
+    database_engine = create_engine(database_url, future=True)
+    if database_url.startswith("sqlite:"):
+        event.listen(database_engine, "connect", configure_sqlite_connection)
+    return database_engine
+
+
+def configure_sqlite_connection(
+    dbapi_connection: object,
+    _connection_record: object,
+) -> None:
+    """Keep API reads responsive while background workers write to SQLite."""
+    cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=15000")
+        cursor.execute("PRAGMA foreign_keys=ON")
+    finally:
+        cursor.close()
 
 
 engine = build_engine()
@@ -99,6 +119,15 @@ def ensure_runtime_schema() -> None:
                 connection.execute(text("ALTER TABLE cases ADD COLUMN closed_when_text TEXT"))
             if "tags_json" not in case_columns:
                 connection.execute(text("ALTER TABLE cases ADD COLUMN tags_json TEXT"))
+    if "gmail_threads" in table_names:
+        thread_columns = {
+            column["name"] for column in inspector.get_columns("gmail_threads")
+        }
+        if "future_importance_rule" not in thread_columns:
+            with engine.begin() as connection:
+                connection.execute(
+                    text("ALTER TABLE gmail_threads ADD COLUMN future_importance_rule TEXT")
+                )
     if "storage_pdf_ocr_statuses" not in table_names:
         with engine.begin() as connection:
             connection.execute(
@@ -1301,6 +1330,9 @@ def seed_storage_locations(session: Session) -> None:
 
 BOOKSHELF_STORAGE_DIRECTORY_ID = "storage_directory_bookshelf"
 PAPERS_STORAGE_DIRECTORY_ID = "storage_directory_papers"
+NO_CASE_GENRE_STORAGE_DIRECTORY_ID = "storage_directory_case_genre_none"
+NO_CASE_GENRE_DIRECTORY_NAME = "No genre"
+CASE_GENRE_ARCHIVED_CASES_DIRECTORY_NAME = "Archived Cases"
 
 
 def ensure_named_hidden_storage_directory(
@@ -1371,6 +1403,150 @@ def case_handover_storage_directory_id(case_id: str) -> str:
     return f"storage_directory_case_{case_id}_handover"
 
 
+def case_genre_storage_directory_id(genre_id: str | None) -> str:
+    if genre_id is None:
+        return NO_CASE_GENRE_STORAGE_DIRECTORY_ID
+    return f"storage_directory_case_genre_{genre_id}"
+
+
+def case_genre_archived_cases_storage_directory_id(genre_id: str | None) -> str:
+    return f"{case_genre_storage_directory_id(genre_id)}_archived_cases"
+
+
+def ensure_case_genre_archived_cases_storage_directory(
+    session: Session,
+    genre_id: str | None,
+    *,
+    parent: StorageDirectory,
+    now: str | None = None,
+) -> StorageDirectory:
+    timestamp = now or jst_iso()
+    directory = session.get(StorageDirectory, case_genre_archived_cases_storage_directory_id(genre_id))
+    if directory is None:
+        directory = StorageDirectory(
+            id=case_genre_archived_cases_storage_directory_id(genre_id),
+            parent_id=parent.id,
+            directory_kind="normal",
+            case_id=None,
+            name=CASE_GENRE_ARCHIVED_CASES_DIRECTORY_NAME,
+            status="active",
+            created_at=timestamp,
+            updated_at=timestamp,
+            version=1,
+        )
+        session.add(directory)
+        return directory
+
+    changed = False
+    if directory.parent_id != parent.id:
+        directory.parent_id = parent.id
+        changed = True
+    if directory.directory_kind != "normal":
+        directory.directory_kind = "normal"
+        changed = True
+    if directory.case_id is not None:
+        directory.case_id = None
+        changed = True
+    if directory.name != CASE_GENRE_ARCHIVED_CASES_DIRECTORY_NAME:
+        directory.name = CASE_GENRE_ARCHIVED_CASES_DIRECTORY_NAME
+        changed = True
+    if directory.status != "active":
+        directory.status = "active"
+        changed = True
+    if changed:
+        directory.updated_at = timestamp
+        directory.version += 1
+    return directory
+
+
+def ensure_case_genre_storage_directory(
+    session: Session,
+    genre_id: str | None,
+    *,
+    now: str | None = None,
+) -> StorageDirectory:
+    timestamp = now or jst_iso()
+    genre = session.get(CaseGenre, genre_id) if genre_id is not None else None
+    effective_genre_id = genre.id if genre is not None else None
+    directory_id = case_genre_storage_directory_id(effective_genre_id)
+    name = genre.title if genre is not None else NO_CASE_GENRE_DIRECTORY_NAME
+    directory = session.get(StorageDirectory, directory_id)
+    if directory is None:
+        directory = StorageDirectory(
+            id=directory_id,
+            parent_id=None,
+            directory_kind="normal",
+            case_id=None,
+            name=name,
+            status="active",
+            created_at=timestamp,
+            updated_at=timestamp,
+            version=1,
+        )
+        session.add(directory)
+        ensure_case_genre_archived_cases_storage_directory(
+            session,
+            effective_genre_id,
+            parent=directory,
+            now=timestamp,
+        )
+        return directory
+
+    changed = False
+    if directory.parent_id is not None:
+        directory.parent_id = None
+        changed = True
+    if directory.directory_kind != "normal":
+        directory.directory_kind = "normal"
+        changed = True
+    if directory.case_id is not None:
+        directory.case_id = None
+        changed = True
+    if directory.name != name:
+        directory.name = name
+        changed = True
+    if directory.status != "active":
+        directory.status = "active"
+        changed = True
+    if changed:
+        directory.updated_at = timestamp
+        directory.version += 1
+    ensure_case_genre_archived_cases_storage_directory(
+        session,
+        effective_genre_id,
+        parent=directory,
+        now=timestamp,
+    )
+    return directory
+
+
+def ensure_case_genre_storage_directories(session: Session, *, now: str | None = None) -> None:
+    timestamp = now or jst_iso()
+    ensure_case_genre_storage_directory(session, None, now=timestamp)
+    genres = session.scalars(select(CaseGenre)).all()
+    for genre in genres:
+        ensure_case_genre_storage_directory(session, genre.id, now=timestamp)
+
+
+def archive_case_genre_storage_directory(
+    session: Session,
+    genre_id: str,
+    *,
+    now: str | None = None,
+) -> None:
+    timestamp = now or jst_iso()
+    for directory_id in (
+        case_genre_archived_cases_storage_directory_id(genre_id),
+        case_genre_storage_directory_id(genre_id),
+    ):
+        directory = session.get(StorageDirectory, directory_id)
+        if directory is None or directory.status == "archived":
+            continue
+        directory.status = "archived"
+        directory.updated_at = timestamp
+        directory.version += 1
+
+
 def ensure_case_storage_directory(
     session: Session,
     case: Case,
@@ -1378,6 +1554,17 @@ def ensure_case_storage_directory(
     now: str | None = None,
 ) -> StorageDirectory:
     timestamp = now or jst_iso()
+    genre_directory = ensure_case_genre_storage_directory(session, case.genre_id, now=timestamp)
+    parent_directory = (
+        ensure_case_genre_archived_cases_storage_directory(
+            session,
+            case.genre_id,
+            parent=genre_directory,
+            now=timestamp,
+        )
+        if case.archived_at is not None
+        else genre_directory
+    )
     directory = session.scalar(
         select(StorageDirectory)
         .where(StorageDirectory.directory_kind == "case")
@@ -1388,7 +1575,7 @@ def ensure_case_storage_directory(
     if directory is None:
         directory = StorageDirectory(
             id=case_storage_directory_id(case.id),
-            parent_id=None,
+            parent_id=parent_directory.id,
             directory_kind="case",
             case_id=case.id,
             name=case.name,
@@ -1402,8 +1589,8 @@ def ensure_case_storage_directory(
         return directory
 
     changed = False
-    if directory.parent_id is not None:
-        directory.parent_id = None
+    if directory.parent_id != parent_directory.id:
+        directory.parent_id = parent_directory.id
         changed = True
     if directory.name != case.name:
         directory.name = case.name
@@ -1481,6 +1668,7 @@ def ensure_case_handover_storage_directory(
 def ensure_case_storage_directories(session: Session) -> None:
     cases = session.scalars(select(Case)).all()
     now = jst_iso()
+    ensure_case_genre_storage_directories(session, now=now)
     for case in cases:
         ensure_case_storage_directory(session, case, now=now)
 

@@ -1125,3 +1125,84 @@ def test_openai_mail_thread_summary_provider_is_used_when_profile_is_configured(
     assert "Please review this whole thread today." not in llm_run_row[4]
     assert json.loads(llm_run_row[5])["summary"] == "スレッド全体のレビュー依頼。"
     assert llm_run_row[6:9] == (30, 18, 48)
+
+
+def test_case_linked_thread_has_middle_floor_for_llm_skip(
+    client,
+    database_path: Path,
+) -> None:
+    client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Case Sender",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "case.floor@example.com", "is_primary": True}
+            ],
+        },
+    )
+    case_response = client.post(
+        "/api/v1/cases",
+        json={
+            "name": "Importance floor case",
+            "progress_status": "in_progress",
+            "ball_status": "user",
+        },
+    )
+    case_id = case_response.json()["data"]["case"]["id"]
+    ingest_response = client.post(
+        MOCK_MAILS_URL,
+        json={
+            "gmail_message_id": "gmail_case_floor_1",
+            "gmail_thread_id": "thread_case_floor",
+            "subject": "Ordinary notice",
+            "from_address": "case.floor@example.com",
+            "received_at": "2026-07-14T10:00:00+09:00",
+            "body_text": "An LLM may consider this low priority.",
+        },
+    )
+    message_id = ingest_response.json()["data"]["message_id"]
+    job_id = ingest_response.json()["data"]["queued_job_id"]
+    assign_response = client.post(
+        f"/api/v1/mails/{message_id}/case-links",
+        json={"case_id": case_id},
+    )
+    assert assign_response.status_code == 200
+
+    class SkipProvider:
+        provider_name = "test"
+        model_name = "skip-provider"
+
+        def complete_json(self, *, function_type, input_payload):
+            return LlmProviderResponse(
+                output={"importance": "skip"},
+                output_preview="skip",
+                prompt_tokens=1,
+                completion_tokens=1,
+                total_tokens=2,
+                estimated_cost=0.0,
+            )
+
+    importance_module = importlib.import_module(
+        "caseclosed.services.mail_importance_classification"
+    )
+    orchestrator_module = importlib.import_module("caseclosed.services.orchestrator")
+    orchestrator = orchestrator_module.Orchestrator(
+        worker_id="worker-case-floor",
+        handlers={
+            "mail_importance_classification": lambda job: (
+                importance_module.handle_mail_importance_classification(
+                    job, provider=SkipProvider()
+                )
+            )
+        },
+    )
+    assert orchestrator.run_once() == job_id
+
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT suggested_importance, effective_importance "
+            "FROM mail_auto_state WHERE message_id = ?",
+            (message_id,),
+        ).fetchone()
+    assert row == ("skip", "middle")

@@ -253,7 +253,7 @@ def is_citation_filename(filename: str | None) -> bool:
     if filename is None:
         return False
     lowered = filename.strip().lower()
-    return lowered.endswith(".bib") or lowered.endswith(".bibtex") or lowered.endswith(".ris")
+    return lowered.endswith(".bib") or lowered.endswith(".bibtex") or lowered.endswith(".ris") or lowered.endswith(".nbib")
 
 
 def is_bookshelf_pdf_filename(filename: str | None) -> bool:
@@ -1635,9 +1635,106 @@ def parse_ris_entry(ris: str) -> dict[str, object]:
     }
 
 
+
+def is_nbib_text(raw_citation: str) -> bool:
+    for raw_line in raw_citation.splitlines():
+        if re.match(r"^(PMID|OWN|STAT|MHDA|CRDT|DP|JT|FAU|LID|AID)\s*-", raw_line.strip()):
+            return True
+    return False
+
+
+def parse_nbib_entries(nbib: str) -> list[tuple[str, str]]:
+    entries: list[tuple[str, str]] = []
+    current_tag = ""
+    current_value = ""
+    for raw_line in nbib.splitlines():
+        if raw_line.strip() == "":
+            continue
+        match = re.match(r"^(?P<tag>[A-Z0-9]{2,4})\s*-\s*(?P<value>.*)", raw_line)
+        if match is not None:
+            if current_tag != "":
+                entries.append((current_tag, normalize_bibtex_value(current_value)))
+            current_tag = match.group("tag")
+            current_value = match.group("value")
+            continue
+        if current_tag != "" and raw_line.startswith(" "):
+            current_value = f"{current_value} {raw_line.strip()}"
+    if current_tag != "":
+        entries.append((current_tag, normalize_bibtex_value(current_value)))
+    return entries
+
+
+def nbib_doi(value: str) -> str:
+    cleaned = normalize_bibtex_value(value)
+    match = re.search(r"(10\.\S+)", cleaned, flags=re.IGNORECASE)
+    if match is None:
+        return ""
+    doi = match.group(1)
+    doi = re.sub(r"\s*\[doi\]\s*$", "", doi, flags=re.IGNORECASE)
+    return doi.rstrip(".,;")
+
+
+def parse_nbib_entry(nbib: str) -> dict[str, object]:
+    fields: dict[str, str] = {}
+    short_authors: list[str] = []
+    full_authors: list[str] = []
+    for tag, value in parse_nbib_entries(nbib):
+        if value == "":
+            continue
+        if tag == "PMID":
+            fields["pmid"] = value
+        elif tag == "TI":
+            fields.setdefault("title", value)
+        elif tag == "BTI":
+            fields.setdefault("booktitle", value)
+        elif tag == "AU":
+            short_authors.append(value)
+        elif tag == "FAU":
+            full_authors.append(value)
+        elif tag == "JT":
+            fields.setdefault("journal", value)
+        elif tag == "TA":
+            fields.setdefault("journal", value)
+        elif tag == "DP":
+            year_match = re.search(r"\d{4}", value)
+            fields["year"] = year_match.group(0) if year_match is not None else value
+            fields["date"] = value
+        elif tag == "VI":
+            fields["volume"] = value
+        elif tag == "IP":
+            fields["number"] = value
+        elif tag == "PG":
+            fields["pages"] = value
+        elif tag in {"LID", "AID"}:
+            doi = nbib_doi(value)
+            if doi != "":
+                fields["doi"] = doi
+        elif tag == "AB":
+            fields.setdefault("abstract", value)
+        elif tag == "PMC":
+            fields["pmcid"] = value
+        elif tag == "SO":
+            fields.setdefault("source", value)
+        else:
+            fields.setdefault(tag.lower(), value)
+    authors = full_authors if full_authors else short_authors
+    if authors:
+        fields["author"] = " and ".join(authors)
+    if "url" not in fields and fields.get("pmid", "") != "":
+        fields["url"] = f"https://pubmed.ncbi.nlm.nih.gov/{fields['pmid']}/"
+    entry_key = fields.get("doi") or fields.get("pmid") or fields.get("title", "")[:80]
+    return {
+        "entry_type": "article",
+        "entry_key": entry_key,
+        "fields": fields,
+        "authors": authors,
+    }
+
 def parse_citation_entry(raw_citation: str) -> dict[str, object]:
     if raw_citation.lstrip().startswith("@"):
         return parse_bibtex_entry(raw_citation)
+    if is_nbib_text(raw_citation):
+        return parse_nbib_entry(raw_citation)
     return parse_ris_entry(raw_citation)
 
 
@@ -1723,7 +1820,7 @@ def bibtex_field_value(bibtex: str, field_name: str) -> str | None:
 
 async def read_paper_bibtex_upload_text(upload: UploadFile) -> str:
     if not is_citation_filename(upload.filename):
-        raise json_error(422, "PAPER_CITATION_ONLY", "PaperShelf requires a .bib, .bibtex, or .ris file.")
+        raise json_error(422, "PAPER_CITATION_ONLY", "PaperShelf requires a .bib, .bibtex, .ris, or .nbib file.")
     data = await upload.read()
     await upload.close()
     if len(data) == 0:

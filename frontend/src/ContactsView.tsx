@@ -1466,7 +1466,7 @@ function ContactsView({
                       }`}
                     >
                       <span>{t('contacts.importanceRule.value')}</span>
-                    <div className="pending-contact-buttons">
+                    <div className="pending-contact-buttons pending-contact-importance-buttons">
                       {(['pinned', 'high', 'middle', 'low'] as const).map((importance) => (
                         <button
                           aria-pressed={
@@ -1920,6 +1920,17 @@ function ContactsView({
                                     alt={t('contacts.avatarAlt', {
                                       name: contact.display_name,
                                     })}
+                                    decoding="async"
+                                    loading="lazy"
+                                    onError={(event) => {
+                                      const fallback = defaultAvatarUrlForContact(contact)
+                                      if (
+                                        event.currentTarget.src !==
+                                        new URL(fallback, window.location.href).href
+                                      ) {
+                                        event.currentTarget.src = fallback
+                                      }
+                                    }}
                                     src={contact.avatar_url ?? defaultAvatarUrlForContact(contact)}
                                   />
                                 </div>

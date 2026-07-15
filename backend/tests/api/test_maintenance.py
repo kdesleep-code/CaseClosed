@@ -28,23 +28,54 @@ def expected_empty_dashboard() -> dict[str, object]:
     }
 
 
+def assert_system_health(
+    data: dict[str, object],
+    *,
+    expected_status: str,
+    expected_queue: dict[str, int],
+) -> None:
+    health = data.pop("system_health")
+    assert isinstance(health, dict)
+    assert health["status"] == expected_status
+    assert health["checked_at"]
+    assert health["queue"] == expected_queue
+    worker = health["worker"]
+    if worker["enabled"]:
+        assert worker["alive_workers"] == worker["configured_workers"]
+        assert worker["status"] == "healthy"
+    else:
+        assert worker["configured_workers"] == 0
+        assert worker["alive_workers"] == 0
+        assert worker["status"] == "disabled"
+    for key in ("gmail_auto_import", "calendar_auto_sync"):
+        integration = health[key]
+        assert integration["connected"] is False
+        assert integration["status"] == "warning"
+        assert integration["last_error"] is None
+
+
 def test_maintenance_status_reports_phase_1_defaults(client) -> None:
     response = client.get("/api/v1/maintenance/status")
 
     assert response.status_code == 200
-    assert response.json() == {
-        "ok": True,
-        "data": {
-            "job_accepting": True,
-            "running_jobs": 0,
-            "action_required_jobs": 0,
-            "pending_write_requests": 0,
-            "external_unknown_count": 0,
-            "llm_cost_month_used": 0.0,
-            "llm_cost_month_remaining": None,
-            "backup_status": "not_configured",
-            **expected_empty_dashboard(),
-        },
+    payload = response.json()
+    assert payload["ok"] is True
+    data = payload["data"]
+    assert_system_health(
+        data,
+        expected_status="warning",
+        expected_queue={"pending": 0, "scheduled": 0, "running": 0, "failed": 0, "stale": 0},
+    )
+    assert data == {
+        "job_accepting": True,
+        "running_jobs": 0,
+        "action_required_jobs": 0,
+        "pending_write_requests": 0,
+        "external_unknown_count": 0,
+        "llm_cost_month_used": 0.0,
+        "llm_cost_month_remaining": None,
+        "backup_status": "not_configured",
+        **expected_empty_dashboard(),
     }
 
 
@@ -134,7 +165,13 @@ def test_maintenance_status_counts_phase_2_work(
     response = client.get("/api/v1/maintenance/status")
 
     assert response.status_code == 200
-    assert response.json()["data"] == {
+    data = response.json()["data"]
+    assert_system_health(
+        data,
+        expected_status="attention",
+        expected_queue={"pending": 0, "scheduled": 0, "running": 1, "failed": 0, "stale": 0},
+    )
+    assert data == {
         "job_accepting": True,
         "running_jobs": 1,
         "action_required_jobs": 0,

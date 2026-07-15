@@ -451,16 +451,6 @@ export default function TaskNewView() {
               </label>
             </section>
             <section className="task-detail-section">
-              <div className="task-section-heading-row">
-                <h3>{t('tasks.detail.subtasks')}</h3>
-                <div>
-                  <button disabled type="button">{t('tasks.detail.addSubtask')}</button>
-                  <button disabled type="button">{t('tasks.detail.splitSubtasks')}</button>
-                </div>
-              </div>
-              <p>{t('tasks.create.subtasksAfterCreate')}</p>
-            </section>
-            <section className="task-detail-section">
               <h3>{t('tasks.detail.progressMemo')}</h3>
               <p>{t('tasks.create.progressMemoAfterCreate')}</p>
             </section>

@@ -14,6 +14,38 @@ from caseclosed.settings import get_background_worker_stale_timeout_seconds
 from caseclosed.settings import is_background_worker_enabled
 
 
+_active_supervisor = None
+
+
+def background_worker_runtime_status() -> dict[str, object]:
+    enabled = is_background_worker_enabled()
+    supervisor = _active_supervisor
+    configured_workers = (
+        int(supervisor.worker_count or get_background_worker_count())
+        if enabled and supervisor is not None
+        else get_background_worker_count()
+        if enabled
+        else 0
+    )
+    if supervisor is None:
+        return {
+            "enabled": enabled,
+            "configured_workers": configured_workers,
+            "alive_workers": 0,
+        }
+    worker_threads = [
+        thread
+        for thread in supervisor._threads
+        if thread.name.startswith("caseclosed-worker-")
+        and thread.name != "caseclosed-worker-stale-check"
+    ]
+    return {
+        "enabled": enabled,
+        "configured_workers": configured_workers,
+        "alive_workers": sum(thread.is_alive() for thread in worker_threads),
+    }
+
+
 def kick_job_drain(*, reason: str, max_jobs: int = 50) -> None:
     del reason
     if not is_background_worker_enabled():
@@ -60,6 +92,7 @@ class BackgroundWorkerSupervisor:
         self._threads: list[threading.Thread] = []
 
     def start(self) -> None:
+        global _active_supervisor
         if self._threads:
             return
         for index in range(self.worker_count or 1):
@@ -78,12 +111,16 @@ class BackgroundWorkerSupervisor:
         )
         stale_thread.start()
         self._threads.append(stale_thread)
+        _active_supervisor = self
 
     async def stop(self) -> None:
+        global _active_supervisor
         self._stop_event.set()
         for thread in self._threads:
             thread.join(timeout=2)
         self._threads = []
+        if _active_supervisor is self:
+            _active_supervisor = None
 
     def _worker_loop(self, worker_id: str) -> None:
         orchestrator = Orchestrator(worker_id=worker_id)

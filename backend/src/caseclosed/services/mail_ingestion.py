@@ -250,6 +250,13 @@ def ingest_mock_mail(
         fixed_importance=sender_resolution.fixed_importance,
         llm_blocked=llm_block_match.blocked,
     )
+    thread_low_rule = (
+        thread.future_importance_rule == "low"
+        and sender_resolution.should_classify
+        and not llm_block_match.blocked
+    )
+    if thread_low_rule:
+        effective_importance = "high" if mail_input.external_starred else "low"
     if force_skip:
         effective_importance = "skip"
     queued_job_id = None
@@ -257,6 +264,7 @@ def ingest_mock_mail(
         not force_skip
         and
         not llm_block_match.blocked
+        and not thread_low_rule
         and sender_resolution.pending_address is None
         and sender_resolution.should_classify
     ):
@@ -741,11 +749,19 @@ def apply_contact_mail_importance_rule(
             queued_contact_ai_memo_job_id=None,
         )
 
+    thread = session.get(GmailThread, message.thread_id)
+    thread_low_rule = (
+        thread is not None and thread.future_importance_rule == "low"
+    )
     auto_state.effective_importance = (
-        "high" if auto_state.external_importance == "high" else "unclassified"
+        "high"
+        if auto_state.external_importance == "high"
+        else "low"
+        if thread_low_rule
+        else "unclassified"
     )
     queued_job_id = None
-    if not bool(auto_state.llm_blocked):
+    if not bool(auto_state.llm_blocked) and not thread_low_rule:
         queued_job_id = enqueue_importance_job(
             session,
             message,

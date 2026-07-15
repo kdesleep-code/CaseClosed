@@ -1717,6 +1717,13 @@ def test_scheduled_send_request_can_be_rescheduled_sent_now_and_canceled(
     assert cancel_response.status_code == 200
     assert cancel_response.json()["data"]["status"] == "canceled"
 
+    edit_source_response = client.get(
+        f"{MAILS_URL}/send-requests/{send_request['id']}"
+    )
+    assert edit_source_response.status_code == 200
+    assert edit_source_response.json()["data"]["body_text"] == "Later reply."
+    assert edit_source_response.json()["data"]["reply_to_message_id"] == message_id
+
     after_cancel_detail_response = client.get(f"{MAILS_URL}/{message_id}")
     assert after_cancel_detail_response.json()["data"]["scheduled_send_requests"] == []
 
@@ -2901,3 +2908,80 @@ def test_mail_read_unread_update(client) -> None:
     assert read_response.json()["data"]["user_state"]["read_at"] is not None
     assert unread_response.json()["data"]["user_state"]["read_status"] == "unread"
     assert unread_response.json()["data"]["user_state"]["read_at"] is None
+
+
+def test_low_mail_review_session_lists_today_low_skip_and_only_promotes_to_middle(
+    client,
+    certificate_headers,
+    monkeypatch,
+) -> None:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    review_password = "review-only-password"
+    monkeypatch.setenv("CASECLOSED_LOW_MAIL_REVIEW_PASSWORD", review_password)
+    client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Review Sender",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "review.sender@example.com", "is_primary": True}
+            ],
+        },
+    )
+    today = datetime.now(ZoneInfo("Asia/Tokyo")).date().isoformat()
+    message_id = ingest_mail(
+        client,
+        gmail_message_id="gmail_review_today_low",
+        gmail_thread_id="thread_review_today_low",
+        from_address="review.sender@example.com",
+        subject="Review this mail",
+        received_at=f"{today}T10:30:00+09:00",
+        body_text="Full review body.",
+    )
+    importance_response = client.post(
+        f"{MAILS_URL}/{message_id}/importance",
+        json={"importance": "low"},
+    )
+    assert importance_response.status_code == 200
+    client.post("/api/v1/auth/logout", headers=certificate_headers)
+    login_response = client.post(
+        "/api/v1/auth/login",
+        json={"password": review_password},
+        headers=certificate_headers,
+    )
+    assert login_response.status_code == 200
+
+    list_response = client.get(f"{MAILS_URL}/review/today")
+    assert list_response.status_code == 200
+    items = list_response.json()["data"]["items"]
+    assert [item["id"] for item in items] == [message_id]
+    assert "body_text" not in items[0]
+
+    detail_response = client.get(f"{MAILS_URL}/review/{message_id}")
+    assert detail_response.status_code == 200
+    assert detail_response.json()["data"]["body_text"] == "Full review body."
+
+    promote_response = client.post(
+        f"{MAILS_URL}/review/{message_id}/promote-to-middle"
+    )
+    assert promote_response.status_code == 200
+    assert promote_response.json()["data"]["importance"] == "middle"
+    assert client.get(f"{MAILS_URL}/review/today").json()["data"]["items"] == []
+
+
+def test_full_session_cannot_use_low_mail_review_api(
+    client,
+    certificate_headers,
+) -> None:
+    from conftest import TEST_PASSWORD
+
+    assert client.post(
+        "/api/v1/auth/login",
+        json={"password": TEST_PASSWORD},
+        headers=certificate_headers,
+    ).status_code == 200
+
+    response = client.get(f"{MAILS_URL}/review/today")
+    assert response.status_code == 403

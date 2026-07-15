@@ -1942,6 +1942,8 @@ Prompt Versionの既存版は上書きせず、変更時は新versionを作成�
 ## 21.2 現行タブ構成
 
 - `Usage`
+  - System Health（全体判定、Job Queue内訳、Worker稼働数、Gmail自動取込、Calendar自動同期）
+  - 30秒ごとのSystem Health自動更新、および手動更新
   - Storage使用量
   - LLM Cost使用量
   - LLM Cost予測
@@ -1980,7 +1982,10 @@ GET /api/v1/maintenance/storage-operation-history
 
 ### 21.3.1 Usageタブ
 
-- `Usage` タブはStorage容量、LLM Cost状況、メール量、Job/Write/Externalの処理状況を受け持つ。
+- `Usage` タブはSystem Health、Storage容量、LLM Cost状況、メール量、Job/Write/Externalの処理状況を受け持つ。
+- `System Health` は `healthy / warning / attention` の3段階で全体状態を示す。
+- Workerは設定数と実際に生存しているThread数を比較する。自動取込・同期は有効/無効、接続状態、最終成功、直近エラーを表示する。
+- 自動取込・同期を意図的に無効化している場合は異常扱いしない。
 - `Usage` は現在値カードを上段に置き、選択したカードの経時変化グラフ領域を下段に置く。
 - グラフ領域は横軸ラベルを持ち、履歴データが未実装の段階でも表示期間切り替えUIを用意する。
 - 履歴保存テーブル、サンプリングJob、保持期間、履歴APIは後続Phaseで強化する。

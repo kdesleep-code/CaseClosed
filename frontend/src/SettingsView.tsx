@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import type { FormEvent } from 'react'
-import { t } from './i18n'
+import type { ChangeEvent, FormEvent } from 'react'
+import { readUiLanguage, t, writeUiLanguage } from './i18n'
 import { TopNav } from './navigation'
 import { readLlmCostHistory, runGoogleSpeedTest, updateLlmCostSettings } from './phase2Api'
 import type { GoogleSpeedTestResult, LlmCostHistory } from './phase2Api'
@@ -24,12 +24,13 @@ import type {
   LlmModelConfig,
 } from './phase4Api'
 
-type SettingsTab = 'google' | 'llm' | 'budget'
+type SettingsTab = 'google' | 'llm' | 'budget' | 'language'
 
 const settingsTabs = [
   { key: 'google', labelKey: 'settings.tab.google' },
   { key: 'llm', labelKey: 'settings.tab.llm' },
   { key: 'budget', labelKey: 'settings.tab.budget' },
+  { key: 'language', labelKey: 'settings.tab.language' },
 ] as const
 
 function describeError(error: unknown) {
@@ -77,6 +78,7 @@ function SettingsView() {
   const [llmBlockQuery, setLlmBlockQuery] = useState('password')
   const [llmBlockReason, setLlmBlockReason] = useState('May contain password.')
   const [llmMonthlyBudget, setLlmMonthlyBudget] = useState('')
+  const [uiLanguage, setUiLanguage] = useState(() => readUiLanguage())
 
   useEffect(() => {
     if (!new URLSearchParams(window.location.search).has('google_gmail')) return
@@ -343,6 +345,18 @@ function SettingsView() {
     } finally {
       setBusyId(null)
     }
+  }
+
+  function handleLanguageChange(event: ChangeEvent<HTMLSelectElement>) {
+    const value = event.target.value
+    setUiLanguage(value === 'ja' ? 'ja' : 'en')
+  }
+
+  function handleLanguageSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    writeUiLanguage(uiLanguage)
+    setNotice(t('settings.language.saved'))
+    window.setTimeout(() => window.location.reload(), 120)
   }
 
   return (
@@ -659,6 +673,27 @@ function SettingsView() {
                     </table>
                   </div>
                 </section>
+              </section>
+            )}
+
+            {activeTab === 'language' && (
+              <section aria-labelledby="settings-language-tab" className="maintenance-panel maintenance-section" id="settings-language-panel" role="tabpanel">
+                <div className="section-heading">
+                  <div>
+                    <h2>{t('settings.language.heading')}</h2>
+                    <p>{t('settings.language.description')}</p>
+                  </div>
+                </div>
+                <form className="settings-form settings-google-form" onSubmit={handleLanguageSettings}>
+                  <label>
+                    <span>{t('settings.language.label')}</span>
+                    <select onChange={handleLanguageChange} value={uiLanguage}>
+                      <option value="en">{t('settings.language.english')}</option>
+                      <option value="ja">{t('settings.language.japanese')}</option>
+                    </select>
+                  </label>
+                  <button disabled={busyId !== null} type="submit">{t('common.save')}</button>
+                </form>
               </section>
             )}
 

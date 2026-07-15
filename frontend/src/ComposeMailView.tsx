@@ -17,6 +17,7 @@ import {
   deleteMailDraft,
   generateMailDraft,
   getMailDraftGenerationStandardPrompt,
+  getMailSendRequest,
   listMailDrafts,
   resolveMailDraftAttachments,
   saveMailDraft,
@@ -81,7 +82,7 @@ function initialStateFromQuery(): ComposeState {
   return {
     to: params.get('to') ?? '',
     cc: params.get('cc') ?? '',
-    bcc: '',
+    bcc: params.get('bcc') ?? '',
     subject: params.get('subject') ?? '',
     body: params.get('manual_body') ?? '',
     autoBody: params.get('auto_body') ?? params.get('body') ?? '',
@@ -149,6 +150,10 @@ function loadLlmGenerationStandardPrompt() {
 
 function signatureText(content: string) {
   return content.trimEnd()
+}
+
+function canceledSendRequestIdFromQuery() {
+  return new URLSearchParams(window.location.search).get('canceled_send_request_id')
 }
 
 function replyToMessageIdFromQuery() {
@@ -289,7 +294,9 @@ export default function ComposeMailView() {
   )
   const [llmGenerationLanguage, setLlmGenerationLanguage] =
     useState<LlmGenerationLanguage>('japanese')
-  const [replyToMessageId] = useState<string | null>(() => replyToMessageIdFromQuery())
+  const [replyToMessageId, setReplyToMessageId] = useState<string | null>(() =>
+    replyToMessageIdFromQuery(),
+  )
   const [showCcBcc, setShowCcBcc] = useState(() => {
     const params = new URLSearchParams(window.location.search)
     return (params.get('cc') ?? '') !== ''
@@ -304,6 +311,59 @@ export default function ComposeMailView() {
   const [llmGenerationInstruction, setLlmGenerationInstruction] = useState('')
   const bodyRef = useRef<HTMLTextAreaElement | null>(null)
   const llmInstructionRef = useRef<HTMLTextAreaElement | null>(null)
+
+  useEffect(() => {
+    const sendRequestId = canceledSendRequestIdFromQuery()
+    if (sendRequestId === null) return
+
+    let canceled = false
+    setIsDraftBusy(true)
+    void getMailSendRequest(sendRequestId)
+      .then(async (sendRequest) => {
+        const loadedAttachments = await Promise.all(
+          (sendRequest.attachments ?? []).map(async (attachment, index) => {
+            const response = await fetch(attachment.download_url, { credentials: 'include' })
+            if (!response.ok) throw new Error(t('mail.compose.canceledLoadFailed'))
+            const blob = await response.blob()
+            const file = new File([blob], attachment.filename, {
+              type: (attachment.mime_type ?? blob.type) || 'application/octet-stream',
+            })
+            return {
+              id: `${sendRequest.id}:${index}`,
+              key: `${sendRequest.id}:${index}:${attachment.byte_size}`,
+              file,
+              name: attachment.filename,
+              contentType: file.type,
+              size: file.size,
+            }
+          }),
+        )
+        if (canceled) return
+        setForm({
+          to: sendRequest.to_addresses.join(', '),
+          cc: sendRequest.cc_addresses.join(', '),
+          bcc: sendRequest.bcc_addresses.join(', '),
+          subject: sendRequest.subject ?? '',
+          body: sendRequest.body_text,
+          autoBody: '',
+        })
+        setReplyToMessageId(sendRequest.reply_to_message_id)
+        setSelectedSignatureId(noneSignature.id)
+        setAttachments(loadedAttachments)
+        setScheduledAt(isoToLocalDateTime(sendRequest.scheduled_at))
+        setShowSchedule(sendRequest.scheduled_at !== null)
+        setFeedback(t('mail.compose.canceledLoaded'))
+      })
+      .catch((requestError) => {
+        if (!canceled) setError(describeError(requestError))
+      })
+      .finally(() => {
+        if (!canceled) setIsDraftBusy(false)
+      })
+    return () => {
+      canceled = true
+    }
+  }, [])
 
   useEffect(() => {
     const selectedSignature =

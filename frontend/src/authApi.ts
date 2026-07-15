@@ -9,12 +9,14 @@ export type SessionData = {
   client_certificate_id: string | null
   device_name: string | null
   ip_address: string | null
+  access_mode: 'full' | 'low_mail_review'
 }
 
 export type LoginData = {
   session_expires_at: string
   device_name: string | null
   ip_address: string | null
+  access_mode: 'full' | 'low_mail_review'
 }
 
 type SuccessResponse<T> = {
@@ -63,6 +65,10 @@ async function request<T>(
 export async function readSession(): Promise<SessionData> {
   const response = await request<SessionData>('/api/v1/auth/session')
   return response.data
+}
+
+export async function logout(): Promise<void> {
+  await request<Record<string, never>>('/api/v1/auth/logout', { method: 'POST' })
 }
 
 export async function login(password: string): Promise<LoginData> {

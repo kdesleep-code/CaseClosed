@@ -25,6 +25,7 @@ function activeSessionResponse() {
       client_certificate_id: 'cert_test',
       device_name: 'Bootstrap device',
       ip_address: '127.0.0.1',
+      access_mode: 'full',
     },
   })
 }

@@ -805,7 +805,13 @@ def test_low_and_skip_case_mail_do_not_put_case_in_user_ball(client, database_pa
     assert created_cases["skip"] in waiting_ids
 
 
-def test_case_can_be_completed_reopened_and_archived(client) -> None:
+def test_case_can_be_completed_reopened_and_archived(client, database_path) -> None:
+    genre_response = client.post(
+        "/api/v1/cases/genres",
+        json={"title": "State Genre", "color_hex": "#4477aa"},
+    )
+    assert genre_response.status_code == 200
+    genre_id = genre_response.json()["data"]["genre"]["id"]
     case_response = client.post(
         "/api/v1/cases",
         json={
@@ -813,10 +819,12 @@ def test_case_can_be_completed_reopened_and_archived(client) -> None:
             "description": None,
             "progress_status": "waiting",
             "ball_status": "other",
+            "genre_id": genre_id,
         },
     )
     assert case_response.status_code == 200
     case_id = case_response.json()["data"]["case"]["id"]
+    storage_directory_id = case_response.json()["data"]["case"]["storage_directory_id"]
 
     complete_response = client.post(f"/api/v1/cases/{case_id}/complete")
 
@@ -851,6 +859,20 @@ def test_case_can_be_completed_reopened_and_archived(client) -> None:
     archived_case = archive_response.json()["data"]["case"]
     assert archived_case["closed_at"] is None
     assert archived_case["archived_at"] is not None
+    with sqlite3.connect(database_path) as connection:
+        archived_parent = connection.execute(
+            """
+            SELECT parent.name, parent.parent_id
+            FROM storage_directories AS case_directory
+            JOIN storage_directories AS parent ON parent.id = case_directory.parent_id
+            WHERE case_directory.id = ?
+            """,
+            (storage_directory_id,),
+        ).fetchone()
+        genre_directory_id = connection.execute(
+            "SELECT id FROM storage_directories WHERE name = 'State Genre' AND parent_id IS NULL"
+        ).fetchone()[0]
+    assert archived_parent == ("Archived Cases", genre_directory_id)
     assert case_id in {
         item["id"]
         for item in client.get("/api/v1/cases?status=archived").json()["data"][
@@ -867,6 +889,20 @@ def test_case_can_be_completed_reopened_and_archived(client) -> None:
         "previous_progress_status": "waiting",
         "previous_ball_status": "none",
     }
+
+    reopened_again_response = client.post(f"/api/v1/cases/{case_id}/reopen")
+    assert reopened_again_response.status_code == 200
+    with sqlite3.connect(database_path) as connection:
+        reopened_parent = connection.execute(
+            """
+            SELECT parent.name, parent.parent_id
+            FROM storage_directories AS case_directory
+            JOIN storage_directories AS parent ON parent.id = case_directory.parent_id
+            WHERE case_directory.id = ?
+            """,
+            (storage_directory_id,),
+        ).fetchone()
+    assert reopened_parent == ("State Genre", None)
 
 
 def test_system_case_cannot_be_completed_or_archived(client) -> None:
@@ -916,7 +952,19 @@ def test_case_genres_can_be_managed(client, database_path) -> None:
         },
     )
     assert case_response.status_code == 200
-    assert case_response.json()["data"]["case"]["genre_id"] == genre["id"]
+    created_case = case_response.json()["data"]["case"]
+    assert created_case["genre_id"] == genre["id"]
+    with sqlite3.connect(database_path) as connection:
+        case_parent_name = connection.execute(
+            """
+            SELECT parent.name
+            FROM storage_directories AS case_directory
+            JOIN storage_directories AS parent ON parent.id = case_directory.parent_id
+            WHERE case_directory.id = ?
+            """,
+            (created_case["storage_directory_id"],),
+        ).fetchone()[0]
+    assert case_parent_name == "Committee"
 
     list_response = client.get("/api/v1/cases/genres")
     assert list_response.status_code == 200
@@ -949,8 +997,38 @@ def test_case_genres_can_be_managed(client, database_path) -> None:
             ).fetchone()[0]
             is None
         )
+        moved_parent_name = connection.execute(
+            """
+            SELECT parent.name
+            FROM storage_directories AS case_directory
+            JOIN storage_directories AS parent ON parent.id = case_directory.parent_id
+            WHERE case_directory.id = ?
+            """,
+            (created_case["storage_directory_id"],),
+        ).fetchone()[0]
+        deleted_genre_statuses = connection.execute(
+            """
+            SELECT status
+            FROM storage_directories
+            WHERE id IN (?, ?)
+            ORDER BY id
+            """,
+            (
+                f"storage_directory_case_genre_{genre['id']}",
+                f"storage_directory_case_genre_{genre['id']}_archived_cases",
+            ),
+        ).fetchall()
+    assert moved_parent_name == "No genre"
+    assert [row[0] for row in deleted_genre_statuses] == ["archived", "archived"]
 
-def test_case_can_be_created_with_case_storage_directory(client, app, database_path) -> None:
+
+def test_case_can_be_created_with_case_storage_directory(client, database_path) -> None:
+    genre_response = client.post(
+        "/api/v1/cases/genres",
+        json={"title": "Research", "color_hex": "#33aaff"},
+    )
+    assert genre_response.status_code == 200
+    genre = genre_response.json()["data"]["genre"]
     response = client.post(
         "/api/v1/cases",
         json={
@@ -960,6 +1038,7 @@ def test_case_can_be_created_with_case_storage_directory(client, app, database_p
             "closed_when_text": "Close when all linked tasks are done.",
             "progress_status": "in_progress",
             "ball_status": "user",
+            "genre_id": genre["id"],
             "tags": ["Research", "Annual", "research"],
         },
     )
@@ -980,21 +1059,25 @@ def test_case_can_be_created_with_case_storage_directory(client, app, database_p
     with sqlite3.connect(database_path) as connection:
         directory = connection.execute(
             """
-            SELECT name, directory_kind, case_id, status
-            FROM storage_directories
-            WHERE case_id = ?
+            SELECT case_directory.name, case_directory.directory_kind, case_directory.case_id,
+                   case_directory.status, genre_directory.name, genre_directory.parent_id
+            FROM storage_directories AS case_directory
+            JOIN storage_directories AS genre_directory ON genre_directory.id = case_directory.parent_id
+            WHERE case_directory.id = ?
             """,
-            (created_case["id"],),
+            (created_case["storage_directory_id"],),
         ).fetchone()
-    assert directory == ("Phase 7 Base Case", "case", created_case["id"], "active")
-
-    case_delete_routes = [
-        route
-        for route in app.routes
-        if "DELETE" in getattr(route, "methods", set())
-        and getattr(route, "path", "") == "/api/v1/cases/{case_id}"
-    ]
-    assert len(case_delete_routes) == 1
+        archived_directory = connection.execute(
+            """
+            SELECT archived.name, archived.parent_id, archived.case_id, archived.status
+            FROM storage_directories AS archived
+            JOIN storage_directories AS genre_directory ON genre_directory.id = archived.parent_id
+            WHERE genre_directory.name = 'Research' AND archived.name = 'Archived Cases'
+            """
+        ).fetchone()
+    assert directory == ("Phase 7 Base Case", "case", created_case["id"], "active", "Research", None)
+    assert archived_directory[0] == "Archived Cases"
+    assert archived_directory[2:] == (None, "active")
 
 
 def test_case_overview_can_be_updated(client) -> None:

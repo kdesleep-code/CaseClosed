@@ -25,12 +25,16 @@ from caseclosed.db.runtime import jst_iso
 from caseclosed.db.runtime import jst_now
 from caseclosed.db.runtime import parse_iso_datetime
 from caseclosed.settings import get_bootstrap_password
+from caseclosed.settings import get_low_mail_review_password
 from caseclosed.settings import get_session_lifetime_override_minutes
 from caseclosed.settings import is_secure_cookie_enabled
 
 SESSION_COOKIE_NAME = "caseclosed_session"
 PASSWORD_HASH_KEY = "auth_password_hash"
+LOW_MAIL_REVIEW_PASSWORD_HASH_KEY = "auth_low_mail_review_password_hash"
 LOGIN_LOCK_KEY = "auth_login_locked"
+ACCESS_MODE_FULL = "full"
+ACCESS_MODE_LOW_MAIL_REVIEW = "low_mail_review"
 
 password_hasher = PasswordHasher()
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -99,6 +103,33 @@ def ensure_password_hash(session: DatabaseSession) -> str:
 def verify_password(session: DatabaseSession, password: str) -> bool:
     try:
         return password_hasher.verify(ensure_password_hash(session), password)
+    except VerifyMismatchError:
+        return False
+
+
+def ensure_low_mail_review_password_hash(session: DatabaseSession) -> str | None:
+    setting = read_setting(session, LOW_MAIL_REVIEW_PASSWORD_HASH_KEY)
+    if setting is not None:
+        return setting.value_json
+
+    password = get_low_mail_review_password()
+    if password is None:
+        return None
+    password_hash = password_hasher.hash(password)
+    upsert_setting(session, LOW_MAIL_REVIEW_PASSWORD_HASH_KEY, password_hash)
+    session.flush()
+    return password_hash
+
+
+def verify_low_mail_review_password(
+    session: DatabaseSession,
+    password: str,
+) -> bool:
+    password_hash = ensure_low_mail_review_password_hash(session)
+    if password_hash is None:
+        return False
+    try:
+        return password_hasher.verify(password_hash, password)
     except VerifyMismatchError:
         return False
 
@@ -213,6 +244,28 @@ def session_from_cookie(
     return app_session
 
 
+def session_access_mode(request: Request) -> str:
+    token = request.cookies.get(SESSION_COOKIE_NAME, "")
+    return (
+        ACCESS_MODE_LOW_MAIL_REVIEW
+        if token.startswith(f"{ACCESS_MODE_LOW_MAIL_REVIEW}.")
+        else ACCESS_MODE_FULL
+    )
+
+
+def require_session_access_mode(
+    session: DatabaseSession,
+    request: Request,
+    required_mode: str,
+) -> Session:
+    app_session = session_from_cookie(session, request)
+    if app_session is None:
+        raise json_error(401, "UNAUTHORIZED", "No active session.")
+    if session_access_mode(request) != required_mode:
+        raise json_error(403, "FORBIDDEN", "This session cannot access this resource.")
+    return app_session
+
+
 @router.post("/login")
 def login(
     payload: LoginRequest,
@@ -225,22 +278,26 @@ def login(
         session.commit()
         raise json_error(423, "LOGIN_LOCKED", "Login is locked.")
 
+    access_mode = ACCESS_MODE_FULL
     if not verify_password(session, payload.password):
-        record_attempt(session, request, success=False, failure_reason="invalid_password")
-        if consecutive_failures(session) >= setting_int(
-            session,
-            "login_failure_limit",
-            5,
-        ):
-            upsert_setting(session, LOGIN_LOCK_KEY, "true")
-        session.commit()
-        raise json_error(401, "INVALID_CREDENTIALS", "Invalid password.")
+        if verify_low_mail_review_password(session, payload.password):
+            access_mode = ACCESS_MODE_LOW_MAIL_REVIEW
+        else:
+            record_attempt(session, request, success=False, failure_reason="invalid_password")
+            if consecutive_failures(session) >= setting_int(
+                session,
+                "login_failure_limit",
+                5,
+            ):
+                upsert_setting(session, LOGIN_LOCK_KEY, "true")
+            session.commit()
+            raise json_error(401, "INVALID_CREDENTIALS", "Invalid password.")
 
     record_attempt(session, request, success=True)
     certificate = get_or_create_test_certificate(session, request)
     now = jst_now()
     expires_at = jst_iso(now + session_lifetime(session))
-    session_token = secrets.token_urlsafe(32)
+    session_token = f"{access_mode}.{secrets.token_urlsafe(32)}"
     session.add(
         Session(
             id=f"session_{uuid4().hex}",
@@ -269,6 +326,7 @@ def login(
             "session_expires_at": expires_at,
             "ip_address": request.client.host if request.client is not None else None,
             "device_name": certificate.device_name if certificate is not None else None,
+            "access_mode": access_mode,
         },
     }
 
@@ -295,6 +353,7 @@ def session_status(
             "client_certificate_id": app_session.client_certificate_id,
             "device_name": certificate.device_name if certificate is not None else None,
             "ip_address": app_session.ip_address,
+            "access_mode": session_access_mode(request),
         },
     }
 

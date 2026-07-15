@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter
 from fastapi import Depends
+from fastapi import Request
 from fastapi.responses import FileResponse
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -19,7 +20,9 @@ from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DatabaseSession
 
+from caseclosed.auth import ACCESS_MODE_LOW_MAIL_REVIEW
 from caseclosed.auth import json_error
+from caseclosed.auth import require_session_access_mode
 from caseclosed.contact_selectors import resolve_recipient_selectors
 from caseclosed.db.models import AppSetting
 from caseclosed.db.models import Case
@@ -31,6 +34,7 @@ from caseclosed.db.models import ContactEmailAddress
 from caseclosed.db.models import ContactTag
 from caseclosed.db.models import GmailMessage
 from caseclosed.db.models import GmailMessageAttachment
+from caseclosed.db.models import GmailThread
 from caseclosed.db.models import Job
 from caseclosed.db.models import LlmRun
 from caseclosed.db.models import MailAutoState
@@ -118,6 +122,10 @@ class MailThreadCaseAssignRequest(BaseModel):
 
 class MailImportanceRequest(BaseModel):
     importance: str
+
+
+class MailThreadImportanceRuleRequest(BaseModel):
+    future_importance_rule: str | None = None
 
 
 class MailProcessRequest(BaseModel):
@@ -1239,6 +1247,31 @@ def thread_messages(session: DatabaseSession, thread_id: str) -> list[GmailMessa
     ).all()
 
 
+def apply_case_link_importance_floor(
+    session: DatabaseSession,
+    thread_id: str,
+    now: str,
+) -> list[str]:
+    rows = session.execute(
+        select(GmailMessage, MailAutoState)
+        .join(MailAutoState, MailAutoState.message_id == GmailMessage.id)
+        .where(GmailMessage.thread_id == thread_id)
+    ).all()
+    changed_message_ids: list[str] = []
+    for thread_message, auto_state in rows:
+        if (
+            auto_state.llm_run_id is None
+            or auto_state.effective_importance in {"pinned", "high", "middle"}
+        ):
+            continue
+        auto_state.effective_importance = "middle"
+        auto_state.updated_at = now
+        auto_state.version += 1
+        enqueue_mail_summary_job(session, thread_message, now)
+        changed_message_ids.append(thread_message.id)
+    return changed_message_ids
+
+
 def mail_thread_case_link_items(
     session: DatabaseSession,
     thread_id: str,
@@ -1707,6 +1740,7 @@ def detail_data(
         .order_by(MailSendRequest.scheduled_at, MailSendRequest.created_at, MailSendRequest.id)
     ).all()
     thread_summary = stored_thread_summary(session, message.thread_id)
+    thread = session.get(GmailThread, message.thread_id)
     return {
         "message": message_data(
             message,
@@ -1729,6 +1763,9 @@ def detail_data(
             mail_send_request_data(send_request)
             for send_request in scheduled_send_requests
         ],
+        "future_importance_rule": (
+            thread.future_importance_rule if thread is not None else None
+        ),
         "user_state": user_state_data(user_state),
         "auto_state": auto_state_data(auto_state, user_state),
         "summary": (
@@ -2456,6 +2493,15 @@ def list_mail_send_requests(
     }
 
 
+@router.get("/send-requests/{send_request_id}")
+def get_mail_send_request(
+    send_request_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    send_request = get_send_request_or_404(session, send_request_id)
+    return {"ok": True, "data": mail_send_request_data(send_request)}
+
+
 def get_send_request_or_404(
     session: DatabaseSession,
     send_request_id: str,
@@ -2530,6 +2576,107 @@ def cancel_mail_send_request(
     send_request.version += 1
     session.commit()
     return {"ok": True, "data": mail_send_request_data(send_request)}
+
+
+def low_mail_review_item_data(
+    session: DatabaseSession,
+    message: GmailMessage,
+    user_state: MailUserState,
+    auto_state: MailAutoState,
+    *,
+    include_body: bool = False,
+) -> dict[str, object]:
+    item = list_item_data(session, message, user_state, auto_state)
+    item["snippet"] = message.snippet
+    if include_body:
+        item["body_text"] = message.body_text
+    return item
+
+
+def mail_is_available_for_low_review(
+    message: GmailMessage,
+    user_state: MailUserState,
+    auto_state: MailAutoState,
+) -> bool:
+    return (
+        not message_is_sent(message)
+        and message.received_at[:10] == jst_now().date().isoformat()
+        and auto_state.pending_reason is None
+        and (user_state.user_importance or auto_state.effective_importance)
+        in {"low", "skip"}
+    )
+
+
+@router.get("/review/today")
+def list_today_low_mail_review(
+    request: Request,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    require_session_access_mode(session, request, ACCESS_MODE_LOW_MAIL_REVIEW)
+    today = jst_now().date().isoformat()
+    rows = session.execute(
+        select(GmailMessage, MailUserState, MailAutoState)
+        .join(MailUserState, MailUserState.message_id == GmailMessage.id)
+        .join(MailAutoState, MailAutoState.message_id == GmailMessage.id)
+        .where(GmailMessage.received_at >= f"{today}T00:00:00+09:00")
+        .where(GmailMessage.received_at <= f"{today}T23:59:59.999999+09:00")
+        .order_by(GmailMessage.received_at.desc(), GmailMessage.id.desc())
+    ).all()
+    items = [
+        low_mail_review_item_data(session, message, user_state, auto_state)
+        for message, user_state, auto_state in rows
+        if mail_is_available_for_low_review(message, user_state, auto_state)
+    ]
+    items.sort(
+        key=lambda item: 0 if item["effective_importance"] == "low" else 1
+    )
+    return {"ok": True, "data": {"date": today, "items": items}}
+
+
+@router.get("/review/{message_id}")
+def get_low_mail_review_detail(
+    message_id: str,
+    request: Request,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    require_session_access_mode(session, request, ACCESS_MODE_LOW_MAIL_REVIEW)
+    message, user_state, auto_state = get_mail_bundle(session, message_id)
+    if not mail_is_available_for_low_review(message, user_state, auto_state):
+        raise json_error(404, "NOT_FOUND", "Mail is not available for review.")
+    return {
+        "ok": True,
+        "data": low_mail_review_item_data(
+            session,
+            message,
+            user_state,
+            auto_state,
+            include_body=True,
+        ),
+    }
+
+
+@router.post("/review/{message_id}/promote-to-middle")
+def promote_review_mail_to_middle(
+    message_id: str,
+    request: Request,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    require_session_access_mode(session, request, ACCESS_MODE_LOW_MAIL_REVIEW)
+    message, user_state, auto_state = get_mail_bundle(session, message_id)
+    if not mail_is_available_for_low_review(message, user_state, auto_state):
+        raise json_error(409, "CONFLICT", "Mail is not available for review.")
+
+    now = jst_iso()
+    user_state.user_importance = "middle"
+    user_state.updated_at = now
+    user_state.version += 1
+    auto_state.effective_importance = "middle"
+    auto_state.updated_at = now
+    auto_state.version += 1
+    enqueue_mail_summary_job(session, message, now)
+    session.commit()
+    kick_job_drain(reason="review_mail_promoted")
+    return {"ok": True, "data": {"id": message.id, "importance": "middle"}}
 
 
 @router.get("")
@@ -3070,6 +3217,7 @@ def assign_mail_thread_to_case(
             )
         )
     ensure_case_stakeholders_for_mail_senders(session, case, messages, now=now)
+    apply_case_link_importance_floor(session, message.thread_id, now)
     case.updated_at = now
     case.version += 1
     session.commit()
@@ -3096,6 +3244,27 @@ def unassign_mail_thread_from_case(
         now = jst_iso()
         case.updated_at = now
         case.version += 1
+    session.commit()
+    return {"ok": True, "data": detail_data(session, message, user_state, auto_state)}
+
+
+@router.patch("/{message_id}/thread-importance-rule")
+def update_mail_thread_importance_rule(
+    message_id: str,
+    payload: MailThreadImportanceRuleRequest,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    message, user_state, auto_state = get_mail_bundle(session, message_id)
+    rule = payload.future_importance_rule
+    if rule not in {None, "low"}:
+        raise json_error(422, "VALIDATION_ERROR", "Unsupported thread importance rule.")
+    thread = session.get(GmailThread, message.thread_id)
+    if thread is None:
+        raise json_error(500, "DATA_INTEGRITY_ERROR", "Mail thread is missing.")
+    now = jst_iso()
+    thread.future_importance_rule = rule
+    thread.updated_at = now
+    thread.version += 1
     session.commit()
     return {"ok": True, "data": detail_data(session, message, user_state, auto_state)}
 

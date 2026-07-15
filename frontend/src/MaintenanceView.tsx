@@ -21,7 +21,9 @@ import type {
   ExternalOperation,
   Job,
   LlmCostHistory,
+  MaintenanceIntegrationHealth,
   MaintenanceStatus,
+  MaintenanceSystemHealth,
   PendingMail,
 } from './phase2Api'
 import type { StorageLocation } from './phase3Api'
@@ -228,6 +230,132 @@ function formatNumber(value: number | null | undefined) {
   return new Intl.NumberFormat('en-US').format(value)
 }
 
+function formatHealthTime(value: string | null | undefined) {
+  if (value === null || value === undefined) return t('common.none')
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
+}
+
+function healthStatusLabel(status: string) {
+  const key = `maintenance.health.status.${status}` as MessageKey
+  return t(key)
+}
+
+function HealthBadge({ status }: { status: string }) {
+  return (
+    <span className="maintenance-health-badge" data-health={status}>
+      {healthStatusLabel(status)}
+    </span>
+  )
+}
+
+function IntegrationHealthRow({
+  label,
+  integration,
+}: {
+  label: string
+  integration: MaintenanceIntegrationHealth
+}) {
+  return (
+    <tr>
+      <th scope="row">{label}</th>
+      <td><HealthBadge status={integration.status} /></td>
+      <td>
+        {integration.enabled
+          ? t('maintenance.health.everyMinutes', {
+              minutes: integration.interval_minutes,
+            })
+          : t('maintenance.health.status.disabled')}
+      </td>
+      <td>{formatHealthTime(integration.last_success_at)}</td>
+      <td className={integration.last_error ? 'maintenance-health-error' : undefined}>
+        {integration.last_error ?? t('common.none')}
+      </td>
+    </tr>
+  )
+}
+
+function SystemHealthPanel({
+  health,
+  refreshing,
+  onRefresh,
+}: {
+  health: MaintenanceSystemHealth
+  refreshing: boolean
+  onRefresh: () => void
+}) {
+  return (
+    <section aria-labelledby="system-health-heading" className="maintenance-health">
+      <div className="section-heading">
+        <div>
+          <div className="maintenance-health-title">
+            <h3 id="system-health-heading">{t('maintenance.health.heading')}</h3>
+            <HealthBadge status={health.status} />
+          </div>
+          <p>
+            {t('maintenance.health.checkedAt', {
+              time: formatHealthTime(health.checked_at),
+            })}
+          </p>
+        </div>
+        <button
+          className={`button-loading-dot${refreshing ? ' is-loading' : ''}`}
+          disabled={refreshing}
+          onClick={onRefresh}
+          type="button"
+        >
+          {t('maintenance.health.refresh')}
+        </button>
+      </div>
+
+      <div className="maintenance-health-queue">
+        {(['pending', 'scheduled', 'running', 'failed', 'stale'] as const).map((key) => (
+          <div data-health={key === 'failed' || key === 'stale' ? 'attention' : 'neutral'} key={key}>
+            <span>{t(`maintenance.health.queue.${key}` as MessageKey)}</span>
+            <strong>{formatNumber(health.queue[key])}</strong>
+          </div>
+        ))}
+      </div>
+
+      <div className="maintenance-table-wrap maintenance-health-table">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">{t('maintenance.health.service')}</th>
+              <th scope="col">{t('common.status')}</th>
+              <th scope="col">{t('maintenance.health.schedule')}</th>
+              <th scope="col">{t('maintenance.health.lastSuccess')}</th>
+              <th scope="col">{t('maintenance.health.lastError')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row">{t('maintenance.health.worker')}</th>
+              <td><HealthBadge status={health.worker.status} /></td>
+              <td>
+                {t('maintenance.health.workerCount', {
+                  alive: health.worker.alive_workers,
+                  configured: health.worker.configured_workers,
+                })}
+              </td>
+              <td>{formatHealthTime(health.worker.last_job_activity_at)}</td>
+              <td>{t('common.none')}</td>
+            </tr>
+            <IntegrationHealthRow
+              integration={health.gmail_auto_import}
+              label={t('maintenance.health.gmail')}
+            />
+            <IntegrationHealthRow
+              integration={health.calendar_auto_sync}
+              label={t('maintenance.health.calendar')}
+            />
+          </tbody>
+        </table>
+      </div>
+    </section>
+  )
+}
+
 function jobStatusDetail(job: Job) {
   const reason = [job.error_type, job.error_message].filter(Boolean).join(' - ')
   if (job.status === 'failed') {
@@ -323,6 +451,7 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
   )
   const [error, setError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
+  const [refreshingHealth, setRefreshingHealth] = useState(false)
   const [activeTab, setActiveTab] = useState<MaintenanceTab>(initialMaintenanceTab)
   const [activeUsageMetric, setActiveUsageMetric] =
     useState<UsageMetric>(usageMetrics[0])
@@ -363,6 +492,26 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
       isMounted = false
     }
   }, [initialData])
+
+  useEffect(() => {
+    if (initialData !== undefined) return
+    const intervalId = window.setInterval(() => {
+      readMaintenanceStatus().then(setStatus).catch(() => undefined)
+    }, 30_000)
+    return () => window.clearInterval(intervalId)
+  }, [initialData])
+
+  async function handleHealthRefresh() {
+    setRefreshingHealth(true)
+    setError(null)
+    try {
+      setStatus(await readMaintenanceStatus())
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setRefreshingHealth(false)
+    }
+  }
 
   useEffect(() => {
     if (activeTab !== 'usage' || activeUsageMetric.key !== 'llm-cost') {
@@ -544,6 +693,14 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                 <div className="section-heading">
                   <h2 id="usage-heading">{t('maintenance.usage')}</h2>
                 </div>
+
+                {status?.system_health !== undefined && (
+                  <SystemHealthPanel
+                    health={status.system_health}
+                    onRefresh={handleHealthRefresh}
+                    refreshing={refreshingHealth}
+                  />
+                )}
 
                 <div className="usage-grid">
                   {usageMetrics.map((metric) => (

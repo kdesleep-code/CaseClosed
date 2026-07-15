@@ -1225,11 +1225,23 @@ def test_case_storage_directory_is_listed_and_protected(
     root_directories = client.get("/api/v1/storage/directories")
 
     assert root_directories.status_code == 200
-    case_directory = next(
+    no_genre_directory = next(
         item
         for item in root_directories.json()["data"]["items"]
-        if item["case_id"] == "case_system_inbox"
+        if item["name"] == "No genre"
     )
+    assert no_genre_directory["directory_kind"] == "normal"
+    assert no_genre_directory["case_id"] is None
+
+    no_genre_children = client.get(
+        f"/api/v1/storage/directories?parent_id={no_genre_directory['id']}"
+    )
+    assert no_genre_children.status_code == 200
+    child_items = no_genre_children.json()["data"]["items"]
+    archived_directory = next(item for item in child_items if item["name"] == "Archived Cases")
+    assert archived_directory["directory_kind"] == "normal"
+    assert archived_directory["case_id"] is None
+    case_directory = next(item for item in child_items if item["case_id"] == "case_system_inbox")
     assert case_directory["name"] == "Bucket"
     assert case_directory["directory_kind"] == "case"
 
@@ -1815,6 +1827,43 @@ ER  -
     assert ris_paper["bibtex_entry"]["year"] == "2004"
     assert ris_paper["bibtex_entry"]["doi"] == "10.1111/jsr.2004"
 
+    nbib = b"""PMID- 12345678
+TI  - Circadian Methods for CaseClosed Papers:
+      a practical validation study.
+FAU - Yamada, Taro
+AU  - Yamada T
+FAU - Smith, Alice
+AU  - Smith A
+JT  - Journal of PubMed Imports
+DP  - 2025 Jan
+VI  - 12
+IP  - 3
+PG  - 10-18
+LID - 10.5555/nbib.caseclosed [doi]
+AB  - This abstract continues
+      across multiple MEDLINE lines.
+"""
+    nbib_response = client.post(
+        "/api/v1/storage/papers/upload",
+        files={
+            "file": ("pubmed-import.pdf", simple_pdf_bytes(["nbib paper"]), "application/pdf"),
+            "bibtex_file": ("pubmed-import.nbib", nbib, "application/x-nbib"),
+        },
+    )
+    assert nbib_response.status_code == 200
+    nbib_paper = nbib_response.json()["data"]["paper"]
+    assert nbib_paper["title"] == "Circadian Methods for CaseClosed Papers: a practical validation study."
+    assert nbib_paper["authors_text"] == "Yamada, Taro and Smith, Alice"
+    assert nbib_paper["bibtex_entry"]["entry_type"] == "article"
+    assert nbib_paper["bibtex_entry"]["entry_key"] == "10.5555/nbib.caseclosed"
+    assert nbib_paper["bibtex_entry"]["authors"] == ["Yamada, Taro", "Smith, Alice"]
+    assert nbib_paper["bibtex_entry"]["journal"] == "Journal of PubMed Imports"
+    assert nbib_paper["bibtex_entry"]["year"] == "2025"
+    assert nbib_paper["bibtex_entry"]["doi"] == "10.5555/nbib.caseclosed"
+    assert nbib_paper["bibtex_entry"]["url"] == "https://pubmed.ncbi.nlm.nih.gov/12345678/"
+    assert nbib_paper["bibtex_entry"]["abstract"] == "This abstract continues across multiple MEDLINE lines."
+    assert nbib_paper["bibtex_entry"]["fields"]["pmid"] == "12345678"
+
     assert root_objects.status_code == 200
     assert storage_object["id"] not in [
         item["id"] for item in root_objects.json()["data"]["items"]
@@ -1822,7 +1871,7 @@ ER  -
 
     list_response = client.get("/api/v1/storage/papers")
     assert list_response.status_code == 200
-    assert {item["id"] for item in list_response.json()["data"]["items"]} == {paper["id"], ris_paper["id"]}
+    assert {item["id"] for item in list_response.json()["data"]["items"]} == {paper["id"], ris_paper["id"], nbib_paper["id"]}
 
     update_response = client.patch(
         f"/api/v1/storage/papers/{paper['id']}",

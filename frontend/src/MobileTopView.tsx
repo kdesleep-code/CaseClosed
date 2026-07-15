@@ -8,7 +8,7 @@ import { readMaintenanceStatus } from './phase2Api'
 import type { MaintenanceStatus } from './phase2Api'
 import { listTasks } from './phase8Api'
 import type { TaskItem } from './phase8Api'
-import { readMobileQuickSlot } from './mobileQuickSlot'
+import { loadMobileQuickSlot, readMobileQuickSlot } from './mobileQuickSlot'
 import type { MobileQuickSlot } from './mobileQuickSlot'
 import './MobileTopView.css'
 
@@ -155,7 +155,7 @@ export default function MobileTopView() {
   const [today] = useState(() => jstDateToday())
   const [data, setData] = useState<MobileTopData | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [quickSlot] = useState<MobileQuickSlot | null>(() => readMobileQuickSlot())
+  const [quickSlot, setQuickSlot] = useState<MobileQuickSlot | null>(() => readMobileQuickSlot())
 
   useEffect(() => {
     let isMounted = true
@@ -166,9 +166,11 @@ export default function MobileTopView() {
       listTasks({ status: 'open', due: 'today', limit: 4 }),
       listCalendarDbEvents({ time_min: startOfDate(today), time_max: endOfDate(today) }),
       readMaintenanceStatus(),
+      loadMobileQuickSlot().catch(() => readMobileQuickSlot()),
     ])
-      .then(([pendingContacts, actionMailPage, overdueTasks, todayTasks, calendarPage, maintenance]) => {
+      .then(([pendingContacts, actionMailPage, overdueTasks, todayTasks, calendarPage, maintenance, loadedQuickSlot]) => {
         if (!isMounted) return
+        setQuickSlot(loadedQuickSlot)
         setData({
           pendingContacts: pendingContacts.length,
           actionMails: actionMailPage.items,

@@ -17,6 +17,7 @@ from caseclosed.email_addressing import normalize_email_address
 router = APIRouter(prefix="/api/v1/profile", tags=["profile"])
 
 USER_PROFILE_KEY = "user_profile"
+MOBILE_QUICK_SLOT_KEY = "mobile_quick_slot"
 
 
 class UserProfilePayload(BaseModel):
@@ -41,6 +42,11 @@ class UserProfilePayload(BaseModel):
     default_reply_language: str = "japanese"
     llm_self_description: str = ""
     mail_importance_notes: str = ""
+
+
+class MobileQuickSlotPayload(BaseModel):
+    label: str = ""
+    href: str = ""
 
 
 PROFILE_TEXT_FIELDS = [
@@ -145,6 +151,69 @@ def profile_data_from_setting(setting: AppSetting | None) -> dict[str, object]:
 def read_profile(session: DatabaseSession) -> dict[str, object]:
     setting = session.scalar(select(AppSetting).where(AppSetting.key == USER_PROFILE_KEY))
     return profile_data_from_setting(setting)
+
+
+def mobile_quick_slot_data(setting: AppSetting | None) -> dict[str, str] | None:
+    if setting is None:
+        return None
+    try:
+        data = json.loads(setting.value_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    label = data.get("label")
+    href = data.get("href")
+    if not isinstance(label, str) or not isinstance(href, str):
+        return None
+    label = label.strip()
+    href = href.strip()
+    return {"label": label, "href": href} if label and href else None
+
+
+@router.get("/mobile-quick-slot")
+def get_mobile_quick_slot(
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    setting = session.scalar(
+        select(AppSetting).where(AppSetting.key == MOBILE_QUICK_SLOT_KEY)
+    )
+    return {"ok": True, "data": {"slot": mobile_quick_slot_data(setting)}}
+
+
+@router.put("/mobile-quick-slot")
+def update_mobile_quick_slot(
+    payload: MobileQuickSlotPayload,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    label = payload.label.strip()
+    href = payload.href.strip()
+    if (label == "") != (href == ""):
+        raise json_error(422, "VALIDATION_ERROR", "Label and href are both required.")
+    setting = session.scalar(
+        select(AppSetting).where(AppSetting.key == MOBILE_QUICK_SLOT_KEY)
+    )
+    if label == "":
+        if setting is not None:
+            session.delete(setting)
+        session.commit()
+        return {"ok": True, "data": {"slot": None}}
+
+    now = jst_iso()
+    value_json = json.dumps({"label": label, "href": href}, ensure_ascii=True)
+    if setting is None:
+        setting = AppSetting(
+            id=f"setting_{MOBILE_QUICK_SLOT_KEY}",
+            key=MOBILE_QUICK_SLOT_KEY,
+            value_json=value_json,
+            updated_at=now,
+        )
+        session.add(setting)
+    else:
+        setting.value_json = value_json
+        setting.updated_at = now
+    session.commit()
+    return {"ok": True, "data": {"slot": mobile_quick_slot_data(setting)}}
 
 
 def profile_payload_data(payload: UserProfilePayload, now: str) -> dict[str, object]:

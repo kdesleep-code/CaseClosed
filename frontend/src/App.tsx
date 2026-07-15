@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, FormEvent } from 'react'
-import { AuthApiError, login, readSession } from './authApi'
+import { AuthApiError, login, logout, readSession } from './authApi'
 import type { SessionData } from './authApi'
 import AcademicCalendarView from './AcademicCalendarView'
 import loginDoorTanuki from './assets/login-door-tanuki.png'
@@ -25,6 +25,7 @@ import ExtensionsHelpView from './ExtensionsHelpView'
 import ExtensionsView from './ExtensionsView'
 import FollowUpView from './FollowUpView'
 import LogView from './LogView'
+import LowMailReviewView, { LowMailReviewDetailView } from './LowMailReviewView'
 import ManualView from './ManualView'
 import MailView from './MailView'
 import type { MailInitialData } from './MailView'
@@ -188,7 +189,7 @@ const utilityPageSlots: PageSlot[] = [
   { labelKey: 'nav.maintenance', href: '/maintenance' },
   { labelKey: 'nav.profile', href: '/profile' },
   { labelKey: 'nav.manual', href: '/manual' },
-  { blank: true, key: 'reserved-2' },
+  { labelKey: 'nav.logout', href: '/logout' },
 ]
 
 type RoutePreload =
@@ -701,6 +702,18 @@ function TopView({
     }
   }
 
+  async function handleLogout() {
+    setPendingError(null)
+    try {
+      await logout()
+      window.location.assign('/')
+    } catch (requestError) {
+      setPendingError(
+        requestError instanceof Error ? requestError.message : t('auth.requestFailed'),
+      )
+    }
+  }
+
   function linkContent(link: LinkRenderItem) {
     const attentionTitle = topAttentionTitle(link.href)
     const showAttention = attentionTitle !== null && hasTopAttention(attentionState, link.href)
@@ -729,7 +742,11 @@ function TopView({
   }
 
   function lockedLink(link: LinkRenderItem, className?: string) {
-    if (!isLockedByPending || link.href === '/maintenance') {
+    if (
+      !isLockedByPending ||
+      link.href === '/maintenance' ||
+      link.href === '/logout'
+    ) {
       return (
         <AppLink
           className={className}
@@ -740,7 +757,12 @@ function TopView({
                 event.preventDefault()
                 openPomodoroWindow()
               }
-            : undefined}
+            : link.href === '/logout'
+              ? (event) => {
+                  event.preventDefault()
+                  void handleLogout()
+                }
+              : undefined}
           rel={link.rel}
           target={link.target}
         >
@@ -2166,7 +2188,13 @@ function App() {
         client_certificate_id: null,
         device_name: loginSession.device_name,
         ip_address: loginSession.ip_address,
+        access_mode: loginSession.access_mode,
       })
+      if (loginSession.access_mode === 'low_mail_review') {
+        window.history.replaceState({}, '', '/mail/review')
+        setRoutePreload(null)
+        setPath('/mail/review')
+      }
       setPassword('')
     } catch (loginError) {
       if (loginError instanceof AuthApiError) {
@@ -2181,6 +2209,17 @@ function App() {
   }
 
   if (session !== null) {
+    if (session.access_mode === 'low_mail_review') {
+      const reviewDetailPrefix = '/mail/review/'
+      if (path.startsWith(reviewDetailPrefix)) {
+        return (
+          <LowMailReviewDetailView
+            messageId={decodeURIComponent(path.slice(reviewDetailPrefix.length))}
+          />
+        )
+      }
+      return <LowMailReviewView />
+    }
     if (path === '/m/calendar' || path === '/mobile/calendar') {
       return (
         <>
