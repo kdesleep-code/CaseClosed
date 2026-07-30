@@ -1,4 +1,4 @@
-﻿import { render, screen, within } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { fireEvent, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -56,31 +56,69 @@ describe('Phase 1 login screen', () => {
     render(<App />)
 
     expect(
-      await screen.findByRole('heading', { level: 1, name: 'CaseClosed' }),
+      await screen.findByRole('heading', { level: 1, name: 'C@seClosed' }),
     ).toBeInTheDocument()
-    expect(screen.getByAltText('CaseClosed mascot')).toBeInTheDocument()
+    expect(screen.getByAltText('C@seClosed mascot')).toBeInTheDocument()
     expect(screen.getByLabelText('Password')).toHaveAttribute('type', 'password')
     expect(screen.getByRole('button', { name: 'Log in' })).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Email a new password' }),
+    ).toBeInTheDocument()
+  })
+
+  it('requests a random password by email from the login screen', async () => {
+    const user = userEvent.setup()
+    const fetchMock = vi.mocked(fetch)
+    fetchMock
+      .mockImplementationOnce(() =>
+        apiResponse(401, {
+          ok: false,
+          error: { code: 'UNAUTHORIZED', message: 'No active session.' },
+        }),
+      )
+      .mockImplementationOnce(() =>
+        apiResponse(200, {
+          ok: true,
+          data: {
+            email_sent: true,
+            invalidated_sessions: 0,
+            retry_after_seconds: 600,
+          },
+        }),
+      )
+
+    render(<App />)
+    await user.click(
+      await screen.findByRole('button', { name: 'Email a new password' }),
+    )
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/auth/password-reset',
+      expect.objectContaining({ credentials: 'include', method: 'POST' }),
+    )
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'A new password was sent to the connected Gmail account.',
+    )
   })
 
   it('uses a runtime language patch for visible login labels', async () => {
     applyLanguagePatch({
       'login.password.label': 'Secret phrase',
       'login.submit': 'Enter',
-      'login.mascot.alt': 'CaseClosed mascot patched',
+      'login.mascot.alt': 'C@seClosed mascot patched',
     })
 
     render(<App />)
 
     expect(await screen.findByLabelText('Secret phrase')).toHaveAttribute('type', 'password')
     expect(screen.getByRole('button', { name: 'Enter' })).toBeInTheDocument()
-    expect(screen.getByAltText('CaseClosed mascot patched')).toBeInTheDocument()
+    expect(screen.getByAltText('C@seClosed mascot patched')).toBeInTheDocument()
   })
 
   it('keeps the default login screen focused on authentication', async () => {
     render(<App />)
 
-    await screen.findByRole('heading', { level: 1, name: 'CaseClosed' })
+    await screen.findByRole('heading', { level: 1, name: 'C@seClosed' })
     expect(screen.queryByText('Device')).not.toBeInTheDocument()
     expect(screen.queryByText('Certificate')).not.toBeInTheDocument()
     expect(screen.queryByText('Failed attempts')).not.toBeInTheDocument()
@@ -278,7 +316,7 @@ describe('Phase 1 login screen', () => {
     ).toBeInTheDocument()
     expect(screen.getByText('Pending contacts: 1')).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Mail' })).not.toBeInTheDocument()
-    expect(screen.getByText('Mail')).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.getByText('Mail').closest('[aria-disabled="true"]')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Open Pending Contacts' })).toHaveAttribute(
       'href',
       '/contacts/pending',
@@ -338,7 +376,7 @@ describe('Phase 4 mail screen', () => {
                 received_date: '2026-05-25',
                 subject: 'Draft subject',
                 from_address: 'caseclosed.me@example.local',
-                from_name: 'CaseClosed',
+                from_name: 'C@seClosed',
                 from_contact: null,
                 sender_contact: null,
                 sender_address: null,
@@ -528,7 +566,7 @@ describe('Phase 4 mail screen', () => {
                 received_date: '2026-05-25',
                 subject: 'Combined',
                 from_address: 'caseclosed.me@example.local',
-                from_name: 'CaseClosed',
+                from_name: 'C@seClosed',
                 from_contact: null,
                 sender_contact: null,
                 sender_address: null,
@@ -700,7 +738,7 @@ describe('Phase 4 mail screen', () => {
                 received_date: '2026-05-25',
                 subject: 'Quoted',
                 from_address: 'caseclosed.me@example.local',
-                from_name: 'CaseClosed',
+                from_name: 'C@seClosed',
                 from_contact: null,
                 sender_contact: null,
                 sender_address: null,
@@ -911,6 +949,17 @@ describe('Phase 4 mail screen', () => {
       if (path === '/api/v1/contacts/unresolved-from-addresses') {
         return apiResponse(200, { ok: true, data: { items: [] } })
       }
+      if (path.startsWith('/api/v1/mails/day-stats') && init?.method === undefined) {
+        return apiResponse(200, {
+          ok: true,
+          data: {
+            date: '2026-05-24',
+            total_count: 1,
+            received_count: 1,
+            sent_count: 0,
+          },
+        })
+      }
       if (path.startsWith('/api/v1/mails/dates') && init?.method === undefined) {
         return apiResponse(200, {
           ok: true,
@@ -921,6 +970,22 @@ describe('Phase 4 mail screen', () => {
         return apiResponse(200, {
           ok: true,
           data: { items: ingested ? [createdMail] : [], next_cursor: null, limit: 25 },
+        })
+      }
+      if (path === '/api/v1/mails/send-requests/mail_send_scheduled') {
+        return apiResponse(200, {
+          ok: true,
+          data: {
+            ...scheduledSendRequest,
+            status: scheduledCanceled ? 'canceled' : scheduledSendRequest.status,
+            version: scheduledCanceled ? 2 : scheduledSendRequest.version,
+          },
+        })
+      }
+      if (path === '/api/v1/mails/draft-generation-standard-prompt') {
+        return apiResponse(200, {
+          ok: true,
+          data: { standard_prompt: '', generation_language: 'japanese' },
         })
       }
       if (path === '/api/v1/mails/mail_new') {
@@ -1165,7 +1230,7 @@ describe('Phase 4 mail screen', () => {
     )
     expect(screen.getByRole('link', { name: 'Mail' })).toHaveAttribute(
       'href',
-      '/mail?tab=unprocessed&date=2026-05-23',
+      '/mail?tab=unprocessed&date=2026-05-23&sort=importance',
     )
     expect(screen.getByRole('link', { name: 'Open in Gmail' })).toHaveAttribute(
       'href',
@@ -1206,7 +1271,17 @@ describe('Phase 4 mail screen', () => {
         method: 'POST',
       }),
     )
-    expect(await screen.findByText('Scheduled send canceled.')).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Compose Mail' })).toBeInTheDocument()
+    expect(await screen.findByText('Canceled mail restored for editing.')).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Remove review.mock.sender@example.com' }),
+    ).toBeInTheDocument()
+    expect(screen.getByLabelText('Body')).toHaveValue('Scheduled reply body.')
+
+    await user.click(screen.getByRole('link', { name: 'Mail' }))
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Review mock mail' }),
+    ).toBeInTheDocument()
     expect(screen.queryByText('Scheduled reply body.')).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Complete' }))
@@ -1220,12 +1295,13 @@ describe('Phase 4 mail screen', () => {
     await waitFor(
       () => {
         expect(`${window.location.pathname}${window.location.search}`).toBe(
-          '/mail?tab=unprocessed&date=2026-05-23',
+          '/mail?tab=unprocessed&date=2026-05-23&sort=importance',
         )
       },
       { timeout: 2500 },
     )
 
+    scrollIntoView.mockClear()
     navigateTo('/mail/mail_new')
     expect(
       await screen.findByRole('heading', { level: 1, name: 'Review mock mail' }),
@@ -1377,6 +1453,17 @@ describe('Phase 4 mail screen', () => {
             llm_self_description: '',
             mail_importance_notes: '',
             updated_at: null,
+          },
+        })
+      }
+      if (path.startsWith('/api/v1/mails/day-stats') && init?.method === undefined) {
+        return apiResponse(200, {
+          ok: true,
+          data: {
+            date: '2026-05-24',
+            total_count: 1,
+            received_count: 1,
+            sent_count: 0,
           },
         })
       }
@@ -2051,6 +2138,9 @@ describe('Phase 2 maintenance screen', () => {
         if (path === '/api/v1/auth/session') {
           return activeSessionResponse()
         }
+        if (path === '/api/v1/maintenance/usb-backups') {
+          return apiResponse(200, { ok: true, data: { devices: [] } })
+        }
         if (path === '/api/v1/maintenance/status') {
           return apiResponse(200, {
             ok: true,
@@ -2230,6 +2320,9 @@ describe('Phase 2 maintenance screen', () => {
       if (path === '/api/v1/auth/session') {
         return activeSessionResponse()
       }
+      if (path === '/api/v1/maintenance/usb-backups') {
+        return apiResponse(200, { ok: true, data: { devices: [] } })
+      }
       if (path === '/api/v1/maintenance/status') {
         return apiResponse(200, {
           ok: true,
@@ -2354,6 +2447,9 @@ describe('Phase 2 maintenance screen', () => {
         if (path === '/api/v1/auth/session') {
           return activeSessionResponse()
         }
+        if (path === '/api/v1/maintenance/usb-backups') {
+          return apiResponse(200, { ok: true, data: { devices: [] } })
+        }
         if (path === '/api/v1/maintenance/status') {
           return apiResponse(200, {
             ok: true,
@@ -2384,13 +2480,13 @@ describe('Phase 2 maintenance screen', () => {
     await user.click(await screen.findByRole('tab', { name: 'Usage' }))
 
     expect(screen.getByRole('heading', { name: 'Usage' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /Database/ })).toHaveAttribute(
+    expect(screen.queryByRole('button', { name: /Database/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Storage/ })).toHaveAttribute(
       'aria-pressed',
       'true',
     )
-    expect(screen.getByRole('button', { name: /Storage/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /LLM cost/ })).toBeInTheDocument()
-    expect(screen.getAllByRole('button', { name: /Not available/ })).toHaveLength(6)
+    expect(screen.getAllByRole('button', { name: /Not available/ })).toHaveLength(1)
     expect(screen.getByRole('button', { name: /Running jobs 0/ })).toBeInTheDocument()
     expect(
       screen.getByRole('button', { name: /Pending write requests 0/ }),
@@ -2399,20 +2495,18 @@ describe('Phase 2 maintenance screen', () => {
       screen.getByRole('button', { name: /External unknown 0/ }),
     ).toBeInTheDocument()
     expect(
-      screen.getByRole('heading', { name: 'Database history' }),
+      screen.getByRole('heading', { name: 'Storage history' }),
     ).toBeInTheDocument()
     expect(screen.getByRole('group', { name: 'History range' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '24h' })).toHaveAttribute(
       'aria-pressed',
       'true',
     )
-    expect(screen.getByText('24h ago')).toBeInTheDocument()
-    expect(screen.getByText('Now')).toBeInTheDocument()
-    expect(screen.getByLabelText('History value scale')).toHaveTextContent('High')
-    expect(screen.getByLabelText('History value scale')).toHaveTextContent('0')
-    expect(screen.getByText('No history yet.')).toBeInTheDocument()
+    expect(
+      screen.getByRole('heading', { name: 'Encrypted USB backup' }),
+    ).toBeInTheDocument()
+    expect(screen.queryByLabelText('History value scale')).not.toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: /Storage/ }))
     await user.click(screen.getByRole('button', { name: '7d' }))
 
     expect(screen.getByRole('button', { name: /Storage/ })).toHaveAttribute(
@@ -2430,6 +2524,11 @@ describe('Phase 2 maintenance screen', () => {
     expect(
       screen.getByRole('heading', { name: 'Running jobs history' }),
     ).toBeInTheDocument()
+    expect(screen.getByText('7d ago')).toBeInTheDocument()
+    expect(screen.getByText('Now')).toBeInTheDocument()
+    expect(screen.getByLabelText('History value scale')).toHaveTextContent('High')
+    expect(screen.getByLabelText('History value scale')).toHaveTextContent('0')
+    expect(screen.getByText('No history yet.')).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Jobs' })).not.toBeInTheDocument()
     expect(
       screen.queryByRole('heading', { name: 'External Confirmations' }),
@@ -2532,6 +2631,9 @@ describe('Phase 2 maintenance screen', () => {
         if (path === '/api/v1/auth/session') {
           return activeSessionResponse()
         }
+        if (path === '/api/v1/maintenance/usb-backups') {
+          return apiResponse(200, { ok: true, data: { devices: [] } })
+        }
         if (path === '/api/v1/maintenance/status') {
           return apiResponse(200, {
             ok: true,
@@ -2601,6 +2703,9 @@ describe('Phase 2 maintenance screen', () => {
         const path = input.toString()
         if (path === '/api/v1/auth/session') {
           return activeSessionResponse()
+        }
+        if (path === '/api/v1/maintenance/usb-backups') {
+          return apiResponse(200, { ok: true, data: { devices: [] } })
         }
         if (path === '/api/v1/maintenance/status') {
           return apiResponse(200, {
@@ -3606,6 +3711,7 @@ describe('Phase 3 contacts screen', () => {
           kind: 'person',
           sender_resolution_mode: 'self',
           mailing_list_recipient_expression: null,
+          service_email_patterns: null,
           mail_importance_rule_action: 'llm',
           mail_importance_rule_importance: null,
           mail_importance_rule_instruction: null,

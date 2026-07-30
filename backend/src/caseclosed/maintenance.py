@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
+from pathlib import Path
+import subprocess
+import sys
 from time import perf_counter
 from datetime import timedelta
+from uuid import uuid4
 
 from fastapi import APIRouter
 from fastapi import Depends
@@ -12,6 +18,7 @@ from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DatabaseSession
 
+from caseclosed.auth import json_error
 from caseclosed.db.models import AppSetting
 from caseclosed.db.models import ExternalOperation
 from caseclosed.db.models import GmailMessage
@@ -36,6 +43,11 @@ from caseclosed.google_integration import google_gmail_status_data
 from caseclosed.google_integration import google_gmail_access_token
 from caseclosed.google_integration import read_setting_json
 from caseclosed.services.background_worker import background_worker_runtime_status
+from caseclosed.services.usb_backup import BACKUP_DIRECTORY_NAME
+from caseclosed.services.usb_backup import BACKUP_EXTENSION
+from caseclosed.services.usb_backup import MINIMUM_PASSPHRASE_LENGTH
+from caseclosed.services.usb_backup import PROJECT_ROOT
+from caseclosed.services.usb_backup import STATUS_DIRECTORY
 
 router = APIRouter(prefix="/api/v1/maintenance", tags=["maintenance"])
 
@@ -44,6 +56,92 @@ LLM_MONTHLY_LIMIT_KEY = "llm_cost_limit_monthly"
 
 class LlmCostSettingsPayload(BaseModel):
     monthly_budget: float | None = None
+
+
+class UsbBackupPayload(BaseModel):
+    device_id: str
+    passphrase: str
+
+
+class UsbRestorePayload(UsbBackupPayload):
+    backup_id: str
+    confirmation: str
+
+
+def usb_device_id(path: str, uuid: str | None) -> str:
+    return hashlib.sha256(f"{uuid or ''}:{path}".encode()).hexdigest()[:24]
+
+
+def usb_devices() -> list[dict[str, object]]:
+    result = subprocess.run(
+        ["lsblk", "--json", "--bytes", "--output", "PATH,TYPE,TRAN,RM,HOTPLUG,SIZE,FSTYPE,LABEL,UUID,MOUNTPOINTS,RO,MODEL"],
+        capture_output=True,
+        check=True,
+        text=True,
+        encoding="utf-8",
+    )
+    roots = json.loads(result.stdout).get("blockdevices", [])
+    devices: list[dict[str, object]] = []
+
+    def visit(row: dict[str, object], inherited_usb: bool = False, model: str | None = None) -> None:
+        is_usb = inherited_usb or row.get("tran") == "usb" or bool(row.get("rm")) or bool(row.get("hotplug"))
+        current_model = str(row.get("model") or model or "USB device").strip()
+        children = row.get("children") if isinstance(row.get("children"), list) else []
+        if is_usb and row.get("type") in {"part", "disk"} and row.get("fstype"):
+            path = str(row["path"])
+            device_id = usb_device_id(path, str(row.get("uuid") or ""))
+            mount_points = [str(item) for item in (row.get("mountpoints") or []) if item]
+            mount_point = mount_points[0] if mount_points else None
+            backups: list[dict[str, object]] = []
+            if mount_point:
+                backup_directory = Path(mount_point) / BACKUP_DIRECTORY_NAME
+                for metadata_path in sorted(backup_directory.glob("caseclosed-*.json"), reverse=True):
+                    try:
+                        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        continue
+                    archive = backup_directory / str(metadata.get("filename", ""))
+                    if archive.is_file() and isinstance(metadata, dict):
+                        backups.append(metadata)
+            devices.append({
+                "id": device_id, "path": path, "label": row.get("label") or current_model,
+                "model": current_model, "filesystem": row.get("fstype"), "size": row.get("size", 0),
+                "mount_point": mount_point, "mounted": mount_point is not None,
+                "read_only": bool(row.get("ro")), "writable": bool(mount_point and os.access(mount_point, os.W_OK) and not row.get("ro")),
+                "backups": backups,
+            })
+        for child in children:
+            if isinstance(child, dict):
+                visit(child, is_usb, current_model)
+
+    for root in roots:
+        if isinstance(root, dict):
+            visit(root)
+    return devices
+
+
+def get_usb_device(device_id: str, *, mounted: bool = False) -> dict[str, object]:
+    device = next((item for item in usb_devices() if item["id"] == device_id), None)
+    if device is None:
+        raise json_error(404, "USB_DEVICE_NOT_FOUND", "USB device was not found.")
+    if mounted and not device["mounted"]:
+        raise json_error(409, "USB_NOT_MOUNTED", "USB device is not mounted.")
+    return device
+
+
+def launch_usb_operation(arguments: list[str], passphrase: str, operation: str) -> dict[str, object]:
+    if len(passphrase) < MINIMUM_PASSPHRASE_LENGTH:
+        raise json_error(422, "VALIDATION_ERROR", "Passphrase must be at least 12 characters.")
+    operation_id = f"{operation}-{uuid4().hex}"
+    STATUS_DIRECTORY.mkdir(parents=True, exist_ok=True)
+    passphrase_file = STATUS_DIRECTORY / f"{operation_id}.passphrase"
+    passphrase_file.write_text(passphrase, encoding="utf-8")
+    os.chmod(passphrase_file, 0o600)
+    status_file = STATUS_DIRECTORY / f"{operation_id}.json"
+    command = [sys.executable, "-m", "caseclosed.services.usb_backup", operation, *arguments, "--passphrase-file", str(passphrase_file), "--status-file", str(status_file)]
+    log = (STATUS_DIRECTORY / f"{operation_id}.log").open("ab")
+    subprocess.Popen(command, cwd=PROJECT_ROOT, stdout=log, stderr=log, start_new_session=True, close_fds=True)
+    return {"operation_id": operation_id, "operation": operation, "status": "queued", "stage": "queued"}
 
 
 @router.get("/status")
@@ -80,6 +178,79 @@ def maintenance_status(
             **dashboard,
         },
     }
+
+
+@router.get("/usb-backups")
+def list_usb_backups() -> dict[str, object]:
+    return {"ok": True, "data": {"devices": usb_devices()}}
+
+
+@router.post("/usb-backups/{device_id}/mount")
+def mount_usb_backup_device(device_id: str) -> dict[str, object]:
+    device = get_usb_device(device_id)
+    if device["mounted"]:
+        return {"ok": True, "data": device}
+    result = subprocess.run(
+        ["udisksctl", "mount", "--block-device", str(device["path"])],
+        capture_output=True, text=True, encoding="utf-8",
+    )
+    if result.returncode != 0:
+        raise json_error(409, "USB_MOUNT_FAILED", result.stderr.strip() or "USB mount failed.")
+    return {"ok": True, "data": get_usb_device(device_id, mounted=True)}
+
+
+@router.post("/usb-backups/{device_id}/unmount")
+def unmount_usb_backup_device(device_id: str) -> dict[str, object]:
+    device = get_usb_device(device_id)
+    if not device["mounted"]:
+        return {"ok": True, "data": device}
+    result = subprocess.run(
+        ["udisksctl", "unmount", "--block-device", str(device["path"])],
+        capture_output=True, text=True, encoding="utf-8",
+    )
+    if result.returncode != 0:
+        raise json_error(409, "USB_UNMOUNT_FAILED", result.stderr.strip() or "USB unmount failed.")
+    return {"ok": True, "data": get_usb_device(device_id)}
+
+
+@router.post("/usb-backups")
+def start_usb_backup(payload: UsbBackupPayload) -> dict[str, object]:
+    device = get_usb_device(payload.device_id, mounted=True)
+    if not device["writable"]:
+        raise json_error(409, "USB_NOT_WRITABLE", "USB device is not writable.")
+    operation = launch_usb_operation(
+        ["--mount-point", str(device["mount_point"]), "--device-id", payload.device_id],
+        payload.passphrase,
+        "create",
+    )
+    return {"ok": True, "data": operation}
+
+
+@router.post("/usb-backups/restore")
+def start_usb_restore(payload: UsbRestorePayload) -> dict[str, object]:
+    if payload.confirmation != "RESTORE":
+        raise json_error(422, "RESTORE_CONFIRMATION_REQUIRED", "Type RESTORE to confirm.")
+    device = get_usb_device(payload.device_id, mounted=True)
+    backup = next((item for item in device["backups"] if item.get("backup_id") == payload.backup_id), None)
+    if backup is None:
+        raise json_error(404, "BACKUP_NOT_FOUND", "Backup was not found on this USB device.")
+    backup_path = Path(str(device["mount_point"])) / BACKUP_DIRECTORY_NAME / str(backup["filename"])
+    operation = launch_usb_operation(
+        ["--backup-path", str(backup_path), "--restart-script", str(PROJECT_ROOT / "restart-caseclosed-dev.ubuntu.sh")],
+        payload.passphrase,
+        "restore",
+    )
+    return {"ok": True, "data": operation}
+
+
+@router.get("/usb-backups/operations/{operation_id}")
+def get_usb_backup_operation(operation_id: str) -> dict[str, object]:
+    if not operation_id.replace("-", "").isalnum():
+        raise json_error(404, "NOT_FOUND", "Backup operation was not found.")
+    path = STATUS_DIRECTORY / f"{operation_id}.json"
+    if not path.is_file():
+        return {"ok": True, "data": {"operation_id": operation_id, "status": "queued", "stage": "queued"}}
+    return {"ok": True, "data": json.loads(path.read_text(encoding="utf-8"))}
 
 
 def maintenance_health_summary(session: DatabaseSession) -> dict[str, object]:

@@ -18,6 +18,44 @@ def test_google_gmail_status_reports_not_configured(client) -> None:
     assert data["mail_loading_enabled"] is False
 
 
+def test_collect_message_attachments_excludes_inline_images() -> None:
+    from caseclosed.google_integration import collect_message_attachments
+
+    payload = {
+        "mimeType": "multipart/mixed",
+        "parts": [
+            {
+                "partId": "1",
+                "mimeType": "image/png",
+                "filename": "2b2b4e92-e9c1-4215-bf82-2ddca127240c",
+                "headers": [
+                    {"name": "Content-Disposition", "value": "inline"},
+                    {"name": "Content-ID", "value": "<shared-file-icon>"},
+                ],
+                "body": {"attachmentId": "inline-image", "size": 2877},
+            },
+            {
+                "partId": "2",
+                "mimeType": "application/pdf",
+                "filename": "研究概要.pdf",
+                "headers": [
+                    {
+                        "name": "Content-Disposition",
+                        "value": 'attachment; filename="研究概要.pdf"',
+                    }
+                ],
+                "body": {"attachmentId": "actual-file", "size": 12345},
+            },
+        ],
+    }
+
+    attachments = collect_message_attachments(payload)
+
+    assert len(attachments) == 1
+    assert attachments[0].gmail_attachment_id == "actual-file"
+    assert attachments[0].filename == "研究概要.pdf"
+
+
 def test_calendar_event_time_accepts_canonical_and_legacy_datetime_inputs() -> None:
     from caseclosed.google_integration import calendar_event_time
 

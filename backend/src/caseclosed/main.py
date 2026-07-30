@@ -76,7 +76,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await gmail_auto_import.stop()
 
 
-app = FastAPI(title="CaseClosed", lifespan=lifespan)
+app = FastAPI(title="C@seClosed", lifespan=lifespan)
 app.include_router(academic_calendar_router)
 app.include_router(auth_router)
 app.include_router(cases_router)

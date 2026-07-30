@@ -4203,7 +4203,27 @@ def collect_message_attachments(payload: dict[str, object]) -> list[MailAttachme
     def collect(part: dict[str, object]) -> None:
         filename = part.get("filename")
         body = part.get("body")
-        if isinstance(filename, str) and filename.strip() != "" and isinstance(body, dict):
+        headers = gmail_headers(part)
+        content_disposition = (
+            first_header(headers, "content-disposition") or ""
+        ).strip().lower()
+        content_id = (first_header(headers, "content-id") or "").strip()
+        mime_type = part.get("mimeType")
+        is_inline = (
+            content_disposition == "inline"
+            or content_disposition.startswith("inline;")
+            or (
+                content_id != ""
+                and isinstance(mime_type, str)
+                and mime_type.lower().startswith("image/")
+            )
+        )
+        if (
+            not is_inline
+            and isinstance(filename, str)
+            and filename.strip() != ""
+            and isinstance(body, dict)
+        ):
             attachment_id = body.get("attachmentId")
             if isinstance(attachment_id, str) and attachment_id.strip() != "":
                 size = body.get("size")
@@ -4212,8 +4232,8 @@ def collect_message_attachments(payload: dict[str, object]) -> list[MailAttachme
                         gmail_attachment_id=attachment_id.strip(),
                         filename=filename.strip(),
                         mime_type=(
-                            part.get("mimeType")
-                            if isinstance(part.get("mimeType"), str)
+                            mime_type
+                            if isinstance(mime_type, str)
                             else None
                         ),
                         byte_size=size if isinstance(size, int) else 0,

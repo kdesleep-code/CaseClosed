@@ -8,11 +8,13 @@ import settingsGearIconUrl from './assets/settings-gear.svg'
 import {
   completeTask,
   createTaskProgressEntry,
+  freezeTask,
   deleteTask,
   deleteTaskProgressEntry,
   getTask,
   updateTask,
   updateTaskProgressEntry,
+  unfreezeTask,
 } from './phase8Api'
 import type { TaskItem, TaskProgressEntry } from './phase8Api'
 
@@ -73,6 +75,7 @@ function taskStatusLabel(status: string) {
   if (status === 'not_started') return t('tasks.status.notStarted')
   if (status === 'in_progress') return t('tasks.status.inProgress')
   if (status === 'completed') return t('tasks.status.completed')
+  if (status === 'frozen') return t('tasks.status.frozen')
   if (status === 'canceled') return t('tasks.status.canceled')
   return status
 }
@@ -143,6 +146,7 @@ export default function TaskDetailView({ taskId }: { taskId: string }) {
   const [task, setTask] = useState<TaskItem | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isCompleting, setIsCompleting] = useState(false)
+  const [isFreezing, setIsFreezing] = useState(false)
   const [isEditing, setIsEditing] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [isSavingProgressMemo, setIsSavingProgressMemo] = useState(false)
@@ -214,6 +218,21 @@ export default function TaskDetailView({ taskId }: { taskId: string }) {
         setError(describeError(requestError))
       })
       .finally(() => setIsCompleting(false))
+  }
+
+  function handleFreezeToggle() {
+    if (task === null || isFreezing) return
+    setIsFreezing(true)
+    const request = task.status === 'frozen' ? unfreezeTask(task.id) : freezeTask(task.id)
+    request
+      .then((nextTask) => {
+        setTask(nextTask)
+        setError(null)
+      })
+      .catch((requestError) => {
+        setError(describeError(requestError))
+      })
+      .finally(() => setIsFreezing(false))
   }
 
   function startEdit() {
@@ -473,6 +492,7 @@ export default function TaskDetailView({ taskId }: { taskId: string }) {
   }
 
   const isDone = task?.status === 'completed' || task?.status === 'canceled'
+  const isFrozen = task?.status === 'frozen'
   const sourceMailHref =
     task?.source_type === 'mail' && task.source_id !== null
       ? `/mail/${encodeURIComponent(task.source_id)}`
@@ -484,8 +504,6 @@ export default function TaskDetailView({ taskId }: { taskId: string }) {
     progressEntries.length === 0 &&
     task?.progress_memo !== null &&
     task?.progress_memo !== undefined
-  const returnHref = task === null ? returnToOrFallback('/tasks') : taskReturnTo(task)
-
   function renderProgressEntry(entry: TaskProgressEntry) {
     const isEntryEditing = editingProgressEntryId === entry.id
     return (
@@ -553,7 +571,7 @@ export default function TaskDetailView({ taskId }: { taskId: string }) {
             ariaLabelKey="tasks.navigation"
             items={[
               { href: '/', labelKey: 'top.heading' },
-              { href: returnHref, labelKey: 'nav.tasks' },
+              { href: '/tasks', labelKey: 'nav.tasks' },
               { href: '/cases', labelKey: 'nav.cases' },
               { href: '/mail', labelKey: 'nav.mail' },
               { href: '/calendar', labelKey: 'nav.calendar' },
@@ -1002,10 +1020,24 @@ export default function TaskDetailView({ taskId }: { taskId: string }) {
               >
                 {isDeleting ? t('tasks.detail.deleting') : t('tasks.detail.delete')}
               </button>
+              {!isEditing && !isDone && (
+                <button
+                  className="task-gadget-secondary-action"
+                  disabled={task === null || isFreezing}
+                  onClick={handleFreezeToggle}
+                  type="button"
+                >
+                  {isFreezing
+                    ? t('tasks.detail.freezing')
+                    : isFrozen
+                      ? t('tasks.detail.unfreeze')
+                      : t('tasks.detail.freeze')}
+                </button>
+              )}
               {!isEditing && (
                 <button
                   className="task-gadget-action"
-                  disabled={task === null || isDone || isCompleting}
+                  disabled={task === null || isDone || isFrozen || isCompleting}
                   onClick={handleComplete}
                   type="button"
                 >

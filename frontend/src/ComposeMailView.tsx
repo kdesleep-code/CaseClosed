@@ -926,7 +926,7 @@ export default function ComposeMailView() {
       <div className="compose-shell">
         <header className="maintenance-header">
           <div>
-            <p>CaseClosed</p>
+            <p>C@seClosed</p>
             <h1>{t('mail.compose.heading')}</h1>
           </div>
           <TopNav

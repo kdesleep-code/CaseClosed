@@ -19,6 +19,7 @@ import {
   isPreviewableTextFile,
   isPreviewableVideoFile,
   isPreviewableZipFile,
+  storageImagePreviewUrl,
 } from './storagePreview'
 import {
   deleteStorageObject,
@@ -1325,7 +1326,11 @@ function StorageObjectDetailView({ storageObjectId }: { storageObjectId: string 
                   <img
                     alt={previewFile.original_filename ?? t('storage.detail.file')}
                     className="storage-image-preview"
-                    src={previewFile.url}
+                    src={storageImagePreviewUrl({
+                      contentType: previewFile.content_type,
+                      filename: previewFile.original_filename,
+                      url: previewFile.url,
+                    })}
                   />
                 ) : isPreviewablePdf(previewFile) ? (
                   <iframe

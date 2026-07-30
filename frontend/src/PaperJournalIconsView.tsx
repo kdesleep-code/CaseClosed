@@ -9,6 +9,7 @@ import {
 } from './phase3Api'
 import type { Paper, PaperJournalIconSetting } from './phase3Api'
 import { t } from './i18n'
+import { imageUploadAccept, imageUploadContentType } from './imageUpload'
 import { TopNav } from './navigation'
 
 function normalizeJournalName(value: string) {
@@ -113,7 +114,7 @@ export default function PaperJournalIconsView() {
       const created = await createPaperJournalIconSetting({
         match_journal: matchJournal,
         icon_filename: selectedFile.name,
-        icon_content_type: selectedFile.type || 'image/png',
+        icon_content_type: imageUploadContentType(selectedFile),
         icon_data_base64: await fileToBase64(selectedFile),
       })
       const nextItems = [...items, created].sort((a, b) => a.match_journal.localeCompare(b.match_journal))
@@ -138,7 +139,7 @@ export default function PaperJournalIconsView() {
       }
       if (editingFile !== null) {
         payload.icon_filename = editingFile.name
-        payload.icon_content_type = editingFile.type || item.icon_content_type
+        payload.icon_content_type = imageUploadContentType(editingFile)
         payload.icon_data_base64 = await fileToBase64(editingFile)
       }
       const updated = await updatePaperJournalIconSetting(item.id, payload)
@@ -203,7 +204,7 @@ export default function PaperJournalIconsView() {
                   <div className="file-icon-preview-cell">
                     {item.icon_url != null && item.icon_url !== '' && <img alt="" aria-hidden="true" src={item.icon_url} />}
                     {editingId === item.id && (
-                      <input accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml" onChange={(event) => setEditingFile(event.target.files?.[0] ?? null)} type="file" />
+                      <input accept={imageUploadAccept} onChange={(event) => setEditingFile(event.target.files?.[0] ?? null)} type="file" />
                     )}
                   </div>
                   <div>
@@ -231,7 +232,7 @@ export default function PaperJournalIconsView() {
             )}
             <form className="file-icons-row file-icons-create-row" onSubmit={handleCreate}>
               <div>
-                <input accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml" onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)} type="file" />
+                <input accept={imageUploadAccept} onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)} type="file" />
               </div>
               <div>
                 <input

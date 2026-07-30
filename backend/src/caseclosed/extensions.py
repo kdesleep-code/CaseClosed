@@ -48,6 +48,7 @@ from caseclosed.db.models import CaseAutoAssignRule
 from caseclosed.db.models import CaseMailLink
 from caseclosed.db.models import CaseStakeholder
 from caseclosed.db.models import CalendarEvent
+from caseclosed.db.models import CalendarEventLink
 from caseclosed.db.models import Contact
 from caseclosed.db.models import ContactEmailAddress
 from caseclosed.db.models import ContactTag
@@ -73,7 +74,11 @@ from caseclosed.storage import storage_object_version_data
 from caseclosed.storage import update_storage_object_from_upload
 
 
-def extension_calendar_event_data(event: CalendarEvent) -> dict[str, object]:
+def extension_calendar_event_data(
+    event: CalendarEvent,
+    *,
+    case_links: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
     if event.all_day:
         start: dict[str, object] = {"date": event.start_at[:10]}
         end: dict[str, object] = {"date": event.end_at[:10]}
@@ -86,6 +91,7 @@ def extension_calendar_event_data(event: CalendarEvent) -> dict[str, object]:
     return {
         "id": event.id,
         "calendar_source_id": event.external_calendar_id,
+        "recurring_event_id": event.recurring_event_id,
         "summary": event.summary,
         "description": event.description,
         "location": event.location,
@@ -95,6 +101,7 @@ def extension_calendar_event_data(event: CalendarEvent) -> dict[str, object]:
         "sync_status": event.sync_status,
         "attendance_requirement": event.attendance_requirement,
         "tags_json": event.tags_json,
+        "case_links": case_links or [],
     }
 
 
@@ -127,6 +134,10 @@ class ExtensionStartRequest(BaseModel):
     case_id: str | None = None
     context: dict[str, object] | None = None
     idle_timeout_seconds: int = 1800
+
+
+class ExtensionCalendarCaseLinkCreate(BaseModel):
+    case_id: str
 
 
 class ExtensionOutputUpload(BaseModel):
@@ -1060,6 +1071,28 @@ def list_extension_calendar_db_events(
     events = session.scalars(
         statement.order_by(CalendarEvent.start_at.asc(), CalendarEvent.summary.asc()).limit(limit)
     ).all()
+    from caseclosed.google_integration import calendar_event_link_item
+    from caseclosed.google_integration import inherit_calendar_event_links_from_recurring_master
+
+    now = jst_iso()
+    for event in events:
+        inherit_calendar_event_links_from_recurring_master(session, event=event, now=now)
+    session.flush()
+    event_ids = [event.id for event in events]
+    case_links_by_event: dict[str, list[dict[str, object]]] = {
+        event_id: [] for event_id in event_ids
+    }
+    if event_ids:
+        case_links = session.scalars(
+            select(CalendarEventLink)
+            .where(CalendarEventLink.calendar_event_id.in_(event_ids))
+            .where(CalendarEventLink.linked_type == "case")
+            .order_by(CalendarEventLink.created_at.asc())
+        ).all()
+        for link in case_links:
+            case_links_by_event.setdefault(link.calendar_event_id, []).append(
+                calendar_event_link_item(session, link)
+            )
     extension = session.get(ExtensionDefinition, instance.extension_id)
     write_extension_audit_log(
         session,
@@ -1081,7 +1114,111 @@ def list_extension_calendar_db_events(
     return {
         "ok": True,
         "data": {
-            "items": [extension_calendar_event_data(event) for event in events],
+            "items": [
+                extension_calendar_event_data(
+                    event,
+                    case_links=case_links_by_event.get(event.id, []),
+                )
+                for event in events
+            ],
+        },
+    }
+
+
+@extension_api_router.post("/calendar/db-events/{event_id}/case-link")
+def create_extension_calendar_case_link(
+    event_id: str,
+    payload: ExtensionCalendarCaseLinkCreate,
+    instance: ExtensionInstance = Depends(require_extension_instance),
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    from caseclosed.google_integration import calendar_event_link_item
+    from caseclosed.google_integration import ensure_calendar_event_link
+    from caseclosed.google_integration import (
+        propagate_calendar_event_links_to_recurring_instances,
+    )
+
+    event = session.get(CalendarEvent, event_id)
+    if (
+        event is None
+        or event.sync_status in {"missing_from_google", "cancelled"}
+        or event.google_status == "cancelled"
+    ):
+        raise json_error(
+            404,
+            "CALENDAR_EVENT_NOT_FOUND",
+            "Calendar event was not found.",
+        )
+    case = ensure_case_exists(session, payload.case_id.strip())
+    if case.system_case_key == "inbox":
+        raise json_error(
+            422,
+            "BUCKET_NOT_ALLOWED",
+            "Bucket cannot be linked as a report Case.",
+        )
+
+    target_event = event
+    if event.recurring_event_id and event.external_calendar_id:
+        master_event = session.scalar(
+            select(CalendarEvent)
+            .where(CalendarEvent.source == event.source)
+            .where(CalendarEvent.external_calendar_id == event.external_calendar_id)
+            .where(CalendarEvent.external_event_id == event.recurring_event_id)
+        )
+        if master_event is not None:
+            target_event = master_event
+
+    now = jst_iso()
+    ensure_calendar_event_link(
+        session,
+        event=target_event,
+        linked_type="case",
+        linked_id=case.id,
+        role="related",
+        now=now,
+    )
+    propagate_calendar_event_links_to_recurring_instances(
+        session, master_event=target_event, now=now
+    )
+    session.flush()
+    event_link = session.scalar(
+        select(CalendarEventLink)
+        .where(CalendarEventLink.calendar_event_id == event.id)
+        .where(CalendarEventLink.linked_type == "case")
+        .where(CalendarEventLink.linked_id == case.id)
+        .where(CalendarEventLink.role == "related")
+    )
+    if event_link is None:
+        event_link = ensure_calendar_event_link(
+            session,
+            event=event,
+            linked_type="case",
+            linked_id=case.id,
+            role="related",
+            now=now,
+        )
+    assert event_link is not None
+    extension = session.get(ExtensionDefinition, instance.extension_id)
+    write_extension_audit_log(
+        session,
+        action_type="extension.calendar_case_link_created",
+        target_type="calendar_event_link",
+        target_id=event_link.id,
+        case_id=case.id,
+        metadata={
+            "extension_instance_id": instance.id,
+            "extension_id": instance.extension_id,
+            "slug": extension.slug if extension is not None else None,
+            "calendar_event_id": event.id,
+            "case_id": case.id,
+        },
+    )
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "link": calendar_event_link_item(session, event_link),
+            "case": case_data(case, session),
         },
     }
 

@@ -4,6 +4,9 @@ import base64
 from email import message_from_bytes
 import sqlite3
 import json
+from types import SimpleNamespace
+
+from caseclosed.services.mail_sending import handle_mail_send_mock
 
 CONTACTS_URL = "/api/v1/contacts"
 MOCK_MAILS_URL = "/api/v1/mails/mock-ingest"
@@ -75,6 +78,78 @@ def create_known_sender_mail(client, *, subject: str, body_text: str = "") -> st
         },
     )
     return response.json()["data"]["message_id"]
+
+
+def test_mail_list_can_filter_all_sender_and_recipient_addresses_for_contact(client) -> None:
+    contact_response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Participant Contact",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "participant.primary@example.com", "is_primary": True},
+                {"email_address": "participant.secondary@example.com", "is_primary": False},
+            ],
+        },
+    )
+    contact_id = contact_response.json()["data"]["id"]
+
+    inbound_response = client.post(
+        MOCK_MAILS_URL,
+        json={
+            "gmail_message_id": "gmail_contact_participant_inbound",
+            "gmail_thread_id": "thread_contact_participant_inbound",
+            "subject": "Participant inbound",
+            "from_address": "participant.primary@example.com",
+            "to_addresses": ["user@example.com"],
+            "received_at": "2026-07-22T10:00:00+09:00",
+            "body_text": "Inbound from the Contact.",
+        },
+    )
+    outbound_response = client.post(
+        MOCK_MAILS_URL,
+        json={
+            "gmail_message_id": "gmail_contact_participant_outbound",
+            "gmail_thread_id": "thread_contact_participant_outbound",
+            "subject": "Participant outbound",
+            "from_address": "user@example.com",
+            "to_addresses": ["participant.secondary@example.com"],
+            "gmail_labels": ["SENT"],
+            "received_at": "2026-07-22T10:05:00+09:00",
+            "body_text": "Outbound to the Contact.",
+        },
+    )
+    unrelated_response = client.post(
+        MOCK_MAILS_URL,
+        json={
+            "gmail_message_id": "gmail_contact_participant_unrelated",
+            "gmail_thread_id": "thread_contact_participant_unrelated",
+            "subject": "Unrelated mail",
+            "from_address": "other@example.com",
+            "to_addresses": ["user@example.com"],
+            "received_at": "2026-07-22T10:10:00+09:00",
+        },
+    )
+    assert inbound_response.status_code == 200
+    assert outbound_response.status_code == 200
+    assert unrelated_response.status_code == 200
+
+    list_response = client.get(
+        f"{MAILS_URL}?tab=all&contact_id={contact_id}&sort=newest&limit=25"
+    )
+    assert list_response.status_code == 200
+    assert {item["subject"] for item in list_response.json()["data"]["items"]} == {
+        "Participant inbound",
+        "Participant outbound",
+    }
+
+    narrowed_response = client.get(
+        f"{MAILS_URL}?tab=all&contact_id={contact_id}&q=inbound&limit=25"
+    )
+    assert [item["subject"] for item in narrowed_response.json()["data"]["items"]] == [
+        "Participant inbound"
+    ]
+    assert client.get(f"{MAILS_URL}?contact_id=missing-contact").status_code == 404
 
 
 def test_mail_thread_can_be_assigned_to_case(client) -> None:
@@ -292,6 +367,102 @@ def test_mail_ingestion_applies_case_auto_assign_rules(client) -> None:
     )
     assert delete_response.status_code == 200
     assert delete_response.json()["data"]["deleted"] is True
+
+
+def test_case_auto_assign_rules_support_contact_and_email_scopes(client) -> None:
+    contact_case_response = client.post(
+        CASES_URL,
+        json={
+            "name": "Contact-wide Rule Case",
+            "description": None,
+            "progress_status": "in_progress",
+            "ball_status": "user",
+        },
+    )
+    email_case_response = client.post(
+        CASES_URL,
+        json={
+            "name": "Email-only Rule Case",
+            "description": None,
+            "progress_status": "in_progress",
+            "ball_status": "user",
+        },
+    )
+    contact_case_id = contact_case_response.json()["data"]["case"]["id"]
+    email_case_id = email_case_response.json()["data"]["case"]["id"]
+    contact_response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Multi Address Sender",
+            "status": "active",
+            "email_addresses": [
+                {"email_address": "primary@example.com", "is_primary": True},
+                {"email_address": "service-topic@example.com", "is_primary": False},
+            ],
+        },
+    )
+    contact_id = contact_response.json()["data"]["id"]
+
+    contact_rule_response = client.post(
+        f"{CASES_URL}/{contact_case_id}/auto-assign-rules",
+        json={"contact_id": contact_id},
+    )
+    email_rule_response = client.post(
+        f"{CASES_URL}/{email_case_id}/auto-assign-rules",
+        json={"sender_email": "primary@example.com"},
+    )
+
+    assert contact_rule_response.status_code == 200
+    assert contact_rule_response.json()["data"]["rule"]["rule_type"] == "sender_contact"
+    assert contact_rule_response.json()["data"]["rule"]["contact_display_name"] == (
+        "Multi Address Sender"
+    )
+    assert email_rule_response.status_code == 200
+    assert email_rule_response.json()["data"]["rule"]["rule_type"] == "sender_email"
+
+    all_rules_response = client.get(f"{CASES_URL}/auto-assign-rules")
+    assert all_rules_response.status_code == 200
+    all_rules = all_rules_response.json()["data"]["items"]
+    assert [item["case_name"] for item in all_rules] == [
+        "Contact-wide Rule Case",
+        "Email-only Rule Case",
+    ]
+    assert {
+        (item["case_id"], item["rule_type"], item["display_value"])
+        for item in all_rules
+    } == {
+        (contact_case_id, "sender_contact", "Multi Address Sender"),
+        (email_case_id, "sender_email", "primary@example.com"),
+    }
+
+    secondary_message_id = ingest_mail(
+        client,
+        gmail_message_id="gmail_contact_scope_secondary",
+        gmail_thread_id="thread_contact_scope_secondary",
+        from_address="service-topic@example.com",
+        subject="Secondary address mail",
+        received_at="2026-07-21T10:00:00+09:00",
+    )
+    secondary_detail = client.get(f"{MAILS_URL}/{secondary_message_id}").json()["data"]
+    secondary_case_ids = {
+        item["case_id"] for item in secondary_detail["case_links"]
+    }
+    assert contact_case_id in secondary_case_ids
+    assert email_case_id not in secondary_case_ids
+
+    primary_message_id = ingest_mail(
+        client,
+        gmail_message_id="gmail_contact_scope_primary",
+        gmail_thread_id="thread_contact_scope_primary",
+        from_address="primary@example.com",
+        subject="Primary address mail",
+        received_at="2026-07-21T10:05:00+09:00",
+    )
+    primary_detail = client.get(f"{MAILS_URL}/{primary_message_id}").json()["data"]
+    primary_case_ids = {
+        item["case_id"] for item in primary_detail["case_links"]
+    }
+    assert {contact_case_id, email_case_id}.issubset(primary_case_ids)
 
 
 def insert_received_attachment(
@@ -616,6 +787,32 @@ def test_mail_detail_and_list_report_received_attachments(client, database_path)
     assert item["attachment_count"] == 1
 
 
+def test_mail_detail_hides_legacy_inline_uuid_images(client, database_path) -> None:
+    message_id = create_known_sender_mail(
+        client,
+        subject="Google shared-file notification",
+        body_text="A file was shared.",
+    )
+    insert_received_attachment(
+        database_path,
+        attachment_id="mail_attachment_inline_image",
+        message_id=message_id,
+        gmail_message_id="gmail_mail_api_1",
+        gmail_attachment_id="gmail_inline_image",
+        filename="2b2b4e92-e9c1-4215-bf82-2ddca127240c",
+        mime_type="image/png",
+        byte_size=2877,
+    )
+
+    detail_response = client.get(f"{MAILS_URL}/{message_id}")
+
+    assert detail_response.status_code == 200
+    message = detail_response.json()["data"]["message"]
+    assert message["attachments"] == []
+    assert message["attachment_count"] == 0
+    assert message["has_attachments"] is False
+
+
 def test_mail_attachment_download_caches_gmail_data(
     client,
     database_path,
@@ -657,14 +854,29 @@ def test_mail_attachment_download_caches_gmail_data(
     first_response = client.get(
         f"{MAILS_URL}/attachments/mail_attachment_download/download"
     )
+    with sqlite3.connect(database_path) as connection:
+        storage_object_id = connection.execute(
+            "SELECT storage_object_id FROM gmail_message_attachments WHERE id = ?",
+            ("mail_attachment_download",),
+        ).fetchone()[0]
+        connection.execute(
+            "UPDATE storage_objects SET original_filename = ? WHERE id = ?",
+            ("storage_object_internal_name.txt", storage_object_id),
+        )
     second_response = client.get(
         f"{MAILS_URL}/attachments/mail_attachment_download/download"
     )
 
     assert first_response.status_code == 200
     assert first_response.content == b"hello attachment"
+    assert first_response.headers["content-disposition"] == (
+        'attachment; filename="review-note.txt"'
+    )
     assert second_response.status_code == 200
     assert second_response.content == b"hello attachment"
+    assert second_response.headers["content-disposition"] == (
+        'attachment; filename="review-note.txt"'
+    )
     assert calls == [
         "/users/me/messages/gmail_mail_api_1/attachments/gmail_attach_download"
     ]
@@ -1374,6 +1586,13 @@ def test_send_only_sent_message_appears_in_done_list(
     items = list_response.json()["data"]["items"]
     sent_item = next(item for item in items if item["subject"] == "Standalone sent mail")
 
+    search_response = client.get(
+        f"{MAILS_URL}?tab=all&q=starts%20a%20new%20thread"
+    )
+    assert search_response.status_code == 200
+    assert sent_item["id"] in [
+        item["id"] for item in search_response.json()["data"]["items"]
+    ]
     assert sent_item["processed_status"] == "processed"
     assert sent_item["read_status"] == "read"
     assert sent_item["effective_importance"] == "sent"
@@ -1773,6 +1992,126 @@ def test_scheduled_send_request_can_be_rescheduled_sent_now_and_canceled(
             ).fetchall()
         )
     assert statuses == {send_request["id"]: "canceled", second_id: "sent_gmail"}
+
+
+def test_reschedule_supersedes_pending_and_already_claimed_old_jobs(
+    client,
+    database_path,
+) -> None:
+    first_response = client.post(
+        f"{MAILS_URL}/send",
+        json={
+            "to_addresses": ["first@example.com"],
+            "subject": "Pending old schedule",
+            "body_text": "Do not send at the old time.",
+            "scheduled_at": "2099-05-25T09:00:00+09:00",
+        },
+    )
+    first_id = first_response.json()["data"]["id"]
+    with sqlite3.connect(database_path) as connection:
+        first_old_job = connection.execute(
+            """
+            SELECT id
+            FROM jobs
+            WHERE job_type = 'mail_send_mock'
+              AND json_extract(payload_json, '$.send_request_id') = ?
+            """,
+            (first_id,),
+        ).fetchone()
+
+    first_reschedule = client.patch(
+        f"{MAILS_URL}/send-requests/{first_id}/schedule",
+        json={"scheduled_at": "2099-05-25T10:00:00+09:00"},
+    )
+    assert first_reschedule.status_code == 200
+    with sqlite3.connect(database_path) as connection:
+        first_jobs = connection.execute(
+            """
+            SELECT id, status, available_at, result_json
+            FROM jobs
+            WHERE job_type = 'mail_send_mock'
+              AND json_extract(payload_json, '$.send_request_id') = ?
+            ORDER BY created_at, id
+            """,
+            (first_id,),
+        ).fetchall()
+    first_jobs_by_id = {row[0]: row for row in first_jobs}
+    superseded_job = first_jobs_by_id[first_old_job[0]]
+    assert superseded_job[1:3] == (
+        "succeeded",
+        "2099-05-25T09:00:00+09:00",
+    )
+    assert json.loads(superseded_job[3])["status"] == "superseded"
+    replacement_jobs = [row for row in first_jobs if row[0] != first_old_job[0]]
+    assert len(replacement_jobs) == 1
+    assert replacement_jobs[0][1:3] == (
+        "pending",
+        "2099-05-25T10:00:00+09:00",
+    )
+
+    second_response = client.post(
+        f"{MAILS_URL}/send",
+        json={
+            "to_addresses": ["second@example.com"],
+            "subject": "Claimed old schedule",
+            "body_text": "A claimed stale job must not send.",
+            "scheduled_at": "2099-05-25T11:00:00+09:00",
+        },
+    )
+    second_id = second_response.json()["data"]["id"]
+    with sqlite3.connect(database_path) as connection:
+        second_old_job = connection.execute(
+            """
+            SELECT id, payload_json, available_at
+            FROM jobs
+            WHERE job_type = 'mail_send_mock'
+              AND json_extract(payload_json, '$.send_request_id') = ?
+            """,
+            (second_id,),
+        ).fetchone()
+        connection.execute(
+            "UPDATE jobs SET status = 'running' WHERE id = ?",
+            (second_old_job[0],),
+        )
+        connection.commit()
+
+    second_reschedule = client.patch(
+        f"{MAILS_URL}/send-requests/{second_id}/schedule",
+        json={"scheduled_at": "2099-05-25T12:00:00+09:00"},
+    )
+    assert second_reschedule.status_code == 200
+    stale_result = handle_mail_send_mock(
+        SimpleNamespace(
+            payload_json=second_old_job[1],
+            available_at=second_old_job[2],
+        )
+    )
+    assert stale_result["status"] == "superseded"
+    assert stale_result["reason"] == "request_version_changed"
+    with sqlite3.connect(database_path) as connection:
+        second_request = connection.execute(
+            "SELECT status, scheduled_at, sent_message_id FROM mail_send_requests WHERE id = ?",
+            (second_id,),
+        ).fetchone()
+    assert second_request == ("scheduled_mock", "2099-05-25T12:00:00+09:00", None)
+
+    past_response = client.patch(
+        f"{MAILS_URL}/send-requests/{second_id}/schedule",
+        json={"scheduled_at": "2000-01-01T00:00:00+09:00"},
+    )
+    assert past_response.status_code == 422
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE mail_send_requests SET status = 'sending_gmail' WHERE id = ?",
+            (second_id,),
+        )
+        connection.commit()
+    already_sending_response = client.patch(
+        f"{MAILS_URL}/send-requests/{second_id}/schedule",
+        json={"scheduled_at": "2099-05-25T13:00:00+09:00"},
+    )
+    assert already_sending_response.status_code == 409
 
 
 def test_send_only_scheduled_request_appears_in_done_list_and_detail(client) -> None:
@@ -2798,6 +3137,33 @@ def test_mail_list_uses_limit_and_cursor_pagination(client) -> None:
     assert second_response.json()["data"]["next_cursor"] is None
     assert invalid_response.status_code == 422
 
+    client.post(
+        f"{MAILS_URL}/{newest_id}/importance", json={"importance": "Low"}
+    )
+    client.post(
+        f"{MAILS_URL}/{middle_id}/importance", json={"importance": "High"}
+    )
+    client.post(
+        f"{MAILS_URL}/{oldest_id}/importance", json={"importance": "Pinned"}
+    )
+
+    importance_first_response = client.get(
+        f"{MAILS_URL}?sort=importance&limit=2"
+    )
+    importance_first_data = importance_first_response.json()["data"]
+    importance_second_response = client.get(
+        f"{MAILS_URL}?sort=importance&limit=2&cursor={importance_first_data['next_cursor']}"
+    )
+
+    assert importance_first_response.status_code == 200
+    assert [item["id"] for item in importance_first_data["items"]] == [
+        oldest_id,
+        middle_id,
+    ]
+    assert [item["id"] for item in importance_second_response.json()["data"]["items"]] == [
+        newest_id
+    ]
+
 
 def test_mail_process_unprocess_and_importance_update(client) -> None:
     message_id = create_known_sender_mail(
@@ -2985,3 +3351,67 @@ def test_full_session_cannot_use_low_mail_review_api(
 
     response = client.get(f"{MAILS_URL}/review/today")
     assert response.status_code == 403
+
+
+def test_scheduled_send_case_link_is_transferred_to_sent_mail(
+    client,
+    database_path,
+    monkeypatch,
+) -> None:
+    case_response = client.post(
+        CASES_URL,
+        json={
+            "name": "Scheduled Send Case",
+            "progress_status": "in_progress",
+            "ball_status": "user",
+        },
+    )
+    case_id = case_response.json()["data"]["case"]["id"]
+    send_response = client.post(
+        f"{MAILS_URL}/send",
+        json={
+            "to_addresses": ["scheduled.case@example.com"],
+            "subject": "Scheduled Case Link",
+            "body_text": "Keep this Case assignment after sending.",
+            "scheduled_at": "2099-07-29T15:00:00+09:00",
+        },
+    )
+    send_request_id = send_response.json()["data"]["id"]
+
+    assign_response = client.post(
+        f"{MAILS_URL}/{send_request_id}/case-links",
+        json={"case_id": case_id},
+    )
+    assert assign_response.status_code == 200
+    assert assign_response.json()["data"]["case_links"] == [
+        {"id": case_id, "case_id": case_id, "title": "Scheduled Send Case"}
+    ]
+
+    connect_gmail_send(database_path)
+    patch_gmail_send_response(
+        monkeypatch,
+        gmail_message_id="gmail_scheduled_case_link",
+        gmail_thread_id="thread_scheduled_case_link",
+        subject="Scheduled Case Link",
+        body_text="Keep this Case assignment after sending.",
+        to_address="scheduled.case@example.com",
+    )
+    assert client.post(f"{MAILS_URL}/send-requests/{send_request_id}/send-now").status_code == 200
+    assert client.post("/api/v1/jobs/run-next").status_code == 200
+
+    old_url_detail = client.get(f"{MAILS_URL}/{send_request_id}")
+    assert old_url_detail.status_code == 200
+    detail = old_url_detail.json()["data"]
+    assert detail["message"]["id"] != send_request_id
+    assert [item["case_id"] for item in detail["case_links"]] == [case_id]
+
+    with sqlite3.connect(database_path) as connection:
+        sent_message_id = connection.execute(
+            "SELECT sent_message_id FROM mail_send_requests WHERE id = ?",
+            (send_request_id,),
+        ).fetchone()[0]
+        transferred = connection.execute(
+            "SELECT count(1) FROM case_mail_links WHERE case_id = ? AND message_id = ?",
+            (case_id, sent_message_id),
+        ).fetchone()[0]
+    assert transferred == 1

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+import json
 import time
 
 from fastapi import APIRouter
+from fastapi import Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from caseclosed.auth import json_error
@@ -103,6 +107,41 @@ def state_data(state: PomodoroState) -> dict[str, object]:
         "updated_at_epoch_ms": int(state.updated_at_epoch * 1000),
         "version": state.version,
     }
+
+
+async def pomodoro_event_stream(
+    request: Request,
+    *,
+    poll_seconds: float = 0.25,
+    heartbeat_seconds: float = 15.0,
+):
+    last_version: int | None = None
+    last_heartbeat = time.monotonic()
+    while not await request.is_disconnected():
+        data = state_data(STATE)
+        version = int(data["version"])
+        if version != last_version:
+            last_version = version
+            payload = json.dumps({"state": data}, ensure_ascii=False)
+            yield f"event: state\ndata: {payload}\n\n"
+            last_heartbeat = time.monotonic()
+        elif time.monotonic() - last_heartbeat >= heartbeat_seconds:
+            yield ": keep-alive\n\n"
+            last_heartbeat = time.monotonic()
+        await asyncio.sleep(poll_seconds)
+
+
+@router.get("/events")
+async def stream_pomodoro_events(request: Request) -> StreamingResponse:
+    return StreamingResponse(
+        pomodoro_event_stream(request),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("")

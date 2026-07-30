@@ -127,6 +127,42 @@ def test_tsukuba_student_email_adds_year_tag_when_address_is_added(client) -> No
     assert add_response.json()["data"]["tags"] == ["2023-", "supervised-student"]
 
 
+def test_contact_auto_tag_rules_can_be_configured_and_applied(client) -> None:
+    default_response = client.get(f"{CONTACTS_URL}/auto-tag-rules")
+    assert default_response.status_code == 200
+    assert default_response.json()["data"]["items"][0]["tag_template"] == "20{year}-"
+
+    update_response = client.put(
+        f"{CONTACTS_URL}/auto-tag-rules",
+        json={"items": [{
+            "id": "example-staff",
+            "label": "Example staff",
+            "email_pattern": r"^[^@]+@staff\.example\.org$",
+            "tag_template": "example-staff",
+            "enabled": True,
+        }]},
+    )
+    assert update_response.status_code == 200
+    contact_response = client.post(
+        CONTACTS_URL,
+        json={
+            "display_name": "Configured Staff",
+            "status": "active",
+            "kind": "person",
+            "sender_resolution_mode": "self",
+            "tags": [],
+            "email_addresses": [{"email_address": "person@staff.example.org", "is_primary": True}],
+        },
+    )
+    assert contact_response.json()["data"]["tags"] == ["example-staff"]
+
+    invalid_response = client.put(
+        f"{CONTACTS_URL}/auto-tag-rules",
+        json={"items": [{"id": "bad", "label": "Bad", "email_pattern": "[", "tag_template": "bad", "enabled": True}]},
+    )
+    assert invalid_response.status_code == 422
+
+
 def test_mailing_list_reserved_tag_is_still_rejected(client) -> None:
     response = client.post(
         CONTACTS_URL,

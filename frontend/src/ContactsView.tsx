@@ -16,9 +16,10 @@ import {
   updateContact,
   uploadContactImage,
 } from './phase3Api'
+import { imageUploadAccept, imageUploadContentType } from './imageUpload'
 import type { Contact, ContactCustomTab, UnresolvedFromAddress } from './phase3Api'
 import { t } from './i18n'
-import { TopNav, navigateTo } from './navigation'
+import { AppLink, TopNav, navigateTo } from './navigation'
 
 type ContactsMode = 'list' | 'pending'
 type ContactStatus = 'active' | 'skipped' | 'spam' | 'archived'
@@ -829,7 +830,7 @@ function ContactsView({
       const dataBase64 = await fileToBase64(file)
       const result = await uploadContactImage(selectedContact.id, {
         filename: file.name || null,
-        content_type: file.type || 'application/octet-stream',
+        content_type: imageUploadContentType(file),
         data_base64: dataBase64,
       })
       const updatedContact = {
@@ -1286,7 +1287,7 @@ function ContactsView({
             items={[
               ...(mode === 'pending'
                 ? [{ href: '/contacts', labelKey: 'contacts.heading' as const }]
-                : []),
+                : [{ href: '/contact-auto-tag-rules', labelKey: 'contacts.autoTags.open' as const }]),
               { href: '/', labelKey: 'top.heading' },
               { href: '/mail', labelKey: 'nav.mail' },
               { href: '/cases', labelKey: 'nav.cases' },
@@ -2008,12 +2009,23 @@ function ContactsView({
                                 </h2>
                                 <div className="contact-detail-actions">
                                   {!isContactDetailEditing && (
-                                    <button
-                                      onClick={() => beginContactDetailEdit(selectedContact)}
-                                      type="button"
-                                    >
-                                      {t('contacts.detail.edit')}
-                                    </button>
+                                    <>
+                                      <AppLink
+                                        href={`/mail?${new URLSearchParams({
+                                          contact_id: selectedContact.id,
+                                          contact_name: selectedContact.display_name,
+                                          sort: 'newest',
+                                        }).toString()}`}
+                                      >
+                                        {t('contacts.detail.openMails')}
+                                      </AppLink>
+                                      <button
+                                        onClick={() => beginContactDetailEdit(selectedContact)}
+                                        type="button"
+                                      >
+                                        {t('contacts.detail.edit')}
+                                      </button>
+                                    </>
                                   )}
                                 </div>
                               </div>
@@ -2493,7 +2505,7 @@ function ContactsView({
                               {isContactDetailEditing && (
                                 <div className="contact-detail-edit-buttons contact-detail-secondary">
                                   <input
-                                    accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+                                    accept={imageUploadAccept}
                                     aria-label={t('contacts.avatar.file')}
                                     className="visually-hidden"
                                     onChange={handleAvatarFileChange}

@@ -128,7 +128,7 @@ class Handler(BaseHTTPRequestHandler):
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>CaseClosed Extension Template</title>
+  <title>C@seClosed Extension Template</title>
   <style>
     body { font-family: system-ui, sans-serif; margin: 32px; color: #4d241b; background: #fff7ea; }
     main { max-width: 980px; margin: 0 auto; display: grid; gap: 18px; }
@@ -144,8 +144,8 @@ class Handler(BaseHTTPRequestHandler):
 <body>
   <main>
     <header>
-      <h1>CaseClosed Extension Template</h1>
-      <p>This template demonstrates CaseClosed Extension APIs without external dependencies.</p>
+      <h1>C@seClosed Extension Template</h1>
+      <p>This template demonstrates C@seClosed Extension APIs without external dependencies.</p>
     </header>
     <section>
       <h2>Basic APIs</h2>

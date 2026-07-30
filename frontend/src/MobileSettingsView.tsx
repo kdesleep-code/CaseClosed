@@ -73,7 +73,7 @@ export default function MobileSettingsView() {
     <main className="mobile-shell">
       <header className="mobile-topbar">
         <div>
-          <p>CaseClosed</p>
+          <p>C@seClosed</p>
           <h1>{t('mobile.settings.heading')}</h1>
         </div>
         <AppLink className="mobile-topbar-link" href="/m">

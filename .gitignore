@@ -21,6 +21,7 @@ data/
 logs/
 storage/
 .tmp/
+local-notes/
 certs/*.pem
 certs/*.crt
 certs/*.cer

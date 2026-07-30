@@ -71,6 +71,18 @@ class CaseMailLink(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
 
+class MailSendRequestCaseLink(Base):
+    __tablename__ = "mail_send_request_case_links"
+    __table_args__ = (UniqueConstraint("send_request_id", "case_id"),)
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    send_request_id: Mapped[str] = mapped_column(ForeignKey("mail_send_requests.id"), nullable=False)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
 class CaseAutoAssignRule(Base):
     __tablename__ = "case_auto_assign_rules"
     __table_args__ = (UniqueConstraint("case_id", "rule_type", "rule_value"),)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from urllib.parse import unquote
 from uuid import uuid4
 
@@ -48,11 +49,11 @@ RESERVED_CONTACT_TAGS = FORBIDDEN_CONTACT_TAGS | RESERVED_CONTACT_ROLE_TAGS
 MAIL_IMPORTANCE_RULE_ACTIONS = {"llm", "fixed", "llm_with_instruction"}
 MAIL_IMPORTANCE_RULE_VALUES = {"pinned", "high", "middle", "low"}
 CONTACT_CUSTOM_TABS_KEY = "contact_custom_tabs"
+CONTACT_AUTO_TAG_RULES_KEY = "contact_auto_tag_rules"
 MAX_CONTACT_CUSTOM_TABS = 4
 MAX_CONTACT_CUSTOM_TAB_NAME_LENGTH = 12
-TSUKUBA_STUDENT_EMAIL_PATTERN = re.compile(
-    r"^s(?P<year>\d{2})[^@]*@u\.tsukuba\.ac\.jp$",
-    re.IGNORECASE,
+DEFAULT_CONTACT_AUTO_TAG_RULES_PATH = (
+    Path(__file__).resolve().parent / "defaults" / "contact_auto_tag_rules.json"
 )
 
 
@@ -117,6 +118,18 @@ class ContactCustomTabInput(BaseModel):
 
 class ContactCustomTabsPayload(BaseModel):
     items: list[ContactCustomTabInput]
+
+
+class ContactAutoTagRuleInput(BaseModel):
+    id: str
+    label: str
+    email_pattern: str
+    tag_template: str
+    enabled: bool = True
+
+
+class ContactAutoTagRulesPayload(BaseModel):
+    items: list[ContactAutoTagRuleInput]
 
 
 def new_id(prefix: str) -> str:
@@ -348,13 +361,26 @@ def validate_email_address(email_address: str) -> str:
     return normalized
 
 
-def student_year_tag_for_email_address(email_address: str | None) -> str | None:
-    if email_address is None:
-        return None
-    match = TSUKUBA_STUDENT_EMAIL_PATTERN.match(email_address.strip())
-    if match is None:
-        return None
-    return f"20{match.group('year')}-"
+def contact_auto_tag_rules(session: DatabaseSession) -> list[dict[str, object]]:
+    setting = read_setting_json(session, CONTACT_AUTO_TAG_RULES_KEY)
+    if setting is None:
+        setting = json.loads(DEFAULT_CONTACT_AUTO_TAG_RULES_PATH.read_text(encoding="utf-8"))
+    items = setting.get("items", [])
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+
+def automatic_tags_for_email(session: DatabaseSession, email_address: str) -> set[str]:
+    tags: set[str] = set()
+    for rule in contact_auto_tag_rules(session):
+        if not rule.get("enabled", True):
+            continue
+        try:
+            match = re.match(str(rule["email_pattern"]), email_address.strip(), re.IGNORECASE)
+            if match:
+                tags.add(str(rule["tag_template"]).format(**match.groupdict()).strip())
+        except (KeyError, re.error):
+            continue
+    return {tag for tag in tags if tag}
 
 
 def contact_tags(session: DatabaseSession, contact_id: str) -> list[str]:
@@ -414,9 +440,20 @@ def email_address_data(email_address: ContactEmailAddress) -> dict[str, object]:
     }
 
 
-def contact_data(contact: Contact, session: DatabaseSession) -> dict[str, object]:
+def contact_data(
+    contact: Contact,
+    session: DatabaseSession,
+    *,
+    tags: list[str] | None = None,
+    email_addresses: list[ContactEmailAddress] | None = None,
+) -> dict[str, object]:
     user_memo = contact.user_memo if contact.user_memo is not None else contact.memo
-    email_addresses = contact_email_addresses(session, contact.id)
+    resolved_email_addresses = (
+        contact_email_addresses(session, contact.id)
+        if email_addresses is None
+        else email_addresses
+    )
+    resolved_tags = contact_tags(session, contact.id) if tags is None else tags
     return {
         "id": contact.id,
         "display_name": contact.display_name,
@@ -433,8 +470,11 @@ def contact_data(contact: Contact, session: DatabaseSession) -> dict[str, object
         "mail_importance_rule_instruction": contact.mail_importance_rule_instruction,
         "inbound_message_count": contact.inbound_message_count,
         "latest_received_at": contact.latest_received_at,
-        "tags": [] if contact.kind == "mailing_list" else contact_tags(session, contact.id),
-        "email_addresses": [email_address_data(email_address) for email_address in email_addresses],
+        "tags": [] if contact.kind == "mailing_list" else resolved_tags,
+        "email_addresses": [
+            email_address_data(email_address)
+            for email_address in resolved_email_addresses
+        ],
         "created_at": contact.created_at,
         "updated_at": contact.updated_at,
         "version": contact.version,
@@ -522,7 +562,7 @@ def set_contact_tags(
         )
 
 
-def sync_contact_student_year_tags(
+def sync_contact_auto_tags(
     session: DatabaseSession,
     contact: Contact,
     *,
@@ -538,11 +578,9 @@ def sync_contact_student_year_tags(
             tag
             for email_address in contact_email_addresses(session, contact.id)
             for tag in [
-                student_year_tag_for_email_address(
-                    email_address.normalized_email_address
-                )
+                *automatic_tags_for_email(session, email_address.normalized_email_address)
             ]
-            if tag is not None and tag.lower() not in existing_lookup
+            if tag.lower() not in existing_lookup
         }
     )
     for tag in tags_to_add:
@@ -784,6 +822,33 @@ def update_contact_custom_tabs(
     return {"ok": True, "data": {"items": items}}
 
 
+@router.get("/auto-tag-rules")
+def get_contact_auto_tag_rules(session: DatabaseSession = Depends(get_session)) -> dict[str, object]:
+    return {"ok": True, "data": {"items": contact_auto_tag_rules(session)}}
+
+
+@router.put("/auto-tag-rules")
+def update_contact_auto_tag_rules(payload: ContactAutoTagRulesPayload, session: DatabaseSession = Depends(get_session)) -> dict[str, object]:
+    items: list[dict[str, object]] = []
+    seen_ids: set[str] = set()
+    for rule in payload.items:
+        rule_id = rule.id.strip()
+        if not rule_id or rule_id in seen_ids or not rule.label.strip() or not rule.tag_template.strip():
+            raise json_error(422, "VALIDATION_ERROR", "Auto tag rules require unique IDs, labels, and tag templates.")
+        try:
+            re.compile(rule.email_pattern, re.IGNORECASE)
+        except re.error as error:
+            raise json_error(422, "VALIDATION_ERROR", f"Invalid email pattern: {error}") from None
+        seen_ids.add(rule_id)
+        items.append({"id": rule_id, "label": rule.label.strip(), "email_pattern": rule.email_pattern, "tag_template": rule.tag_template.strip(), "enabled": rule.enabled})
+    now = jst_iso()
+    write_setting_json(session, CONTACT_AUTO_TAG_RULES_KEY, {"items": items}, now)
+    for contact in session.scalars(select(Contact).where(Contact.deleted_at.is_(None))).all():
+        sync_contact_auto_tags(session, contact, now=now)
+    session.commit()
+    return {"ok": True, "data": {"items": items}}
+
+
 @router.get("")
 def list_contacts(
     status: str = "all",
@@ -798,9 +863,51 @@ def list_contacts(
         statement = statement.where(Contact.status == status)
 
     contacts = session.scalars(statement).all()
+    contact_ids = [contact.id for contact in contacts]
+    tags_by_contact_id: dict[str, list[str]] = {
+        contact_id: [] for contact_id in contact_ids
+    }
+    email_addresses_by_contact_id: dict[str, list[ContactEmailAddress]] = {
+        contact_id: [] for contact_id in contact_ids
+    }
+    if contact_ids:
+        for contact_id, tag in session.execute(
+            select(ContactTag.contact_id, ContactTag.tag)
+            .where(ContactTag.contact_id.in_(contact_ids))
+            .order_by(ContactTag.contact_id, ContactTag.tag)
+        ):
+            tags_by_contact_id[contact_id].append(tag)
+        email_addresses = session.scalars(
+            select(ContactEmailAddress)
+            .where(
+                ContactEmailAddress.contact_id.in_(contact_ids),
+                ContactEmailAddress.deleted_at.is_(None),
+            )
+            .order_by(
+                ContactEmailAddress.contact_id,
+                ContactEmailAddress.status,
+                ContactEmailAddress.is_primary.desc(),
+                ContactEmailAddress.email_address,
+            )
+        ).all()
+        for email_address in email_addresses:
+            if email_address.contact_id is not None:
+                email_addresses_by_contact_id[email_address.contact_id].append(
+                    email_address
+                )
     return {
         "ok": True,
-        "data": {"items": [contact_data(contact, session) for contact in contacts]},
+        "data": {
+            "items": [
+                contact_data(
+                    contact,
+                    session,
+                    tags=tags_by_contact_id[contact.id],
+                    email_addresses=email_addresses_by_contact_id[contact.id],
+                )
+                for contact in contacts
+            ]
+        },
     }
 
 
@@ -1002,7 +1109,7 @@ def create_contact(
     set_contact_tags(session, contact.id, payload.tags, now)
     for email_address in payload.email_addresses:
         link_email_address(session, contact, email_address, now=now, source="manual")
-    sync_contact_student_year_tags(session, contact, now=now)
+    sync_contact_auto_tags(session, contact, now=now)
     recalculate_contact_inbound_message_count(session, contact)
     if contact.status == "spam":
         apply_spam_status_to_existing_contact_mail(
@@ -1127,7 +1234,7 @@ def update_contact(
         set_contact_tags(session, contact.id, payload.tags, now)
     elif next_kind == "mailing_list":
         set_contact_tags(session, contact.id, [], now)
-    sync_contact_student_year_tags(session, contact, now=now)
+    sync_contact_auto_tags(session, contact, now=now)
 
     contact.version += 1
     contact.updated_at = now
@@ -1195,7 +1302,7 @@ def add_contact_email_address(
 
     now = jst_iso()
     link_email_address(session, contact, payload, now=now, source="manual")
-    sync_contact_student_year_tags(session, contact, now=now)
+    sync_contact_auto_tags(session, contact, now=now)
     recalculate_contact_inbound_message_count(session, contact)
     if contact.status == "spam":
         apply_spam_status_to_existing_contact_mail(
@@ -1269,7 +1376,7 @@ def activate_contact_email_address(
     email_address.is_primary = 0 if had_active_email_addresses else 1
     email_address.updated_at = now
     email_address.version += 1
-    sync_contact_student_year_tags(session, contact, now=now)
+    sync_contact_auto_tags(session, contact, now=now)
     contact.version += 1
     contact.updated_at = now
     session.commit()
@@ -1345,7 +1452,7 @@ def move_contact_email_address(
     )
     recalculate_contact_inbound_message_count(session, source_contact)
     recalculate_contact_inbound_message_count(session, target_contact)
-    sync_contact_student_year_tags(session, target_contact, now=now)
+    sync_contact_auto_tags(session, target_contact, now=now)
 
     source_contact.version += 1
     source_contact.updated_at = now
@@ -1436,7 +1543,7 @@ def merge_contact(
         | set(contact_tags(session, target_contact.id))
     )
     set_contact_tags(session, target_contact.id, merged_tags, now)
-    sync_contact_student_year_tags(session, target_contact, now=now)
+    sync_contact_auto_tags(session, target_contact, now=now)
     set_contact_tags(session, source_contact.id, [], now)
     source_contact.deleted_at = now
     source_contact.version += 1

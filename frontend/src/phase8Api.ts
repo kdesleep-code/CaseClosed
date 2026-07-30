@@ -321,6 +321,22 @@ export async function deleteTaskProgressEntry(
   )
 }
 
+export async function freezeTask(taskId: string): Promise<TaskItem> {
+  const data = await request<{ task: TaskItem }>(
+    '/api/v1/tasks/' + encodeURIComponent(taskId) + '/freeze',
+    { method: 'POST' },
+  )
+  return data.task
+}
+
+export async function unfreezeTask(taskId: string): Promise<TaskItem> {
+  const data = await request<{ task: TaskItem }>(
+    '/api/v1/tasks/' + encodeURIComponent(taskId) + '/unfreeze',
+    { method: 'POST' },
+  )
+  return data.task
+}
+
 export async function completeTask(taskId: string): Promise<TaskItem> {
   const data = await request<{ task: TaskItem }>(
     `/api/v1/tasks/${encodeURIComponent(taskId)}/complete`,

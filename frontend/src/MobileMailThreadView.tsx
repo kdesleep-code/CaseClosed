@@ -292,7 +292,11 @@ export default function MobileMailThreadView({ messageId }: MobileMailThreadView
                   {(message.attachments ?? []).length > 0 ? (
                     <div className="mobile-mail-detail-attachments">
                       {(message.attachments ?? []).map((attachment) => (
-                        <a href={attachment.download_url} key={attachment.id} rel="noreferrer" target="_blank">
+                        <a
+                          download={attachment.filename}
+                          href={attachment.download_url}
+                          key={attachment.id}
+                        >
                           {attachment.filename}
                         </a>
                       ))}

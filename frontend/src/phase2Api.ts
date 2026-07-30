@@ -22,6 +22,43 @@ export type MaintenanceStatus = {
   system_health?: MaintenanceSystemHealth
 }
 
+export type UsbBackup = {
+  backup_id: string
+  filename: string
+  created_at: string
+  byte_size: number
+  encrypted: boolean
+  includes: string[]
+}
+
+export type UsbBackupDevice = {
+  id: string
+  path: string
+  label: string
+  model: string
+  filesystem: string
+  size: number
+  mount_point: string | null
+  mounted: boolean
+  read_only: boolean
+  writable: boolean
+  backups: UsbBackup[]
+}
+
+export type UsbBackupOperation = {
+  operation_id: string
+  operation?: string
+  status: string
+  stage: string
+  error_message?: string
+  backup?: UsbBackup
+}
+
+export type PasswordChangeResult = {
+  password_type: 'full' | 'low_mail_review'
+  invalidated_sessions: number
+}
+
 export type MaintenanceSystemHealth = {
   status: 'healthy' | 'warning' | 'attention'
   checked_at: string
@@ -242,6 +279,64 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function readMaintenanceStatus(): Promise<MaintenanceStatus> {
   return request<MaintenanceStatus>('/api/v1/maintenance/status')
+}
+
+function changePassword(
+  path: string,
+  currentPassword: string,
+  newPassword: string,
+): Promise<PasswordChangeResult> {
+  return request<PasswordChangeResult>(path, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      current_password: currentPassword,
+      new_password: newPassword,
+    }),
+  })
+}
+
+export function changeLoginPassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<PasswordChangeResult> {
+  return changePassword('/api/v1/auth/password', currentPassword, newPassword)
+}
+
+export function changeLowMailReviewPassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<PasswordChangeResult> {
+  return changePassword(
+    '/api/v1/auth/low-mail-review-password',
+    currentPassword,
+    newPassword,
+  )
+}
+
+export async function listUsbBackupDevices(): Promise<UsbBackupDevice[]> {
+  const data = await request<{ devices: UsbBackupDevice[] }>('/api/v1/maintenance/usb-backups')
+  return data.devices
+}
+
+export function mountUsbBackupDevice(id: string): Promise<UsbBackupDevice> {
+  return request<UsbBackupDevice>(`/api/v1/maintenance/usb-backups/${id}/mount`, { method: 'POST' })
+}
+
+export function unmountUsbBackupDevice(id: string): Promise<UsbBackupDevice> {
+  return request<UsbBackupDevice>(`/api/v1/maintenance/usb-backups/${id}/unmount`, { method: 'POST' })
+}
+
+export function createUsbBackup(deviceId: string, passphrase: string): Promise<UsbBackupOperation> {
+  return request<UsbBackupOperation>('/api/v1/maintenance/usb-backups', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ device_id: deviceId, passphrase }) })
+}
+
+export function restoreUsbBackup(deviceId: string, backupId: string, passphrase: string, confirmation: string): Promise<UsbBackupOperation> {
+  return request<UsbBackupOperation>('/api/v1/maintenance/usb-backups/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ device_id: deviceId, backup_id: backupId, passphrase, confirmation }) })
+}
+
+export function readUsbBackupOperation(id: string): Promise<UsbBackupOperation> {
+  return request<UsbBackupOperation>(`/api/v1/maintenance/usb-backups/operations/${id}`)
 }
 
 export function readLlmCostHistory(): Promise<LlmCostHistory> {

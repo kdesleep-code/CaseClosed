@@ -68,6 +68,7 @@ def test_phase_4_migrations_add_mail_tables(
     table_names = sqlite_table_names(migrated_database)
 
     assert PHASE_4_TABLES <= table_names
+    assert "mail_send_request_case_links" in table_names
 
     with sqlite3.connect(migrated_database) as connection:
         message_columns = {
@@ -107,6 +108,24 @@ def test_phase_4_migrations_add_mail_tables(
             for row in connection.execute(
                 "PRAGMA table_info(mail_send_requests)"
             ).fetchall()
+        }
+        send_request_case_link_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(mail_send_request_case_links)"
+            ).fetchall()
+        }
+        index_names = {
+            row[1]
+            for table_name in (
+                "gmail_messages",
+                "gmail_message_attachments",
+                "mail_send_requests",
+                "case_mail_links",
+                "contact_tags",
+                "mail_send_request_case_links",
+            )
+            for row in connection.execute(f"PRAGMA index_list({table_name})").fetchall()
         }
 
     assert {
@@ -157,6 +176,18 @@ def test_phase_4_migrations_add_mail_tables(
         "llm_run_id",
     } <= thread_summary_columns
     assert {"attachment_names_json", "attachment_data_json"} <= send_request_columns
+    assert {"send_request_id", "case_id", "created_at", "updated_at"} <= send_request_case_link_columns
+    assert {
+        "ix_gmail_messages_received_at_id",
+        "ix_gmail_messages_thread_received",
+        "ix_gmail_message_attachments_message",
+        "ix_mail_send_requests_sent_message",
+        "ix_mail_send_requests_visible",
+        "ix_case_mail_links_message",
+        "ix_contact_tags_contact",
+        "ix_mail_send_request_case_links_request",
+        "ix_mail_send_request_case_links_case",
+    } <= index_names
 
 
 def test_phase_6_migrations_add_storage_tables(

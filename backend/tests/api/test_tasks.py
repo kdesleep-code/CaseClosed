@@ -739,3 +739,56 @@ def test_case_detail_uses_not_started_task_as_next_task_fallback(client) -> None
     assert detail["case"]["open_task_count"] == 0
     assert detail["case"]["next_task"]["id"] == future_task["id"]
     assert detail["tasks"] == []
+
+
+def test_task_can_be_frozen_and_restored_to_active_work(client) -> None:
+    case = create_case(client, "Frozen Task Case")
+    task = client.post(
+        "/api/v1/tasks",
+        json={"case_id": case["id"], "title": "Deferred conference work"},
+    ).json()["data"]["task"]
+
+    freeze_response = client.post(f"/api/v1/tasks/{task['id']}/freeze")
+    assert freeze_response.status_code == 200
+    frozen = freeze_response.json()["data"]["task"]
+    assert frozen["status"] == "frozen"
+
+    open_response = client.get(f"/api/v1/tasks?case_id={case['id']}&status=open")
+    assert open_response.status_code == 200
+    assert open_response.json()["data"]["items"] == []
+    frozen_response = client.get(f"/api/v1/tasks?case_id={case['id']}&status=frozen")
+    assert [item["id"] for item in frozen_response.json()["data"]["items"]] == [task["id"]]
+
+    memo_response = client.post(
+        f"/api/v1/tasks/{task['id']}/progress-entries",
+        json={"body": "Frozen because a higher-priority task arrived."},
+    )
+    assert memo_response.status_code == 200
+    assert memo_response.json()["data"]["task"]["status"] == "frozen"
+
+    complete_response = client.post(f"/api/v1/tasks/{task['id']}/complete")
+    assert complete_response.status_code == 409
+    assert complete_response.json()["error"]["code"] == "TASK_FROZEN"
+    case_complete_response = client.post(f"/api/v1/cases/{case['id']}/complete")
+    assert case_complete_response.status_code == 409
+    assert case_complete_response.json()["error"]["code"] == "OPEN_TASKS"
+
+    unfreeze_response = client.post(f"/api/v1/tasks/{task['id']}/unfreeze")
+    assert unfreeze_response.status_code == 200
+    assert unfreeze_response.json()["data"]["task"]["status"] == "in_progress"
+
+
+def test_unfreezing_future_task_restores_not_started_status(client) -> None:
+    case = create_case(client, "Future Frozen Task Case")
+    task = client.post(
+        "/api/v1/tasks",
+        json={
+            "case_id": case["id"],
+            "title": "Future frozen work",
+            "start_at": "2099-08-15",
+        },
+    ).json()["data"]["task"]
+    assert client.post(f"/api/v1/tasks/{task['id']}/freeze").status_code == 200
+    unfreeze_response = client.post(f"/api/v1/tasks/{task['id']}/unfreeze")
+    assert unfreeze_response.status_code == 200
+    assert unfreeze_response.json()["data"]["task"]["status"] == "not_started"

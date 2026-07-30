@@ -2244,6 +2244,17 @@ def case_current_situation_instructions() -> str:
         "or stakeholder roles that are not in the input. Keep summary to one short "
         "paragraph. key_points should have at most five items. risks should include "
         "only concrete uncertainties or blockers."
+        " When handover_generation is true, write a retrospective handover summary "
+        "for the next person rather than a present-tense status reminder. The document "
+        "must explain what the work is, why it exists, and its broad operational flow; "
+        "it must not become a message-by-message activity log. Use mail_timeline bodies "
+        "and summaries only as evidence. summary should give the overall purpose, scope, "
+        "and outcome in a compact paragraph. key_points should be three to five broad, "
+        "chronologically ordered phases of the work, combining related messages and "
+        "using month or season-level timing when useful. risks should contain only "
+        "knowledge the next person needs to operate the work. Omit routine exchanges, "
+        "delivery errors, acknowledgements, and incidental detail. Do not infer a date "
+        "or decision that is not supported by the supplied content."
     )
 
 

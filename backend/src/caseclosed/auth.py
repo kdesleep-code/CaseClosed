@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import secrets
 from datetime import timedelta
+from email.message import EmailMessage
+from email.utils import formatdate
 from uuid import uuid4
 
 from argon2 import PasswordHasher
@@ -17,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session as DatabaseSession
 
 from caseclosed.db.models import AppSetting
+from caseclosed.db.models import AuditLog
 from caseclosed.db.models import AuthLoginAttempt
 from caseclosed.db.models import ClientCertificate
 from caseclosed.db.models import Session
@@ -33,6 +36,8 @@ SESSION_COOKIE_NAME = "caseclosed_session"
 PASSWORD_HASH_KEY = "auth_password_hash"
 LOW_MAIL_REVIEW_PASSWORD_HASH_KEY = "auth_low_mail_review_password_hash"
 LOGIN_LOCK_KEY = "auth_login_locked"
+PASSWORD_RESET_LAST_SENT_AT_KEY = "auth_password_reset_last_sent_at"
+PASSWORD_RESET_COOLDOWN = timedelta(minutes=10)
 ACCESS_MODE_FULL = "full"
 ACCESS_MODE_LOW_MAIL_REVIEW = "low_mail_review"
 
@@ -42,6 +47,11 @@ router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 class LoginRequest(BaseModel):
     password: str
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str
 
 
 def json_error(status_code: int, code: str, message: str) -> HTTPException:
@@ -132,6 +142,137 @@ def verify_low_mail_review_password(
         return password_hasher.verify(password_hash, password)
     except VerifyMismatchError:
         return False
+
+
+def verify_hash(password_hash: str, password: str) -> bool:
+    try:
+        return password_hasher.verify(password_hash, password)
+    except VerifyMismatchError:
+        return False
+
+
+def validate_new_password(password: str) -> None:
+    if len(password) < 8:
+        raise json_error(
+            422,
+            "PASSWORD_TOO_SHORT",
+            "The new password must be at least 8 characters.",
+        )
+    if len(password) > 256:
+        raise json_error(
+            422,
+            "PASSWORD_TOO_LONG",
+            "The new password must be at most 256 characters.",
+        )
+
+
+def invalidate_other_sessions(
+    session: DatabaseSession,
+    current_session: Session,
+) -> int:
+    now = jst_iso()
+    other_sessions = session.scalars(
+        select(Session).where(
+            Session.id != current_session.id,
+            Session.logout_at.is_(None),
+        )
+    ).all()
+    for app_session in other_sessions:
+        app_session.logout_at = now
+        app_session.updated_at = now
+    return len(other_sessions)
+
+
+def record_password_change(
+    session: DatabaseSession,
+    current_session: Session,
+    target_id: str,
+) -> None:
+    now = jst_iso()
+    session.add(
+        AuditLog(
+            id=f"audit_{uuid4().hex}",
+            session_id=current_session.id,
+            action_type="auth_password_changed",
+            target_type="auth_password",
+            target_id=target_id,
+            case_id=None,
+            metadata_json=None,
+            occurred_at=now,
+            created_at=now,
+        )
+    )
+
+
+
+def generate_random_password() -> str:
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+    return "".join(secrets.choice(alphabet) for _ in range(16))
+
+
+def password_reset_retry_after_seconds(session: DatabaseSession) -> int:
+    setting = read_setting(session, PASSWORD_RESET_LAST_SENT_AT_KEY)
+    if setting is None:
+        return 0
+    try:
+        elapsed = jst_now() - parse_iso_datetime(setting.value_json)
+    except (TypeError, ValueError):
+        return 0
+    remaining = PASSWORD_RESET_COOLDOWN - elapsed
+    return max(0, int(remaining.total_seconds()) + 1)
+
+
+def send_password_reset_email(
+    session: DatabaseSession,
+    password: str,
+    changed_at: str,
+) -> None:
+    from caseclosed import google_integration as gmail
+
+    connected, can_send = gmail.gmail_connection_send_state(session)
+    if not connected or not can_send:
+        raise json_error(
+            503,
+            "PASSWORD_RESET_MAIL_UNAVAILABLE",
+            "Gmail sending is not available.",
+        )
+    connection = gmail.read_setting_json(session, gmail.GMAIL_CONNECTION_KEY) or {}
+    access_token = gmail.google_gmail_access_token(session, connection)
+    profile = gmail.gmail_api_get_json("/users/me/profile", access_token)
+    recipient = profile.get("emailAddress")
+    if not isinstance(recipient, str) or recipient.strip() == "":
+        raise json_error(
+            503,
+            "PASSWORD_RESET_MAIL_UNAVAILABLE",
+            "The connected Gmail address could not be determined.",
+        )
+
+    address = recipient.strip().lower()
+    message = EmailMessage()
+    message["From"] = address
+    message["To"] = address
+    message["Subject"] = "C@seClosed ログインパスワード再設定"
+    message["Date"] = formatdate(localtime=True)
+    message.set_content(
+        "C@seClosedのログインパスワードを再設定しました。\n"
+        "Your C@seClosed login password was reset.\n\n"
+        f"新しいパスワード / New password: {password}\n"
+        f"変更日時 / Changed at: {changed_at}\n\n"
+        "ログイン後、Maintenance > Securityから任意のパスワードへ変更してください。\n"
+        "After logging in, change it from Maintenance > Security."
+    )
+    gmail.gmail_api_send_raw_message(access_token, message.as_bytes())
+
+
+def invalidate_all_sessions(session: DatabaseSession) -> int:
+    now = jst_iso()
+    active_sessions = session.scalars(
+        select(Session).where(Session.logout_at.is_(None))
+    ).all()
+    for app_session in active_sessions:
+        app_session.logout_at = now
+        app_session.updated_at = now
+    return len(active_sessions)
 
 
 def client_fingerprint(request: Request) -> str | None:
@@ -354,6 +495,161 @@ def session_status(
             "device_name": certificate.device_name if certificate is not None else None,
             "ip_address": app_session.ip_address,
             "access_mode": session_access_mode(request),
+        },
+    }
+
+
+@router.post("/password-reset")
+def reset_password_by_email(
+    request: Request,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    retry_after = password_reset_retry_after_seconds(session)
+    if retry_after > 0:
+        raise json_error(
+            429,
+            "PASSWORD_RESET_RATE_LIMITED",
+            f"Please wait {retry_after} seconds before requesting another reset.",
+        )
+
+    new_password = generate_random_password()
+    changed_at = jst_iso()
+    try:
+        send_password_reset_email(session, new_password, changed_at)
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise json_error(
+            503,
+            "PASSWORD_RESET_MAIL_FAILED",
+            "The reset email could not be sent. The password was not changed.",
+        ) from error
+
+    upsert_setting(session, PASSWORD_HASH_KEY, password_hasher.hash(new_password))
+    upsert_setting(session, LOGIN_LOCK_KEY, "false")
+    upsert_setting(session, PASSWORD_RESET_LAST_SENT_AT_KEY, changed_at)
+    invalidated_sessions = invalidate_all_sessions(session)
+    now = jst_iso()
+    session.add(
+        AuditLog(
+            id=f"audit_{uuid4().hex}",
+            session_id=None,
+            action_type="auth_password_reset_by_email",
+            target_type="auth_password",
+            target_id="full",
+            case_id=None,
+            metadata_json=None,
+            occurred_at=now,
+            created_at=now,
+        )
+    )
+    record_attempt(session, request, success=True)
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "email_sent": True,
+            "invalidated_sessions": invalidated_sessions,
+            "retry_after_seconds": int(PASSWORD_RESET_COOLDOWN.total_seconds()),
+        },
+    }
+
+
+@router.patch("/password")
+def change_password(
+    payload: PasswordChangeRequest,
+    request: Request,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    current_session = require_session_access_mode(
+        session,
+        request,
+        ACCESS_MODE_FULL,
+    )
+    if not verify_password(session, payload.current_password):
+        raise json_error(
+            401,
+            "CURRENT_PASSWORD_INVALID",
+            "The current login password is incorrect.",
+        )
+    validate_new_password(payload.new_password)
+    current_hash = ensure_password_hash(session)
+    if verify_hash(current_hash, payload.new_password):
+        raise json_error(422, "PASSWORD_UNCHANGED", "Choose a different password.")
+    review_setting = read_setting(session, LOW_MAIL_REVIEW_PASSWORD_HASH_KEY)
+    if review_setting is not None and verify_hash(
+        review_setting.value_json, payload.new_password
+    ):
+        raise json_error(
+            422,
+            "PASSWORD_CONFLICT",
+            "The login password must differ from the simple page password.",
+        )
+
+    upsert_setting(
+        session,
+        PASSWORD_HASH_KEY,
+        password_hasher.hash(payload.new_password),
+    )
+    upsert_setting(session, LOGIN_LOCK_KEY, "false")
+    record_attempt(session, request, success=True)
+    invalidated_sessions = invalidate_other_sessions(session, current_session)
+    record_password_change(session, current_session, "full")
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "password_type": "full",
+            "invalidated_sessions": invalidated_sessions,
+        },
+    }
+
+
+@router.patch("/low-mail-review-password")
+def change_low_mail_review_password(
+    payload: PasswordChangeRequest,
+    request: Request,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    current_session = require_session_access_mode(
+        session,
+        request,
+        ACCESS_MODE_FULL,
+    )
+    if not verify_password(session, payload.current_password):
+        raise json_error(
+            401,
+            "CURRENT_PASSWORD_INVALID",
+            "The current login password is incorrect.",
+        )
+    validate_new_password(payload.new_password)
+    if verify_hash(ensure_password_hash(session), payload.new_password):
+        raise json_error(
+            422,
+            "PASSWORD_CONFLICT",
+            "The simple page password must differ from the login password.",
+        )
+    review_setting = read_setting(session, LOW_MAIL_REVIEW_PASSWORD_HASH_KEY)
+    if review_setting is not None and verify_hash(
+        review_setting.value_json, payload.new_password
+    ):
+        raise json_error(422, "PASSWORD_UNCHANGED", "Choose a different password.")
+
+    upsert_setting(
+        session,
+        LOW_MAIL_REVIEW_PASSWORD_HASH_KEY,
+        password_hasher.hash(payload.new_password),
+    )
+    upsert_setting(session, LOGIN_LOCK_KEY, "false")
+    record_attempt(session, request, success=True)
+    invalidated_sessions = invalidate_other_sessions(session, current_session)
+    record_password_change(session, current_session, "low_mail_review")
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "password_type": "low_mail_review",
+            "invalidated_sessions": invalidated_sessions,
         },
     }
 

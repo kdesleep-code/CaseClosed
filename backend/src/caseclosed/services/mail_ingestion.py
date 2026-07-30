@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from uuid import uuid4
 
+from sqlalchemy import and_
+from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DatabaseSession
 
@@ -361,11 +363,32 @@ def apply_case_auto_assign_rules(
     sender_email = normalize_email_address(message.from_address)
     if sender_email == "":
         return
+    sender_contact_id = session.scalar(
+        select(ContactEmailAddress.contact_id)
+        .join(Contact, Contact.id == ContactEmailAddress.contact_id)
+        .where(ContactEmailAddress.normalized_email_address == sender_email)
+        .where(ContactEmailAddress.status == "active")
+        .where(ContactEmailAddress.deleted_at.is_(None))
+        .where(Contact.deleted_at.is_(None))
+        .limit(1)
+    )
+    rule_conditions = [
+        and_(
+            CaseAutoAssignRule.rule_type == "sender_email",
+            CaseAutoAssignRule.rule_value == sender_email,
+        )
+    ]
+    if sender_contact_id is not None:
+        rule_conditions.append(
+            and_(
+                CaseAutoAssignRule.rule_type == "sender_contact",
+                CaseAutoAssignRule.rule_value == sender_contact_id,
+            )
+        )
     rules = session.execute(
         select(CaseAutoAssignRule, Case)
         .join(Case, Case.id == CaseAutoAssignRule.case_id)
-        .where(CaseAutoAssignRule.rule_type == "sender_email")
-        .where(CaseAutoAssignRule.rule_value == sender_email)
+        .where(or_(*rule_conditions))
         .where(CaseAutoAssignRule.is_enabled == 1)
         .where(Case.archived_at.is_(None))
     ).all()

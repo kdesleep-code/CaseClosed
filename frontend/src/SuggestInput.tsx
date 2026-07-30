@@ -55,7 +55,8 @@ export default function SuggestInput({
 
   useEffect(() => {
     if (value === lastSerializedRef.current) return
-    setTokens(splitValue(value).slice(0, maxItems))
+    const nextTokens = splitValue(value)
+    setTokens(maxItems === undefined ? nextTokens : nextTokens.slice(0, maxItems))
     setDraft('')
     lastSerializedRef.current = value
   }, [maxItems, value])

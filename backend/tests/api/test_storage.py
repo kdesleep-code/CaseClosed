@@ -20,6 +20,16 @@ def png_bytes(width: int, height: int) -> bytes:
     return output.getvalue()
 
 
+def heic_bytes(width: int, height: int) -> bytes:
+    output = BytesIO()
+    Image.new("RGB", (width, height), color=(64, 128, 192)).save(
+        output,
+        format="HEIF",
+        quality=80,
+    )
+    return output.getvalue()
+
+
 
 
 def simple_pdf_bytes(text_lines: list[str]) -> bytes:
@@ -345,6 +355,48 @@ def test_managed_object_upload_accepts_multipart_file(
             (storage_object["id"],),
         ).fetchone()[0]
     assert (database_path.parent / "storage" / storage_path).is_file()
+
+
+def test_managed_heic_object_and_version_have_webp_previews(client) -> None:
+    first_payload = heic_bytes(3000, 1500)
+    second_payload = heic_bytes(1200, 2400)
+    upload_response = client.post(
+        "/api/v1/storage/objects/upload",
+        files={"file": ("photo.heic", first_payload, "image/heic")},
+    )
+    assert upload_response.status_code == 200
+    storage_object = upload_response.json()["data"]["storage_object"]
+
+    raw_response = client.get(storage_object["url"])
+    assert raw_response.status_code == 200
+    assert raw_response.content == first_payload
+    assert raw_response.headers["content-type"].startswith("image/heic")
+
+    preview_response = client.get(
+        f"/api/v1/storage/objects/{storage_object['id']}/image-preview"
+    )
+    assert preview_response.status_code == 200
+    assert preview_response.headers["content-type"].startswith("image/webp")
+    assert preview_response.headers["cache-control"] == "private, max-age=604800, immutable"
+    with Image.open(BytesIO(preview_response.content)) as preview_image:
+        assert preview_image.format == "WEBP"
+        assert preview_image.size == (2048, 1024)
+
+    update_response = client.post(
+        f"/api/v1/storage/objects/{storage_object['id']}/versions/upload",
+        files={"file": ("photo-v2.heif", second_payload, "image/heif")},
+    )
+    assert update_response.status_code == 200
+    previous_version = update_response.json()["data"]["version"]
+    version_preview_response = client.get(
+        f"/api/v1/storage/objects/{storage_object['id']}"
+        f"/versions/{previous_version['id']}/image-preview"
+    )
+    assert version_preview_response.status_code == 200
+    assert version_preview_response.headers["content-type"].startswith("image/webp")
+    with Image.open(BytesIO(version_preview_response.content)) as preview_image:
+        assert preview_image.format == "WEBP"
+        assert preview_image.size == (2048, 1024)
 
 
 def test_managed_object_can_be_updated_with_version_history(
@@ -1572,6 +1624,61 @@ def test_zip_info_path_recovers_cp932_names() -> None:
     info.flag_bits = 0
 
     assert decoded_zip_info_path(info) == "繝・せ繝・雉・侭.txt"
+
+
+def test_file_icon_accepts_heic_and_serves_webp(client) -> None:
+    response = client.post(
+        "/api/v1/storage/file-icons",
+        json={
+            "icon_filename": "document.heic",
+            "icon_content_type": "image/heic",
+            "icon_data_base64": base64.b64encode(heic_bytes(640, 480)).decode("ascii"),
+            "extensions": [".heic-test"],
+        },
+    )
+
+    assert response.status_code == 200
+    icon = response.json()["data"]["file_icon"]
+    assert icon["icon_filename"] == "document.heic"
+    assert icon["icon_content_type"] == "image/webp"
+    content_response = client.get(icon["icon_url"])
+    assert content_response.status_code == 200
+    assert content_response.headers["content-type"].startswith("image/webp")
+    with Image.open(BytesIO(content_response.content)) as converted_image:
+        assert converted_image.format == "WEBP"
+        assert max(converted_image.size) == 256
+
+
+def test_contact_image_upload_accepts_heic_and_serves_webp(client) -> None:
+    contact_response = client.post(
+        "/api/v1/contacts",
+        json={
+            "display_name": "HEIC Image Contact",
+            "status": "active",
+            "email_addresses": [],
+        },
+    )
+    contact_id = contact_response.json()["data"]["id"]
+
+    response = client.post(
+        f"/api/v1/storage/contacts/{contact_id}/image",
+        json={
+            "filename": "avatar.heic",
+            "content_type": "image/heic",
+            "data_base64": base64.b64encode(heic_bytes(900, 600)).decode("ascii"),
+        },
+    )
+
+    assert response.status_code == 200
+    storage_object = response.json()["data"]["storage_object"]
+    assert storage_object["original_filename"] == "avatar.heic"
+    assert storage_object["content_type"] == "image/webp"
+    content_response = client.get(storage_object["url"])
+    assert content_response.status_code == 200
+    assert content_response.headers["content-type"].startswith("image/webp")
+    with Image.open(BytesIO(content_response.content)) as converted_image:
+        assert converted_image.format == "WEBP"
+        assert max(converted_image.size) == 256
 
 
 def test_contact_image_upload_stores_file_and_updates_avatar(

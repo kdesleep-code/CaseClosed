@@ -256,6 +256,9 @@ function detailStillVisibleInReturnTo(detail: MailDetail, returnTo: string) {
     return false
   }
 
+  if ((destination.searchParams.get('q') ?? '').trim() !== '') {
+    return true
+  }
   const tab = destination.searchParams.get('tab') ?? 'unprocessed'
   const date = destination.searchParams.get('date')
   const messages =
@@ -328,6 +331,7 @@ function AttachmentBadges({
             name: attachment.filename,
           })}
           className="mail-attachment-badge"
+          download={attachment.filename}
           href={attachment.download_url}
           key={attachment.id}
           onContextMenu={
@@ -1499,21 +1503,6 @@ function llmBlockedTitle(message: { llm_block_reason?: string | null }) {
     : t('mail.llmBlockedWithReason', { reason: message.llm_block_reason })
 }
 
-function mailListTabFor(message: MailThreadMessage) {
-  if (message.effective_importance === 'skip') {
-    return 'skip'
-  }
-  return message.processed_status === 'processed' ? 'processed' : 'unprocessed'
-}
-
-function mailListHrefFor(message: MailThreadMessage) {
-  const params = new URLSearchParams({
-    tab: mailListTabFor(message),
-    date: message.received_at.slice(0, 10),
-  })
-  return `/mail?${params.toString()}`
-}
-
 function returnToHrefFromLocation() {
   const returnTo = new URLSearchParams(window.location.search).get('return_to')
   if (returnTo === null || returnTo.trim() === '') {
@@ -2654,13 +2643,25 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
           if (nextValue === null || nextValue.trim() === '') {
             return
           }
+          const nextScheduledAt = localDateTimeToJstIso(nextValue.trim())
+          const nextScheduledTime = Date.parse(nextScheduledAt)
+          if (!Number.isFinite(nextScheduledTime) || nextScheduledTime <= Date.now()) {
+            setError(t('mail.thread.rescheduleFutureRequired'))
+            return
+          }
           void runAction(
             `${sendRequest.id}-reschedule`,
             async () => {
-              await rescheduleMailRequest(
-                sendRequest.id,
-                localDateTimeToJstIso(nextValue.trim()),
-              )
+              try {
+                await rescheduleMailRequest(sendRequest.id, nextScheduledAt)
+              } catch (requestError) {
+                try {
+                  setDetail(await getMailDetail(messageId))
+                } catch {
+                  // Keep the original reschedule error when refreshing also fails.
+                }
+                throw requestError
+              }
               return getMailDetail(messageId)
             },
             t('mail.thread.rescheduled'),
@@ -2720,11 +2721,6 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
   const assignedCaseLinks = detail.case_links ?? []
   const relatedTaskLinks = detail.task_links ?? []
   const relatedCalendarEventLinks = detail.calendar_event_links ?? []
-  const focusedMessage =
-    detail.thread_messages.find((threadMessage) => threadMessage.id === focusMessageId) ??
-    detail.thread_messages.find((threadMessage) => threadMessage.id === messageId) ??
-    detail.message
-  const mailListHref = mailListHrefFor(focusedMessage)
   const gmailThreadLink =
     detail.message.gmail_link ??
     threadMessages.find((message) => message.gmail_link !== null)?.gmail_link ??
@@ -2896,7 +2892,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
             ariaLabelKey="mail.thread.navLabel"
             className="mail-thread-nav"
             items={[
-              { href: mailListHref, labelKey: 'nav.mail' },
+              { href: '/mail', labelKey: 'nav.mail' },
               { href: '/', labelKey: 'top.heading' },
               { href: '/follow-ups', labelKey: 'nav.followUps' },
               { href: '/cases', labelKey: 'nav.cases' },

@@ -367,6 +367,14 @@ export type ContactCustomTab = {
   expression: string
 }
 
+export type ContactAutoTagRule = {
+  id: string
+  label: string
+  email_pattern: string
+  tag_template: string
+  enabled: boolean
+}
+
 export type FileIconSetting = {
   id: string
   storage_object_id: string | null
@@ -525,6 +533,18 @@ export async function saveContactCustomTabs(
       body: JSON.stringify({ items }),
     },
   )
+  return data.items
+}
+
+export async function listContactAutoTagRules(): Promise<ContactAutoTagRule[]> {
+  const data = await request<ListResponse<ContactAutoTagRule>>('/api/v1/contacts/auto-tag-rules')
+  return data.items
+}
+
+export async function saveContactAutoTagRules(items: ContactAutoTagRule[]): Promise<ContactAutoTagRule[]> {
+  const data = await request<ListResponse<ContactAutoTagRule>>('/api/v1/contacts/auto-tag-rules', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items }),
+  })
   return data.items
 }
 

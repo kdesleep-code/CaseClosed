@@ -23,7 +23,6 @@ import type {
   LlmBlockFilter,
   LlmModelConfig,
 } from './phase4Api'
-
 type SettingsTab = 'google' | 'llm' | 'budget' | 'language'
 
 const settingsTabs = [
@@ -84,6 +83,7 @@ function SettingsView() {
     if (!new URLSearchParams(window.location.search).has('google_gmail')) return
     window.history.replaceState({}, '', '/settings')
   }, [])
+
 
   useEffect(() => {
     if (activeTab !== 'google' || googleStatus !== null) return
@@ -403,7 +403,7 @@ function SettingsView() {
               <section aria-labelledby="settings-google-tab" className="maintenance-panel maintenance-section" id="settings-google-panel" role="tabpanel">
                 <div className="section-heading">
                   <h2>{t('settings.google.heading')}</h2>
-                  <button className={`button-loading-dot${busyId === 'google-refresh' ? ' is-loading' : ''}`} disabled={busyId !== null} onClick={refreshGoogleStatus} type="button">
+                  <button className={`ui-button ui-button--compact button-loading-dot${busyId === 'google-refresh' ? ' is-loading' : ''}`} disabled={busyId !== null} onClick={refreshGoogleStatus} type="button">
                     {t('mail.refresh')}
                   </button>
                 </div>
@@ -431,7 +431,7 @@ function SettingsView() {
                           <p>{t('maintenance.debug.googleSpeedTestNote')}</p>
                         </div>
                         <button
-                          className={`button-loading-dot${busyId === 'google-speed-test' ? ' is-loading' : ''}`}
+                          className={`ui-button ui-button--compact button-loading-dot${busyId === 'google-speed-test' ? ' is-loading' : ''}`}
                           disabled={busyId !== null}
                           onClick={handleGoogleSpeedTest}
                           type="button"
@@ -546,7 +546,7 @@ function SettingsView() {
                       {t('maintenance.debug.llmBlock')}
                     </h2>
                     <button
-                      className={`button-loading-dot${busyId === 'llm-block-refresh' ? ' is-loading' : ''}`}
+                      className={`ui-button ui-button--compact button-loading-dot${busyId === 'llm-block-refresh' ? ' is-loading' : ''}`}
                       disabled={busyId !== null}
                       onClick={() => {
                         setBusyId('llm-block-refresh')

@@ -139,7 +139,7 @@ export function MobileTaskListView() {
     <main className="mobile-shell mobile-task-shell">
       <header className="mobile-topbar">
         <div>
-          <p>CaseClosed</p>
+          <p>C@seClosed</p>
           <h1>{t('mobile.tasks.heading')}</h1>
         </div>
         <AppLink className="mobile-topbar-link" href="/m">

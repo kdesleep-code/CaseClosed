@@ -617,8 +617,10 @@ export type MailListFilters = {
   contact_status?: 'all' | 'pending' | 'resolved'
   read?: 'all' | 'read' | 'unread'
   q?: string
+  contact_id?: string
   date_from?: string
   date_to?: string
+  sort?: 'importance' | 'newest'
   limit?: number
   cursor?: string
 }

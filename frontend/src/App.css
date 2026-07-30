@@ -201,6 +201,32 @@
   background: var(--danger-bg);
 }
 
+.login-reset-description,
+.login-reset-notice {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.login-form .login-reset-button {
+  border-color: var(--surface-warm-border);
+  color: var(--text-strong);
+  background: transparent;
+}
+
+.login-form .login-reset-button:hover {
+  background: #fffaf4;
+}
+
+.login-reset-notice {
+  padding: 10px 12px;
+  border: 1px solid var(--success-border);
+  border-radius: var(--radius-ui);
+  color: var(--success-text);
+  background: var(--success-bg);
+}
+
 .lock-status {
   width: fit-content;
   margin: 0;
@@ -530,6 +556,7 @@
   min-height: 94px;
   padding: 18px;
   display: flex;
+  isolation: isolate;
   align-items: end;
   font-size: 1.18rem;
   font-weight: 680;
@@ -549,7 +576,9 @@
   border-radius: 8px;
   object-fit: cover;
   flex: 0 0 auto;
-  box-shadow: 0 5px 12px rgba(112, 75, 47, 0.12);
+  background: transparent;
+  box-shadow: none;
+  mix-blend-mode: multiply;
 }
 
 .hub-link-content-with-icon span {
@@ -4841,6 +4870,7 @@
 .pending-contact-buttons button,
 .pending-create-button,
 .contact-detail-actions button,
+.contact-detail-actions a,
 .contact-detail-form button,
 .contact-email-form button {
   min-height: 38px;
@@ -4879,6 +4909,7 @@
 .pending-contact-buttons button,
 .pending-create-button,
 .contact-detail-actions button,
+.contact-detail-actions a,
 .contact-detail-form button,
 .contact-email-form button {
   cursor: pointer;
@@ -4893,6 +4924,7 @@
 .pending-contact-buttons button:hover,
 .pending-create-button:hover,
 .contact-detail-actions button:hover,
+.contact-detail-actions a:hover,
 .contact-detail-form button:hover,
 .contact-email-form button:hover {
   border-color: var(--accent);
@@ -4926,6 +4958,7 @@
 .pending-contact-buttons button:focus-visible,
 .pending-create-button:focus-visible,
 .contact-detail-actions button:focus-visible,
+.contact-detail-actions a:focus-visible,
 .contact-detail-form button:focus-visible,
 .contact-email-form button:focus-visible,
 .contact-form input:focus-visible,
@@ -5730,6 +5763,13 @@
   gap: 8px;
 }
 
+.contact-detail-actions a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
 .contact-detail-summary {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -6453,7 +6493,9 @@
   font-weight: 720;
 }
 
-.settings-form input {
+.settings-form input,
+.settings-form select,
+.settings-form textarea {
   width: 100%;
   min-height: 42px;
   border: 1px solid var(--control-border);
@@ -6476,6 +6518,13 @@
 .settings-form .checkbox-label input {
   width: auto;
   min-height: 0;
+}
+
+.settings-form select:focus-visible,
+.settings-form textarea:focus-visible,
+.settings-form input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .settings-form button,
@@ -6509,6 +6558,31 @@
 .settings-actions button:disabled {
   cursor: default;
   opacity: 0.58;
+}
+
+.maintenance-security-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
+  gap: 14px;
+}
+
+.maintenance-password-card {
+  min-width: 0;
+  padding: 18px;
+}
+
+.settings-form.maintenance-password-form {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+}
+
+.maintenance-password-form button {
+  justify-self: start;
+}
+
+.maintenance-password-card .maintenance-error,
+.maintenance-password-card .maintenance-notice {
+  margin: 12px 0 0;
 }
 
 .external-tools-main {
@@ -9978,6 +10052,130 @@
   font-weight: 650;
 }
 
+.case-auto-rules-page-link {
+  border: 1px solid var(--surface-warm-border);
+  border-radius: var(--radius-ui);
+  padding: 8px 12px;
+  color: var(--text-heading);
+  background: var(--surface-warm);
+  font-weight: 760;
+  text-decoration: none;
+}
+
+.case-auto-rules-create-panel {
+  margin-bottom: 18px;
+}
+
+.case-auto-rules-form {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(150px, 0.65fr) minmax(220px, 1.2fr) auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.case-auto-rules-form label {
+  display: grid;
+  gap: 6px;
+}
+
+.case-auto-rules-form label span {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+
+.case-auto-rules-form input,
+.case-auto-rules-form select,
+.case-auto-rules-list-heading input {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-ui);
+  padding: 9px 11px;
+  color: var(--text-strong);
+  background: var(--surface-control);
+  font: inherit;
+}
+
+.case-auto-rules-form button,
+.case-auto-rules-row button {
+  min-height: 42px;
+  border: 1px solid var(--surface-warm-border);
+  border-radius: var(--radius-ui);
+  padding: 8px 12px;
+  color: var(--text-strong);
+  background: var(--surface-warm);
+  font: inherit;
+  font-weight: 760;
+  cursor: pointer;
+}
+
+.case-auto-rules-list-panel {
+  border: 1px solid rgba(145, 78, 43, 0.16);
+  border-radius: 8px;
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+  background: rgba(255, 250, 242, 0.72);
+  box-shadow: var(--shadow-sm);
+}
+
+.case-auto-rules-list-heading input {
+  max-width: 360px;
+}
+
+.case-auto-rules-table {
+  display: grid;
+  gap: 6px;
+}
+
+.case-auto-rules-table-header,
+.case-auto-rules-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.1fr) minmax(120px, 0.65fr) minmax(220px, 1.25fr) minmax(170px, 0.9fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.case-auto-rules-table-header {
+  padding: 0 10px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 760;
+}
+
+.case-auto-rules-row {
+  border: 1px solid rgba(145, 78, 43, 0.14);
+  border-radius: var(--radius-ui);
+  padding: 10px;
+  background: rgba(255, 250, 242, 0.62);
+}
+
+.case-auto-rules-row > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.case-auto-rule-type {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+@media (max-width: 900px) {
+  .case-auto-rules-form {
+    grid-template-columns: 1fr;
+  }
+
+  .case-auto-rules-table-header {
+    display: none;
+  }
+
+  .case-auto-rules-row {
+    grid-template-columns: 1fr;
+  }
+}
+
 .case-mail-add-button,
 .case-mail-register-bar button {
   min-height: 38px;
@@ -10459,6 +10657,64 @@
   box-shadow: var(--shadow-sm);
 }
 
+.case-handover-panel {
+  min-width: 0;
+  border: 1px solid rgba(93, 107, 62, 0.24);
+  border-radius: 8px;
+  padding: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  background: rgba(247, 250, 235, 0.82);
+  box-shadow: var(--shadow-sm);
+}
+
+.case-handover-panel span {
+  color: var(--text-soft);
+  font-size: 0.76rem;
+  font-weight: 720;
+}
+
+.case-handover-panel h2,
+.case-handover-panel p {
+  margin: 0;
+}
+
+.case-handover-panel h2 {
+  margin-top: 2px;
+  color: var(--text-heading);
+  font-size: 1rem;
+}
+
+.case-handover-panel p {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 0.84rem;
+}
+
+.case-handover-actions {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.case-handover-actions a,
+.case-handover-actions button {
+  min-height: 34px;
+  border: 1px solid rgba(93, 107, 62, 0.28);
+  border-radius: 7px;
+  padding: 7px 11px;
+  background: rgba(255, 255, 250, 0.88);
+  color: var(--text-heading);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 760;
+  cursor: pointer;
+}
+
 .case-storage-window .section-heading {
   align-items: start;
 }
@@ -10641,6 +10897,18 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.case-stakeholder-contact-link {
+  min-width: 0;
+  color: var(--text-heading);
+  text-decoration-color: rgba(145, 78, 43, 0.35);
+  text-underline-offset: 3px;
+}
+
+.case-stakeholder-contact-link:hover {
+  color: var(--accent);
+  text-decoration-color: currentColor;
 }
 
 .case-stakeholder-item em {
@@ -13638,6 +13906,7 @@
 .task-tabs {
   margin-bottom: -1px;
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: flex-end;
   gap: 18px;
@@ -13646,13 +13915,15 @@
 }
 
 .task-tab-group {
-  display: flex;
+  flex: 1 1 320px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
   align-items: flex-end;
   gap: 4px;
 }
 
 .task-tabs button {
-  min-width: 128px;
+  min-width: 0;
   min-height: 50px;
   border: 1px solid var(--surface-warm-border);
   border-radius: var(--radius-card) var(--radius-card) 0 0;
@@ -13707,6 +13978,16 @@
 
 .task-importance-row-low {
   border-left-color: rgba(88, 138, 85, 0.84);
+}
+
+.task-row-frozen {
+  border-left-color: rgba(82, 117, 145, 0.72);
+  background: rgba(239, 246, 250, 0.74);
+}
+
+.task-row-frozen .task-status-badge {
+  border-color: rgba(82, 117, 145, 0.28);
+  background: rgba(190, 218, 233, 0.48);
 }
 
 .task-row-completed,
@@ -14974,11 +15255,11 @@ button.task-gadget-action:disabled {
 .file-icons-row input {
   min-width: 0;
   max-width: 100%;
-  border: 1px solid var(--surface-warm-border);
+  border: 1px solid var(--control-border);
   border-radius: var(--radius-ui);
   padding: 7px 9px;
   color: var(--text-strong);
-  background: #fffaf2;
+  background: var(--surface-control);
   font: inherit;
   font-size: 0.88rem;
 }
@@ -14996,11 +15277,12 @@ button.task-gadget-action:disabled {
 
 .file-icons-actions button {
   min-height: 32px;
-  border: 1px solid rgba(145, 78, 43, 0.18);
-  border-radius: 7px;
+  border: 1px solid var(--surface-warm-border);
+  border-radius: var(--radius-ui);
   padding: 5px 9px;
   color: var(--text-heading);
-  background: var(--surface-control);
+  background: var(--surface-warm);
+  box-shadow: var(--shadow-sm);
   font: inherit;
   font-size: 0.82rem;
   font-weight: 760;
@@ -17475,10 +17757,11 @@ button.task-gadget-action:disabled {
 }
 
 .bookshelf-tag-pair-form input {
-  border: 1px solid rgba(116, 65, 42, 0.18);
-  border-radius: 7px;
-  background: rgba(255, 250, 242, 0.9);
-  color: var(--ink-strong);
+  min-height: 42px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-ui);
+  background: var(--surface-control);
+  color: var(--text-strong);
   font: inherit;
   padding: 10px 12px;
 }
@@ -17486,12 +17769,15 @@ button.task-gadget-action:disabled {
 .bookshelf-tag-pair-form button,
 .bookshelf-tag-relation-row button,
 .bookshelf-tag-hierarchy-footer-actions button {
-  border: 1px solid rgba(116, 65, 42, 0.18);
-  background: rgba(255, 250, 242, 0.9);
-  color: var(--ink-strong);
-  border-radius: 7px;
-  font-weight: 800;
-  padding: 10px 14px;
+  min-height: 42px;
+  border: 1px solid var(--surface-warm-border);
+  background: var(--surface-warm);
+  color: var(--text-heading);
+  border-radius: var(--radius-ui);
+  font: inherit;
+  font-weight: 760;
+  padding: 8px 14px;
+  box-shadow: var(--shadow-sm);
   cursor: pointer;
 }
 
@@ -18350,6 +18636,323 @@ button.task-gadget-action:disabled {
   }
 
   .low-mail-review-card footer button {
+    width: 100%;
+  }
+}
+.contact-auto-tag-rules-table {
+  min-width: 980px;
+}
+
+.contact-auto-tag-rules-table input:not([type='checkbox']) {
+  box-sizing: border-box;
+  min-width: 180px;
+  width: 100%;
+}
+
+.contact-auto-tag-rules-table .contact-auto-tag-pattern-input {
+  min-width: 360px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.contact-auto-tag-actions {
+  justify-content: flex-end;
+  margin-top: 1rem;
+}
+.ui-control {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-ui);
+  padding: 9px 11px;
+  color: var(--text-strong);
+  background: var(--surface-control);
+  font: inherit;
+}
+
+.ui-control:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.ui-button {
+  min-height: 42px;
+  border: 1px solid var(--surface-warm-border);
+  border-radius: var(--radius-ui);
+  padding: 8px 14px;
+  color: var(--text-heading);
+  background: var(--surface-warm);
+  box-shadow: var(--shadow-sm);
+  font: inherit;
+  font-weight: 760;
+  cursor: pointer;
+}
+
+.ui-button:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--surface-control-hover);
+}
+
+.ui-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.ui-button:disabled {
+  cursor: default;
+  opacity: 0.58;
+}
+
+.ui-button--primary {
+  border-color: #8f412d;
+  color: var(--button-primary-text);
+  background: var(--button-primary-bg);
+}
+
+.ui-button--primary:hover:not(:disabled) {
+  background: var(--button-primary-hover-bg);
+}
+
+.ui-button--danger {
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+  background: var(--danger-bg);
+}
+
+.ui-button--compact {
+  min-height: 36px;
+  padding: 6px 10px;
+  font-size: 0.86rem;
+}
+.file-icons-row input:focus-visible,
+.file-icons-actions button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.file-icons-actions button:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--surface-control-hover);
+}
+
+.case-auto-rules-form .ui-button--primary {
+  border-color: #8f412d;
+  color: var(--button-primary-text);
+  background: var(--button-primary-bg);
+}
+
+.maintenance-table-wrap .ui-button--danger {
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+  background: var(--danger-bg);
+}
+.bookshelf-tag-pair-form input:focus-visible,
+.bookshelf-tag-pair-form button:focus-visible,
+.bookshelf-tag-relation-row button:focus-visible,
+.bookshelf-tag-hierarchy-footer-actions button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.bookshelf-tag-pair-form button:hover:not(:disabled),
+.bookshelf-tag-relation-row button:hover:not(:disabled),
+.bookshelf-tag-hierarchy-footer-actions button:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--surface-control-hover);
+}
+
+
+/* Global browser-zoom collision guard. */
+html,
+body,
+#root {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.app-shell {
+  max-width: 100%;
+  overflow-x: clip;
+}
+
+.ui-zoom-compact .app-shell :where(section, article, header, nav, aside, main, div, form, fieldset) {
+  min-width: 0;
+}
+
+.ui-zoom-compact .app-shell :where(img, video, canvas, svg, input, select, textarea) {
+  max-width: 100%;
+}
+
+.ui-zoom-compact :is(
+  .maintenance-shell,
+  .contacts-shell,
+  .top-shell,
+  .mail-shell,
+  .compose-shell,
+  .case-shell,
+  .task-shell,
+  .today-shell,
+  .calendar-shell
+) {
+  width: min(100%, calc(100vw - 20px));
+  padding-right: 10px;
+  padding-left: 10px;
+}
+
+.ui-zoom-compact :is(.maintenance-header, .contacts-header, .storage-header, .top-header) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) !important;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.ui-zoom-compact :is(.maintenance-header, .contacts-header) > :is(nav, a),
+.ui-zoom-compact :is(.maintenance-header, .contacts-header) > div:first-child > :is(nav, a) {
+  grid-column: 1;
+  grid-row: auto;
+  justify-self: stretch;
+}
+
+.ui-zoom-compact :is(.maintenance-header, .contacts-header) > div:first-child {
+  display: grid;
+  grid-column: 1;
+  gap: 6px;
+}
+
+.ui-zoom-compact :is(.maintenance-header, .contacts-header) > div:first-child > * {
+  grid-column: 1;
+  grid-row: auto;
+}
+
+.ui-zoom-compact :is(
+  .maintenance-header nav,
+  .contacts-header nav,
+  .maintenance-nav,
+  .mail-thread-nav,
+  .top-header,
+  .calendar-heading-actions,
+  .mail-list-heading-actions,
+  .case-gadget-heading-row
+) {
+  max-width: 100%;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
+.ui-zoom-compact :is(.maintenance-header h1, .contacts-header h1, .top-header h1) {
+  font-size: clamp(1.35rem, 5vw, 2rem);
+  overflow-wrap: anywhere;
+}
+
+.ui-zoom-compact .session-meta {
+  max-width: 100%;
+  text-align: left;
+}
+
+.ui-zoom-compact .top-pending-lock {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.ui-zoom-compact .hub-links-main,
+.ui-zoom-compact .hub-links-utility {
+  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
+}
+
+.ui-zoom-compact :is(
+  .mail-main-layout,
+  .compose-layout,
+  .case-detail-layout,
+  .case-create-layout,
+  .calendar-main-layout,
+  .academic-calendar-layout,
+  .task-main-layout,
+  .task-new-layout,
+  .task-batch-generate-layout,
+  .task-detail-layout
+) {
+  grid-template-columns: minmax(0, 1fr) !important;
+}
+
+.ui-zoom-compact :is(
+  .mail-side-column,
+  .case-gadget-column,
+  .task-batch-selection-column
+) {
+  position: static;
+  top: auto;
+  width: 100%;
+  margin-top: 0;
+}
+
+.ui-zoom-compact .mail-floating-day-nav {
+  width: 100%;
+  margin: 0 0 10px;
+  position: static;
+  inset: auto;
+  z-index: auto;
+  transform: none;
+}
+
+.ui-zoom-compact .mail-floating-day-nav :is(button, a) {
+  width: min(96px, 24vw);
+  height: 42px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-ui);
+}
+
+.ui-zoom-compact .mail-tabs {
+  align-items: stretch;
+  flex-direction: column;
+}
+
+.ui-zoom-compact .mail-tabs > div,
+.ui-zoom-compact .mail-tab-gadgets,
+.ui-zoom-compact .mail-tab-actions,
+.ui-zoom-compact .mail-importance-legend {
+  width: 100%;
+  min-width: 0;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
+.ui-zoom-compact .mail-tabs button {
+  min-width: min(112px, 100%);
+  flex: 1 1 112px;
+}
+
+.ui-zoom-compact :is(
+  [class$='-actions'],
+  [class*='-actions '],
+  .work-links,
+  .resolution-actions
+) {
+  max-width: 100%;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.ui-zoom-compact :is(
+  .maintenance-table-wrap,
+  .contact-auto-tag-rules-table,
+  .case-auto-rules-table,
+  .file-icons-table
+) {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+@media (max-width: 620px) {
+  .ui-zoom-compact :is(
+    .maintenance-header nav,
+    .contacts-header nav,
+    .maintenance-nav,
+    .mail-tab-actions,
+    .calendar-heading-actions,
+    [class$='-actions'],
+    [class*='-actions ']
+  ) > :is(button, a, select) {
     width: 100%;
   }
 }

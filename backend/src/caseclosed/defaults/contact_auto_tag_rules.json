@@ -1,0 +1,11 @@
+{
+  "items": [
+    {
+      "id": "tsukuba-student-year",
+      "label": "University of Tsukuba student year",
+      "email_pattern": "^s(?P<year>\\d{2})[^@]*@u\\.tsukuba\\.ac\\.jp$",
+      "tag_template": "20{year}-",
+      "enabled": true
+    }
+  ]
+}

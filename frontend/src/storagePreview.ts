@@ -3,6 +3,8 @@ export const previewableImageExtensions = [
   'avif',
   'bmp',
   'gif',
+  'heic',
+  'heif',
   'ico',
   'jpg',
   'jpeg',
@@ -103,6 +105,30 @@ export function isPreviewableImageFile({
   return previewableImageExtensions.includes(
     fileExtension(filename) as (typeof previewableImageExtensions)[number],
   )
+}
+
+export function storageImagePreviewUrl({
+  contentType,
+  filename,
+  url,
+}: {
+  contentType: string | null
+  filename: string | null
+  url: string
+}) {
+  const normalizedContentType = contentType?.toLowerCase().split(';', 1)[0].trim()
+  const requiresConversion =
+    normalizedContentType === 'image/heic' ||
+    normalizedContentType === 'image/heic-sequence' ||
+    normalizedContentType === 'image/heif' ||
+    normalizedContentType === 'image/heif-sequence' ||
+    fileExtension(filename) === 'heic' ||
+    fileExtension(filename) === 'heif'
+  if (!requiresConversion) return url
+
+  const [path, query] = url.split('?', 2)
+  if (!path.endsWith('/content')) return url
+  return `${path.slice(0, -'/content'.length)}/image-preview${query ? `?${query}` : ''}`
 }
 
 export function isPreviewableTextFile({

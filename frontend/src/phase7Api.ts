@@ -146,8 +146,14 @@ export type CaseMailLink = {
 export type CaseAutoAssignRule = {
   id: string
   case_id: string
+  case_name: string
+  case_progress_status: string | null
+  case_archived_at: string | null
   rule_type: string
   rule_value: string
+  contact_id: string | null
+  contact_display_name: string | null
+  display_value: string
   label: string | null
   is_enabled: boolean
   created_at: string
@@ -186,7 +192,18 @@ export type CaseDetail = {
   stakeholders?: CaseStakeholder[]
   tool_links?: CaseToolLink[]
   current_situation?: CaseCurrentSituation | null
+  handover_artifact?: StorageObject | null
+  handover_bundle?: StorageObject | null
   recent_events: CaseEventItem[]
+}
+
+export type CaseHandoverGeneration = {
+  handover_artifact: StorageObject
+  handover_bundle: StorageObject
+  exported_mail_count: number
+  related_mail_count: number
+  source_file_count: number
+  llm_run_id: string
 }
 
 export type CaseListStatus = 'user_ball' | 'waiting' | 'not_started' | 'completed' | 'archived'
@@ -393,9 +410,18 @@ export async function listCaseAutoAssignRules(
   return data.items
 }
 
+export async function listAllCaseAutoAssignRules(): Promise<CaseAutoAssignRule[]> {
+  const data = await request<ListResponse<CaseAutoAssignRule>>(
+    '/api/v1/cases/auto-assign-rules',
+  )
+  return data.items
+}
+
 export async function createCaseAutoAssignRule(
   caseId: string,
-  payload: { sender_email: string; label?: string | null },
+  payload:
+    | { sender_email: string; contact_id?: never; label?: string | null }
+    | { contact_id: string; sender_email?: never; label?: string | null },
 ): Promise<CaseAutoAssignRule> {
   const data = await request<{ rule: CaseAutoAssignRule }>(
     `/api/v1/cases/${encodeURIComponent(caseId)}/auto-assign-rules`,
@@ -432,6 +458,13 @@ export async function regenerateCaseCurrentSituation(
     { method: 'POST' },
   )
   return data.current_situation
+}
+
+export function generateCaseHandover(caseId: string): Promise<CaseHandoverGeneration> {
+  return request<CaseHandoverGeneration>(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/handover`,
+    { method: 'POST' },
+  )
 }
 
 export async function updateCase(

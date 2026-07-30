@@ -79,3 +79,11 @@ export async function login(password: string): Promise<LoginData> {
   })
   return response.data
 }
+
+export async function resetPasswordByEmail(): Promise<void> {
+  await request<{
+    email_sent: true
+    invalidated_sessions: number
+    retry_after_seconds: number
+  }>('/api/v1/auth/password-reset', { method: 'POST' })
+}

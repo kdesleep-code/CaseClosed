@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import csv
 import json
 from datetime import date
+from email.message import EmailMessage
 from functools import cmp_to_key
+from io import BytesIO, StringIO
+import re
 from uuid import uuid4
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import APIRouter
 from fastapi import Depends
@@ -58,9 +63,11 @@ from caseclosed.services.llm_provider import OpenAIProviderError
 from caseclosed.services.llm_provider import build_case_current_situation_provider
 from caseclosed.services.llm_provider import build_case_prefill_provider
 from caseclosed.storage import delete_storage_object
+from caseclosed.storage import ensure_storage_object_llm_digest
 from caseclosed.storage import prepare_file_icon_image
 from caseclosed.storage import record_storage_operation
 from caseclosed.storage import save_storage_object
+from caseclosed.storage import storage_object_absolute_path
 from caseclosed.storage import storage_object_url
 from caseclosed.storage import storage_object_data
 
@@ -122,7 +129,8 @@ class CaseStakeholderCreate(BaseModel):
 
 
 class CaseAutoAssignRuleCreate(BaseModel):
-    sender_email: str = Field(min_length=1)
+    sender_email: str | None = None
+    contact_id: str | None = None
     label: str | None = None
 
 
@@ -635,12 +643,32 @@ def case_mail_link_data(
     }
 
 
-def case_auto_assign_rule_data(rule: CaseAutoAssignRule) -> dict[str, object]:
+def case_auto_assign_rule_data(
+    session: DatabaseSession,
+    rule: CaseAutoAssignRule,
+    case: Case | None = None,
+) -> dict[str, object]:
+    case = case or session.get(Case, rule.case_id)
+    contact = (
+        session.get(Contact, rule.rule_value)
+        if rule.rule_type == "sender_contact"
+        else None
+    )
     return {
         "id": rule.id,
         "case_id": rule.case_id,
+        "case_name": case.name if case is not None else rule.case_id,
+        "case_progress_status": case.progress_status if case is not None else None,
+        "case_archived_at": case.archived_at if case is not None else None,
         "rule_type": rule.rule_type,
         "rule_value": rule.rule_value,
+        "contact_id": contact.id if contact is not None else None,
+        "contact_display_name": contact.display_name if contact is not None else None,
+        "display_value": (
+            contact.display_name
+            if contact is not None
+            else rule.rule_value
+        ),
         "label": rule.label,
         "is_enabled": bool(rule.is_enabled),
         "created_at": rule.created_at,
@@ -658,7 +686,20 @@ def case_auto_assign_rule_items(
         .where(CaseAutoAssignRule.case_id == case_id)
         .order_by(CaseAutoAssignRule.created_at.desc(), CaseAutoAssignRule.id.desc())
     ).all()
-    return [case_auto_assign_rule_data(rule) for rule in rules]
+    return [case_auto_assign_rule_data(session, rule) for rule in rules]
+
+
+def all_case_auto_assign_rule_items(session: DatabaseSession) -> list[dict[str, object]]:
+    rows = session.execute(
+        select(CaseAutoAssignRule, Case)
+        .join(Case, Case.id == CaseAutoAssignRule.case_id)
+        .order_by(
+            Case.name.asc(),
+            CaseAutoAssignRule.created_at.desc(),
+            CaseAutoAssignRule.id.desc(),
+        )
+    ).all()
+    return [case_auto_assign_rule_data(session, rule, case) for rule, case in rows]
 
 
 def case_mail_link_items(
@@ -1013,6 +1054,219 @@ def case_current_situation_markdown(output: dict[str, object]) -> str:
         lines.append("")
         lines.append(f"Next focus: {next_focus}")
     return "\n".join(line for line in lines if line is not None).strip()
+
+
+def is_mail_delivery_daemon(message: GmailMessage) -> bool:
+    sender = (message.from_address or "").strip().lower()
+    sender_name = (message.from_name or "").strip().lower()
+    subject = (message.subject or "").strip().lower()
+    sender_local = sender.split("@", maxsplit=1)[0].replace("-", "").replace("_", "")
+    normalized_name = sender_name.replace("-", "").replace("_", "").replace(" ", "")
+    return (
+        sender_local in {"mailerdaemon", "postmaster"}
+        or "mailerdaemon" in normalized_name
+        or "mail delivery subsystem" in sender_name
+        or "mail delivery system" in sender_name
+        or subject.startswith("delivery status notification")
+        or subject.startswith("undeliverable:")
+        or subject.startswith("returned mail:")
+        or subject.startswith("mail delivery failed")
+        or subject.startswith("failure notice")
+    )
+
+
+def case_handover_mail_rows(
+    session: DatabaseSession,
+    case_id: str,
+) -> list[tuple[GmailMessage, MailSummary | None]]:
+    return [
+        (message, summary)
+        for message, summary in session.execute(
+            select(GmailMessage, MailSummary)
+            .join(CaseMailLink, CaseMailLink.message_id == GmailMessage.id)
+            .outerjoin(MailSummary, MailSummary.message_id == GmailMessage.id)
+            .where(CaseMailLink.case_id == case_id)
+            .order_by(GmailMessage.received_at.asc(), GmailMessage.id.asc())
+        ).all()
+        if not is_mail_delivery_daemon(message)
+    ]
+
+
+def case_handover_artifact_data(
+    session: DatabaseSession,
+    case: Case,
+    *,
+    source_type: str = "case_handover_report",
+) -> dict[str, object] | None:
+    storage_object = session.scalar(
+        select(StorageObject)
+        .where(StorageObject.directory_id == case_handover_storage_directory_id(case.id))
+        .where(StorageObject.scope == "managed")
+        .where(StorageObject.status == "active")
+        .where(StorageObject.source_type == source_type)
+        .order_by(StorageObject.created_at.desc(), StorageObject.id.desc())
+        .limit(1)
+    )
+    return storage_object_data(storage_object, session) if storage_object is not None else None
+
+
+def safe_mail_addresses(value: str | None) -> list[str]:
+    if value is None:
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    return [str(item).strip() for item in parsed if str(item).strip()] if isinstance(parsed, list) else []
+
+
+def case_handover_eml_bytes(message: GmailMessage) -> bytes:
+    eml = EmailMessage()
+    eml["Subject"] = message.subject or "(no subject)"
+    eml["From"] = (
+        f"{message.from_name} <{message.from_address}>"
+        if (message.from_name or "").strip()
+        else message.from_address
+    )
+    to_addresses = safe_mail_addresses(message.to_addresses_json)
+    cc_addresses = safe_mail_addresses(message.cc_addresses_json)
+    if to_addresses:
+        eml["To"] = ", ".join(to_addresses)
+    if cc_addresses:
+        eml["Cc"] = ", ".join(cc_addresses)
+    if message.message_id_header:
+        eml["Message-ID"] = message.message_id_header
+    if message.in_reply_to_header:
+        eml["In-Reply-To"] = message.in_reply_to_header
+    if message.references_header:
+        eml["References"] = message.references_header
+    eml["X-CaseClosed-Received-At"] = message.received_at
+    eml["X-CaseClosed-Gmail-Message-Id"] = message.gmail_message_id
+    eml.set_content(message.body_text or message.snippet or "")
+    if (message.body_html or "").strip():
+        eml.add_alternative(message.body_html or "", subtype="html")
+    return eml.as_bytes()
+
+
+def handover_filename_part(value: str | None, fallback: str) -> str:
+    normalized = re.sub(r"[^0-9A-Za-z._-]+", "_", (value or "").strip()).strip("._")
+    return (normalized or fallback)[:80]
+
+
+def archive_visible_filename(value: str | None, fallback: str) -> str:
+    filename = (value or fallback).strip().replace("/", "_").replace("\\", "_")
+    return filename.replace("\x00", "") or fallback
+
+
+def unique_archive_path(folder: str, filename: str, used_paths: set[str]) -> str:
+    base_path = f"{folder}/{filename}"
+    if base_path not in used_paths:
+        used_paths.add(base_path)
+        return base_path
+    stem, separator, suffix = filename.rpartition(".")
+    if separator == "" or stem == "":
+        stem, suffix = filename, ""
+    else:
+        suffix = f".{suffix}"
+    duplicate_no = 2
+    while True:
+        candidate = f"{folder}/{stem} ({duplicate_no}){suffix}"
+        if candidate not in used_paths:
+            used_paths.add(candidate)
+            return candidate
+        duplicate_no += 1
+
+
+def case_handover_markdown(
+    case: Case,
+    output: dict[str, object],
+    mail_rows: list[tuple[GmailMessage, MailSummary | None]],
+    source_files: list[StorageObject],
+    generated_at: str,
+) -> str:
+    lines = [
+        f"# 引継ぎ資料: {case.name}",
+        "",
+        f"生成日時: {generated_at}",
+        f"Case開始: {case.created_at}",
+        f"Case完了: {case.closed_at or ''}",
+        "",
+        "## この仕事について",
+        "",
+        str(output.get("summary") or case.description or "").strip(),
+        "",
+        "## 仕事の内容と大まかな流れ",
+        "",
+    ]
+    key_points = output.get("key_points")
+    if isinstance(key_points, list) and key_points:
+        lines.extend(f"- {str(item).strip()}" for item in key_points if str(item).strip())
+    else:
+        lines.append("- Caseの概要と保存資料を確認してください。")
+    lines.extend(["", "## 引継ぎ時の注意", ""])
+    risks = output.get("risks")
+    if isinstance(risks, list) and risks:
+        lines.extend(f"- {str(item).strip()}" for item in risks if str(item).strip())
+    else:
+        lines.append("- 特記事項はありません。")
+    lines.extend(["", "## 参考資料", ""])
+    if source_files:
+        lines.extend(f"- {item.original_filename or item.id}" for item in source_files)
+    else:
+        lines.append("- 追加資料はありません。")
+    lines.extend([
+        "",
+        "## 原本の確認方法",
+        "",
+        f"関連メール {len(mail_rows)} 件はZIP内の `mail/` に保存しています。",
+        "メールの日付・件名・差出人との対応は `mail/mail-index.csv` で確認できます。",
+    ])
+    return "\n".join(lines).strip() + "\n"
+
+
+def case_handover_zip_bytes(
+    session: DatabaseSession,
+    *,
+    report_bytes: bytes,
+    mail_rows: list[tuple[GmailMessage, MailSummary | None]],
+    mail_exports: dict[str, StorageObject],
+    source_files: list[StorageObject],
+    historical_reports: list[StorageObject],
+) -> bytes:
+    output = BytesIO()
+    used_paths = {"handover.md", "mail/mail-index.csv"}
+    mail_index = StringIO(newline="")
+    index_writer = csv.writer(mail_index)
+    index_writer.writerow(["date", "subject", "from", "eml_file"])
+    with ZipFile(output, mode="w", compression=ZIP_DEFLATED) as archive:
+        archive.writestr("handover.md", report_bytes)
+        for storage_object in source_files:
+            filename = archive_visible_filename(storage_object.original_filename, storage_object.id)
+            archive.write(
+                storage_object_absolute_path(storage_object, session),
+                arcname=unique_archive_path("files", filename, used_paths),
+            )
+        for message, _summary in mail_rows:
+            storage_object = mail_exports.get(message.id)
+            if storage_object is None:
+                continue
+            filename = archive_visible_filename(storage_object.original_filename, f"{message.gmail_message_id}.eml")
+            archive_path = unique_archive_path("mail", filename, used_paths)
+            archive.write(storage_object_absolute_path(storage_object, session), arcname=archive_path)
+            index_writer.writerow([
+                message.received_at,
+                message.subject or "",
+                message.from_name or message.from_address,
+                archive_path.removeprefix("mail/"),
+            ])
+        archive.writestr("mail/mail-index.csv", mail_index.getvalue().encode("utf-8-sig"))
+        for storage_object in historical_reports:
+            filename = archive_visible_filename(storage_object.original_filename, storage_object.id)
+            archive.write(
+                storage_object_absolute_path(storage_object, session),
+                arcname=unique_archive_path("history", filename, used_paths),
+            )
+    return output.getvalue()
 
 
 def add_case_event(
@@ -1650,6 +1904,16 @@ def sync_mail_sender_stakeholders(
     return {"ok": True, "data": {"added_count": added_count}}
 
 
+@router.get("/auto-assign-rules")
+def list_all_case_auto_assign_rules(
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    return {
+        "ok": True,
+        "data": {"items": all_case_auto_assign_rule_items(session)},
+    }
+
+
 @router.get("/{case_id}")
 def get_case(
     case_id: str,
@@ -1680,6 +1944,12 @@ def get_case(
             "tool_links": tool_link_items(session, case.id),
             "current_situation": case_context_version_data(
                 latest_case_context_version(session, case.id)
+            ),
+            "handover_artifact": case_handover_artifact_data(session, case),
+            "handover_bundle": case_handover_artifact_data(
+                session,
+                case,
+                source_type="case_handover_bundle",
             ),
             "recent_events": [case_event_data(event) for event in events],
         },
@@ -1950,6 +2220,182 @@ def regenerate_case_current_situation(
     return {"ok": True, "data": {"current_situation": case_context_version_data(context)}}
 
 
+@router.post("/{case_id}/handover")
+def generate_case_handover(
+    case_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    case = ensure_case_exists(session, case_id)
+    if case.closed_at is None or case.progress_status != "completed":
+        raise json_error(409, "CASE_NOT_COMPLETED", "Complete the Case before generating handover materials.")
+
+    now = jst_iso()
+    ensure_case_storage_directory(session, case)
+    handover_directory_id = case_handover_storage_directory_id(case.id)
+    mail_rows = case_handover_mail_rows(session, case.id)
+    source_files = [
+        item
+        for item in case_storage_objects(session, case, limit=500)
+        if item.source_type not in {
+            "case_handover_report",
+            "case_handover_mail_export",
+            "case_handover_bundle",
+        }
+    ]
+    historical_reports = session.scalars(
+        select(StorageObject)
+        .where(StorageObject.directory_id == handover_directory_id)
+        .where(StorageObject.status == "active")
+        .where(StorageObject.source_type == "case_handover_report")
+        .order_by(StorageObject.created_at.asc(), StorageObject.id.asc())
+    ).all()
+    for storage_object in source_files:
+        if bool(storage_object.llm_input_allowed):
+            ensure_storage_object_llm_digest(
+                session,
+                storage_object=storage_object,
+                version=None,
+            )
+    session.flush()
+    input_payload = case_current_situation_input_payload(session, case)
+    input_payload["handover_generation"] = True
+    input_payload["mail_timeline"] = [
+        {
+            "message_id": message.id,
+            "gmail_message_id": message.gmail_message_id,
+            "received_at": message.received_at,
+            "subject": message.subject,
+            "from_address": message.from_address,
+            "from_name": message.from_name,
+            "summary": summary.summary_text if summary is not None else message.snippet,
+            "body_text": (message.body_text or "")[:6000],
+        }
+        for message, summary in mail_rows
+    ]
+    provider = build_case_current_situation_provider()
+    provider_response = provider.complete_json(
+        function_type="case_current_situation_summary",
+        input_payload=input_payload,
+    )
+    output = provider_response.output
+    llm_run = LlmRun(
+        id=new_id("llm_run"),
+        function_type="case_handover_generation",
+        provider_name=provider.provider_name,
+        model_name=provider.model_name,
+        prompt_version_id=None,
+        input_hash=None,
+        input_source_json=json.dumps({
+            "case_id": case.id,
+            "mail_count": len(mail_rows),
+            "file_count": len(source_files),
+        }, ensure_ascii=True, sort_keys=True),
+        input_diagnostic_json=json.dumps({
+            "input_payload_size": len(json.dumps(input_payload, ensure_ascii=False)),
+        }, ensure_ascii=True, sort_keys=True),
+        applied_instruction_rule_ids_json=json.dumps([], ensure_ascii=True),
+        output_json=json.dumps(output, ensure_ascii=True, sort_keys=True),
+        output_text_preview=provider_response.output_preview,
+        status="succeeded",
+        error_type=None,
+        error_message=None,
+        retry_count=0,
+        max_retry_count=3,
+        prompt_tokens=provider_response.prompt_tokens,
+        completion_tokens=provider_response.completion_tokens,
+        total_tokens=provider_response.total_tokens,
+        estimated_cost=provider_response.estimated_cost,
+        started_at=now,
+        finished_at=now,
+        created_at=now,
+    )
+    session.add(llm_run)
+    exported_mails: list[StorageObject] = []
+    existing_export_message_ids = set(session.scalars(
+        select(StorageObject.source_message_id)
+        .where(StorageObject.directory_id == handover_directory_id)
+        .where(StorageObject.status == "active")
+        .where(StorageObject.source_type == "case_handover_mail_export")
+    ).all())
+    for message, _summary in mail_rows:
+        if message.id in existing_export_message_ids:
+            continue
+        exported_mails.append(save_storage_object(
+            session,
+            scope="managed",
+            filename=f"{message.gmail_message_id}.eml",
+            content_type="message/rfc822",
+            data=case_handover_eml_bytes(message),
+            now=now,
+            directory_id=handover_directory_id,
+            source_type="case_handover_mail_export",
+            source_message_id=message.id,
+        ))
+    mail_export_items = session.scalars(
+        select(StorageObject)
+        .where(StorageObject.directory_id == handover_directory_id)
+        .where(StorageObject.status == "active")
+        .where(StorageObject.source_type == "case_handover_mail_export")
+    ).all()
+    mail_exports = {
+        item.source_message_id: item
+        for item in mail_export_items
+        if item.source_message_id is not None
+    }
+    report_bytes = case_handover_markdown(
+        case, output, mail_rows, source_files, now
+    ).encode("utf-8")
+    timestamp = now[:19].replace(":", "").replace("T", "-")
+    report = save_storage_object(
+        session,
+        scope="managed",
+        filename=f"handover-{handover_filename_part(case.name, case.id)}-{timestamp}.md",
+        content_type="text/markdown; charset=utf-8",
+        data=report_bytes,
+        now=now,
+        directory_id=handover_directory_id,
+        source_type="case_handover_report",
+    )
+    bundle = save_storage_object(
+        session,
+        scope="managed",
+        filename=f"handover-{handover_filename_part(case.name, case.id)}-{timestamp}.zip",
+        content_type="application/zip",
+        data=case_handover_zip_bytes(
+            session,
+            report_bytes=report_bytes,
+            mail_rows=mail_rows,
+            mail_exports=mail_exports,
+            source_files=source_files,
+            historical_reports=historical_reports,
+        ),
+        now=now,
+        directory_id=handover_directory_id,
+        source_type="case_handover_bundle",
+    )
+    add_case_event(
+        session,
+        case,
+        event_type="case_handover_generated",
+        title="Handover materials generated",
+        now=now,
+        metadata={
+            "storage_object_id": report.id,
+            "bundle_storage_object_id": bundle.id,
+            "llm_run_id": llm_run.id,
+        },
+    )
+    session.commit()
+    return {"ok": True, "data": {
+        "handover_artifact": storage_object_data(report, session),
+        "handover_bundle": storage_object_data(bundle, session),
+        "exported_mail_count": len(exported_mails),
+        "related_mail_count": len(mail_rows),
+        "source_file_count": len(source_files),
+        "llm_run_id": llm_run.id,
+    }}
+
+
 @router.get("/{case_id}/mail-links")
 def list_case_mail_links(
     case_id: str,
@@ -1978,14 +2424,30 @@ def create_case_auto_assign_rule(
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
     ensure_case_exists(session, case_id)
-    sender_email = normalize_email_address(payload.sender_email)
-    if sender_email == "" or "@" not in sender_email:
-        raise json_error(422, "VALIDATION_ERROR", "Sender email is invalid.")
+    sender_email = normalize_email_address(payload.sender_email or "")
+    contact_id = (payload.contact_id or "").strip()
+    if (sender_email == "") == (contact_id == ""):
+        raise json_error(
+            422,
+            "VALIDATION_ERROR",
+            "Specify exactly one of sender_email or contact_id.",
+        )
+    if contact_id != "":
+        contact = session.get(Contact, contact_id)
+        if contact is None or contact.deleted_at is not None:
+            raise json_error(404, "NOT_FOUND", "Contact was not found.")
+        rule_type = "sender_contact"
+        rule_value = contact.id
+    else:
+        if "@" not in sender_email:
+            raise json_error(422, "VALIDATION_ERROR", "Sender email is invalid.")
+        rule_type = "sender_email"
+        rule_value = sender_email
     existing = session.scalar(
         select(CaseAutoAssignRule)
         .where(CaseAutoAssignRule.case_id == case_id)
-        .where(CaseAutoAssignRule.rule_type == "sender_email")
-        .where(CaseAutoAssignRule.rule_value == sender_email)
+        .where(CaseAutoAssignRule.rule_type == rule_type)
+        .where(CaseAutoAssignRule.rule_value == rule_value)
         .limit(1)
     )
     if existing is not None:
@@ -1994,8 +2456,8 @@ def create_case_auto_assign_rule(
     rule = CaseAutoAssignRule(
         id=new_id("case_auto_assign_rule"),
         case_id=case_id,
-        rule_type="sender_email",
-        rule_value=sender_email,
+        rule_type=rule_type,
+        rule_value=rule_value,
         label=(payload.label.strip() if payload.label and payload.label.strip() else None),
         is_enabled=1,
         created_at=now,
@@ -2004,7 +2466,7 @@ def create_case_auto_assign_rule(
     )
     session.add(rule)
     session.commit()
-    return {"ok": True, "data": {"rule": case_auto_assign_rule_data(rule)}}
+    return {"ok": True, "data": {"rule": case_auto_assign_rule_data(session, rule)}}
 
 
 @router.delete("/{case_id}/auto-assign-rules/{rule_id}")

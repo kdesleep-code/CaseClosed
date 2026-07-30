@@ -1,13 +1,28 @@
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, FormEvent } from 'react'
-import { AuthApiError, login, logout, readSession } from './authApi'
+import {
+  AuthApiError,
+  login,
+  logout,
+  readSession,
+  resetPasswordByEmail,
+} from './authApi'
 import type { SessionData } from './authApi'
 import AcademicCalendarView from './AcademicCalendarView'
 import loginDoorTanuki from './assets/login-door-tanuki.png'
 import settingsGearIconUrl from './assets/settings-gear.svg'
 import pomodoroBellUrl from './assets/pomodoro-school-bell.mp3'
+import topBookshelfTanukiIconUrl from './assets/top-bookshelf-tanuki-icon-v2.webp'
+import topCalendarTanukiIconUrl from './assets/top-calendar-tanuki-icon-v2.webp'
+import topCasesTanukiIconUrl from './assets/top-cases-tanuki-icon-v2.webp'
+import topContactsTanukiIconUrl from './assets/top-contacts-tanuki-icon-v2.webp'
+import topExtensionsTanukiIconUrl from './assets/top-extensions-tanuki-icon-v2.webp'
+import topExternalToolsTanukiIconUrl from './assets/top-external-tools-tanuki-icon-v2.webp'
+import topFilesTanukiIconUrl from './assets/top-files-tanuki-icon-v2.webp'
 import topMailTanukiIconUrl from './assets/top-mail-tanuki-icon.png'
-import topPomodoroTanukiIconUrl from './assets/top-pomodoro-tanuki-icon.png'
+import topPapersTanukiIconUrl from './assets/top-papers-tanuki-icon-v2.webp'
+import topTasksTanukiIconUrl from './assets/top-tasks-tanuki-icon-v2.webp'
+import topPomodoroTanukiIconUrl from './assets/top-pomodoro-tanuki-icon-v3.webp'
 import CalendarView from './CalendarView'
 import BookshelfView from './BookshelfView'
 import BookshelfReaderView from './BookshelfReaderView'
@@ -16,9 +31,11 @@ import CalendarConflictView from './CalendarConflictView'
 import CalendarEventDetailView from './CalendarEventDetailView'
 import CalendarNewEventView from './CalendarNewEventView'
 import CaseTaskBatchGenerateView from './CaseTaskBatchGenerateView'
+import CaseAutoAssignRulesView from './CaseAutoAssignRulesView'
 import CaseView from './CaseView'
 import ComposeMailView from './ComposeMailView'
 import ContactsView from './ContactsView'
+import ContactAutoTagRulesView from './ContactAutoTagRulesView'
 import type { ContactsInitialData } from './ContactsView'
 import ExtensionLaunchView from './ExtensionLaunchView'
 import ExtensionsHelpView from './ExtensionsHelpView'
@@ -66,6 +83,8 @@ import {
   listPendingMails,
   readMaintenanceStatus,
 } from './phase2Api'
+import { imageUploadAccept, imageUploadContentType } from './imageUpload'
+import { installZoomLayoutGuard } from './zoomLayout'
 import { listTasks } from './phase8Api'
 import {
   createFileIconSetting,
@@ -83,7 +102,7 @@ import {
   updateCaseToolIconSetting,
 } from './phase7Api'
 import type { CaseToolIconSetting } from './phase7Api'
-import { listMailDates, listMailPage } from './phase4Api'
+import { getMailDayStats, listMailDates, listMailPage } from './phase4Api'
 import {
   pendingContactRedirectEventName,
   type PendingContactRedirectEvent,
@@ -167,16 +186,16 @@ function shouldOpenMobileTop(requested: ViewModePreference | null) {
 
 const pageLinks: LinkItem[] = [
   { labelKey: 'nav.mail', href: '/mail', iconUrl: topMailTanukiIconUrl },
-  { labelKey: 'nav.cases', href: '/cases' },
-  { labelKey: 'nav.tasks', href: '/tasks' },
-  { labelKey: 'nav.calendar', href: '/calendar' },
-  { labelKey: 'nav.contacts', href: '/contacts' },
-  { labelKey: 'nav.files', href: '/files' },
-  { labelKey: 'nav.bookshelf', href: '/bookshelf' },
-  { labelKey: 'nav.papers', href: '/papers' },
+  { labelKey: 'nav.cases', href: '/cases', iconUrl: topCasesTanukiIconUrl },
+  { labelKey: 'nav.tasks', href: '/tasks', iconUrl: topTasksTanukiIconUrl },
+  { labelKey: 'nav.calendar', href: '/calendar', iconUrl: topCalendarTanukiIconUrl },
+  { labelKey: 'nav.contacts', href: '/contacts', iconUrl: topContactsTanukiIconUrl },
+  { labelKey: 'nav.files', href: '/files', iconUrl: topFilesTanukiIconUrl },
+  { labelKey: 'nav.bookshelf', href: '/bookshelf', iconUrl: topBookshelfTanukiIconUrl },
+  { labelKey: 'nav.papers', href: '/papers', iconUrl: topPapersTanukiIconUrl },
   { labelKey: 'nav.pomodoro', href: '/pomodoro', target: '_blank', rel: 'noopener noreferrer', iconUrl: topPomodoroTanukiIconUrl },
-  { labelKey: 'nav.externalTools', href: '/external-tools' },
-  { labelKey: 'nav.extensions', href: '/extensions' },
+  { labelKey: 'nav.externalTools', href: '/external-tools', iconUrl: topExternalToolsTanukiIconUrl },
+  { labelKey: 'nav.extensions', href: '/extensions', iconUrl: topExtensionsTanukiIconUrl },
 ]
 
 const mainPageSlots: PageSlot[] = [
@@ -344,31 +363,64 @@ async function loadMailInitialData(
   viewMode: MailInitialData['viewMode'] = 'normal',
 ): Promise<MailInitialData> {
   const activeTab = mailTabFromSearchParams(routeUrl.searchParams)
+  const searchQuery = routeUrl.searchParams.get('q')?.trim() ?? ''
+  const contactId = routeUrl.searchParams.get('contact_id')?.trim() ?? ''
+  const listSort = routeUrl.searchParams.get('sort') === 'newest' ? 'newest' : 'importance'
   const requestedDate = requestedDateFromSearchParams(routeUrl.searchParams)
-  const mailDates = viewMode === 'action-needed' ? [] : await listMailDates(activeTab)
   const today = jstDateToday()
+  const provisionalDate = requestedDate ?? today
+  const isSearchLike = viewMode === 'action-needed' || searchQuery !== '' || contactId !== ''
+
+  function loadPage(date: string) {
+    if (viewMode === 'action-needed') {
+      return listMailPage({
+        tab: 'all',
+        needs_action: true,
+        sort: listSort,
+        limit: 25,
+      })
+    }
+    if (searchQuery !== '' || contactId !== '') {
+      return listMailPage({
+        tab: 'all',
+        q: searchQuery || undefined,
+        contact_id: contactId || undefined,
+        sort: listSort,
+        limit: 25,
+      })
+    }
+    return listMailPage({
+      tab: activeTab,
+      date_from: startOfDate(date),
+      date_to: endOfDate(date),
+      sort: listSort,
+      limit: 25,
+    })
+  }
+
+  let [mailDates, page, mailDayStats] = await Promise.all([
+    viewMode === 'action-needed' || contactId !== ''
+      ? Promise.resolve([])
+      : listMailDates(activeTab),
+    loadPage(provisionalDate),
+    isSearchLike ? Promise.resolve(null) : getMailDayStats(provisionalDate),
+  ])
   const selectedDate =
     requestedDate ??
     (mailDates.some((item) => item.date === today)
       ? today
       : mailDates.at(-1)?.date ?? today)
-  const page =
-    viewMode === 'action-needed'
-      ? await listMailPage({
-          tab: 'all',
-          needs_action: true,
-          limit: 25,
-        })
-      : await listMailPage({
-          tab: activeTab,
-          date_from: startOfDate(selectedDate),
-          date_to: endOfDate(selectedDate),
-          limit: 25,
-        })
+  if (!isSearchLike && selectedDate !== provisionalDate) {
+    ;[page, mailDayStats] = await Promise.all([
+      loadPage(selectedDate),
+      getMailDayStats(selectedDate),
+    ])
+  }
 
   return {
     mails: page.items,
     mailDates,
+    mailDayStats,
     nextCursor: page.next_cursor,
     activeTab,
     selectedDate,
@@ -376,6 +428,7 @@ async function loadMailInitialData(
     viewMode,
   }
 }
+
 
 async function preloadRoute(path: string): Promise<RoutePreload> {
   const routeUrl = new URL(path, window.location.origin)
@@ -900,6 +953,10 @@ function initialPomodoroState(): PomodoroState {
 }
 
 type PomodoroWorkerEvent = { type: 'tick' } | { type: 'sync' }
+type PomodoroSsePayload = {
+  state: PomodoroState
+}
+
 
 function displayRemainingSeconds(state: PomodoroState) {
   if (!state.is_running || state.phase === 'done' || state.phase_ends_at_epoch_ms === null) {
@@ -998,12 +1055,33 @@ function PomodoroView() {
         void refreshState(true).catch(() => undefined)
       }
     })
-    worker.postMessage({ type: 'start', intervalMs: 1000 })
+    worker.postMessage({ type: 'start', intervalMs: 30_000 })
     return () => {
       worker.postMessage({ type: 'stop' })
       worker.terminate()
     }
   }, [])
+  useEffect(() => {
+    const eventSource = new EventSource('/api/v1/pomodoro/events', {
+      withCredentials: true,
+    })
+    function handleStateEvent(event: MessageEvent<string>) {
+      try {
+        const payload = JSON.parse(event.data) as PomodoroSsePayload
+        if (payload.state !== undefined) {
+          applyState(payload.state, true)
+        }
+      } catch {
+        // EventSource reconnects automatically; periodic sync remains the fallback.
+      }
+    }
+    eventSource.addEventListener('state', handleStateEvent as EventListener)
+    return () => {
+      eventSource.removeEventListener('state', handleStateEvent as EventListener)
+      eventSource.close()
+    }
+  }, [])
+
 
   useEffect(() => {
     function handleVisibilityChange() {
@@ -1215,7 +1293,7 @@ function CaseToolIconsView() {
     try {
       const created = await createCaseToolIconSetting({
         icon_filename: selectedFile.name,
-        icon_content_type: selectedFile.type || 'image/png',
+        icon_content_type: imageUploadContentType(selectedFile),
         icon_data_base64: await fileToBase64(selectedFile),
         match_url: matchUrl,
       })
@@ -1240,7 +1318,7 @@ function CaseToolIconsView() {
       }
       if (editingFile !== null) {
         payload.icon_filename = editingFile.name
-        payload.icon_content_type = editingFile.type || item.icon_content_type
+        payload.icon_content_type = imageUploadContentType(editingFile)
         payload.icon_data_base64 = await fileToBase64(editingFile)
       }
       const updated = await updateCaseToolIconSetting(item.id, payload)
@@ -1310,7 +1388,7 @@ function CaseToolIconsView() {
                     )}
                     {editingId === item.id && (
                       <input
-                        accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+                        accept={imageUploadAccept}
                         onChange={(event) => setEditingFile(event.target.files?.[0] ?? null)}
                         type="file"
                       />
@@ -1365,7 +1443,7 @@ function CaseToolIconsView() {
             <form className="file-icons-row file-icons-create-row" onSubmit={handleCreate}>
               <div>
                 <input
-                  accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+                  accept={imageUploadAccept}
                   onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
                   type="file"
                 />
@@ -1737,7 +1815,7 @@ function FileIconsView() {
     try {
       const created = await createFileIconSetting({
         icon_filename: selectedFile.name,
-        icon_content_type: selectedFile.type || 'image/png',
+        icon_content_type: imageUploadContentType(selectedFile),
         icon_data_base64: await fileToBase64(selectedFile),
         extensions: extensions.split(/[\s,]+/).filter(Boolean),
       })
@@ -1762,7 +1840,7 @@ function FileIconsView() {
       }
       if (editingFile !== null) {
         payload.icon_filename = editingFile.name
-        payload.icon_content_type = editingFile.type || item.icon_content_type
+        payload.icon_content_type = imageUploadContentType(editingFile)
         payload.icon_data_base64 = await fileToBase64(editingFile)
       }
       const updated = await updateFileIconSetting(item.id, payload)
@@ -1833,7 +1911,7 @@ function FileIconsView() {
                       )}
                       {editingId === item.id && (
                         <input
-                          accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+                          accept={imageUploadAccept}
                           onChange={(event) => setEditingFile(event.target.files?.[0] ?? null)}
                           type="file"
                         />
@@ -1888,7 +1966,7 @@ function FileIconsView() {
               <form className="file-icons-row file-icons-create-row" onSubmit={handleCreate}>
                 <div>
                   <input
-                    accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+                    accept={imageUploadAccept}
                     onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
                     type="file"
                   />
@@ -1964,6 +2042,8 @@ function App() {
   const [error, setError] = useState<string | null>(null)
   const [isLocked, setIsLocked] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [isResettingPassword, setIsResettingPassword] = useState(false)
+  const [passwordResetNotice, setPasswordResetNotice] = useState<string | null>(null)
   const [isSessionChecked, setIsSessionChecked] = useState(false)
   const [path, setPath] = useState(window.location.pathname)
   const [routePreload, setRoutePreload] = useState<RoutePreload | null>(null)
@@ -1972,6 +2052,8 @@ function App() {
     useState<PendingContactNotice | null>(null)
   const [pendingContactSecondsLeft, setPendingContactSecondsLeft] = useState(30)
   const routeTransitionId = useRef(0)
+
+  useEffect(() => installZoomLayoutGuard(), [])
 
   function transitionToPreparedRoute(
     nextPath: string,
@@ -2177,6 +2259,7 @@ function App() {
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setError(null)
+    setPasswordResetNotice(null)
     setIsSubmitting(true)
 
     try {
@@ -2205,6 +2288,26 @@ function App() {
       }
     } finally {
       setIsSubmitting(false)
+    }
+  }
+
+  async function handlePasswordReset() {
+    setError(null)
+    setPasswordResetNotice(null)
+    setIsResettingPassword(true)
+    try {
+      await resetPasswordByEmail()
+      setPassword('')
+      setIsLocked(false)
+      setPasswordResetNotice(t('login.reset.sent'))
+    } catch (resetError) {
+      setError(
+        resetError instanceof AuthApiError
+          ? resetError.message
+          : t('auth.requestFailed'),
+      )
+    } finally {
+      setIsResettingPassword(false)
     }
   }
 
@@ -2492,6 +2595,15 @@ function App() {
         </>
       )
     }
+    if (path === '/case-auto-assign-rules') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <CaseAutoAssignRulesView />
+        </>
+      )
+    }
     if (path === '/tasks') {
       return (
         <>
@@ -2665,6 +2777,9 @@ function App() {
         </>
       )
     }
+    if (path === '/contact-auto-tag-rules') {
+      return <><ContactAutoTagRulesView /></>
+    }
     if (path === '/contacts/pending') {
       return (
         <>
@@ -2741,14 +2856,32 @@ function App() {
             </label>
 
             {error !== null && <p role="alert">{error}</p>}
+            {passwordResetNotice !== null && (
+              <p className="login-reset-notice" role="status">
+                {passwordResetNotice}
+              </p>
+            )}
             {isLocked && <p className="lock-status">{t('login.locked')}</p>}
 
             <button
               className={`button-loading-dot${isSubmitting ? ' is-loading' : ''}`}
-              disabled={isSubmitting}
+              disabled={isSubmitting || isResettingPassword}
               type="submit"
             >
               {t('login.submit')}
+            </button>
+            <p className="login-reset-description">
+              {t('login.reset.description')}
+            </p>
+            <button
+              className="login-reset-button"
+              disabled={isSubmitting || isResettingPassword}
+              onClick={() => void handlePasswordReset()}
+              type="button"
+            >
+              {isResettingPassword
+                ? t('login.reset.sending')
+                : t('login.reset.submit')}
             </button>
           </form>
         </section>
@@ -2762,4 +2895,3 @@ function App() {
 }
 
 export default App
-

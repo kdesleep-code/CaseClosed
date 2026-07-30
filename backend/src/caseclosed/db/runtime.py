@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 
 from caseclosed.db.base import Base
 from caseclosed.db.models import AppSetting
@@ -54,9 +55,19 @@ def parse_iso_datetime(value: str) -> datetime:
 
 def build_engine() -> Engine:
     database_url = get_database_url()
-    database_engine = create_engine(database_url, future=True)
+    if database_url.startswith("sqlite:"):
+        database_engine = create_engine(
+            database_url,
+            future=True,
+            poolclass=NullPool,
+        )
+    else:
+        database_engine = create_engine(database_url, future=True)
     if database_url.startswith("sqlite:"):
         event.listen(database_engine, "connect", configure_sqlite_connection)
+        with database_engine.connect() as connection:
+            connection.exec_driver_sql("PRAGMA journal_mode=WAL")
+
     return database_engine
 
 
@@ -67,9 +78,7 @@ def configure_sqlite_connection(
     """Keep API reads responsive while background workers write to SQLite."""
     cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
     try:
-        cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA busy_timeout=15000")
-        cursor.execute("PRAGMA foreign_keys=ON")
     finally:
         cursor.close()
 
@@ -81,7 +90,9 @@ SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 def rebuild_runtime_database() -> None:
     global engine
     global SessionLocal
+    previous_engine = engine
 
+    previous_engine.dispose()
     engine = build_engine()
     SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
@@ -1097,6 +1108,38 @@ def ensure_runtime_schema() -> None:
             connection.execute(
                 text("ALTER TABLE mail_send_requests ADD COLUMN attachment_data_json TEXT")
             )
+        if (
+            "mail_send_requests" in table_names
+            and "cases" in table_names
+            and "mail_send_request_case_links" not in table_names
+        ):
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE mail_send_request_case_links (
+                        id TEXT PRIMARY KEY,
+                        send_request_id TEXT NOT NULL REFERENCES mail_send_requests(id),
+                        case_id TEXT NOT NULL REFERENCES cases(id),
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        UNIQUE (send_request_id, case_id)
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_mail_send_request_case_links_request "
+                    "ON mail_send_request_case_links (send_request_id)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_mail_send_request_case_links_case "
+                    "ON mail_send_request_case_links (case_id)"
+                )
+            )
         if "gmail_messages" in table_names and "mail_llm_block_filters" not in table_names:
             connection.execute(
                 text(
@@ -1286,6 +1329,60 @@ def ensure_runtime_schema() -> None:
                         """
                     )
                 )
+
+
+    mail_indexes: list[tuple[str, str]] = [
+        (
+            "gmail_messages",
+            "CREATE INDEX IF NOT EXISTS ix_gmail_messages_received_at_id "
+            "ON gmail_messages (received_at, id)",
+        ),
+        (
+            "gmail_messages",
+            "CREATE INDEX IF NOT EXISTS ix_gmail_messages_thread_received "
+            "ON gmail_messages (thread_id, received_at, id)",
+        ),
+        (
+            "gmail_message_attachments",
+            "CREATE INDEX IF NOT EXISTS ix_gmail_message_attachments_message "
+            "ON gmail_message_attachments (message_id)",
+        ),
+        (
+            "mail_send_requests",
+            "CREATE INDEX IF NOT EXISTS ix_mail_send_requests_sent_message "
+            "ON mail_send_requests (sent_message_id)",
+        ),
+        (
+            "mail_send_requests",
+            "CREATE INDEX IF NOT EXISTS ix_mail_send_requests_visible "
+            "ON mail_send_requests "
+            "(reply_to_message_id, sent_message_id, status, scheduled_at)",
+        ),
+        (
+            "case_mail_links",
+            "CREATE INDEX IF NOT EXISTS ix_case_mail_links_message "
+            "ON case_mail_links (message_id)",
+        ),
+        (
+            "contact_tags",
+            "CREATE INDEX IF NOT EXISTS ix_contact_tags_contact "
+            "ON contact_tags (contact_id, tag)",
+        ),
+        (
+            "mail_send_request_case_links",
+            "CREATE INDEX IF NOT EXISTS ix_mail_send_request_case_links_request "
+            "ON mail_send_request_case_links (send_request_id)",
+        ),
+        (
+            "mail_send_request_case_links",
+            "CREATE INDEX IF NOT EXISTS ix_mail_send_request_case_links_case "
+            "ON mail_send_request_case_links (case_id)",
+        ),
+    ]
+    with engine.begin() as connection:
+        for table_name, statement in mail_indexes:
+            if table_name in table_names:
+                connection.execute(text(statement))
 
 
 def seed_settings(session: Session) -> None:

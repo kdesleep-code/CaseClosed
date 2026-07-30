@@ -8,7 +8,7 @@ import { listTasks } from './phase8Api'
 import type { TaskItem } from './phase8Api'
 
 type TaskSortMode = 'priority' | 'due_asc' | 'due_desc' | 'updated_desc'
-type TaskTab = 'inbox' | 'done' | 'not_started' | 'archived'
+type TaskTab = 'inbox' | 'done' | 'not_started' | 'frozen' | 'archived'
 
 const ARCHIVE_AFTER_MS = 14 * 24 * 60 * 60 * 1000
 
@@ -67,15 +67,17 @@ function isTaskNotStartedByDate(task: TaskItem) {
 
 function taskBelongsToTab(task: TaskItem, tab: TaskTab) {
   if (tab === 'archived') return isTaskArchived(task)
-  if (tab === 'not_started') return isTaskNotStartedByDate(task)
+  if (tab === 'frozen') return task.status === 'frozen'
+  if (tab === 'not_started') return task.status !== 'frozen' && isTaskNotStartedByDate(task)
   if (tab === 'done') return isTaskClosed(task) && !isTaskArchived(task)
-  return !isTaskClosed(task) && !isTaskNotStartedByDate(task)
+  return task.status !== 'frozen' && !isTaskClosed(task) && !isTaskNotStartedByDate(task)
 }
 
 function taskStatusLabel(status: string) {
   if (status === 'not_started') return t('tasks.status.notStarted')
   if (status === 'in_progress') return t('tasks.status.inProgress')
   if (status === 'completed') return t('tasks.status.completed')
+  if (status === 'frozen') return t('tasks.status.frozen')
   if (status === 'canceled') return t('tasks.status.canceled')
   return status
 }
@@ -178,7 +180,7 @@ export default function TaskView() {
   const [currentTab, setCurrentTab] = useState<TaskTab>(() => {
     const params = new URLSearchParams(window.location.search)
     const value = params.get('tab')
-    return value === 'done' || value === 'not_started' || value === 'archived'
+    return value === 'done' || value === 'not_started' || value === 'frozen' || value === 'archived'
       ? value
       : 'inbox'
   })
@@ -394,7 +396,7 @@ export default function TaskView() {
                 ))}
               </div>
               <div className="task-tab-group">
-                {(['not_started', 'archived'] as TaskTab[]).map((tab) => (
+                {(['not_started', 'frozen', 'archived'] as TaskTab[]).map((tab) => (
                   <button
                     aria-selected={currentTab === tab}
                     key={tab}

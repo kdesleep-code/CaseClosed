@@ -4,6 +4,7 @@ import base64
 import binascii
 import json
 import re
+from dataclasses import dataclass
 from datetime import timedelta
 from urllib.parse import quote
 from uuid import uuid4
@@ -18,7 +19,9 @@ from sqlalchemy import and_
 from sqlalchemy import func
 from sqlalchemy import or_
 from sqlalchemy import select
+from sqlalchemy import update
 from sqlalchemy.orm import Session as DatabaseSession
+from sqlalchemy.orm import load_only
 
 from caseclosed.auth import ACCESS_MODE_LOW_MAIL_REVIEW
 from caseclosed.auth import json_error
@@ -40,6 +43,7 @@ from caseclosed.db.models import LlmRun
 from caseclosed.db.models import MailAutoState
 from caseclosed.db.models import MailLlmBlockFilter
 from caseclosed.db.models import MailSendRequest
+from caseclosed.db.models import MailSendRequestCaseLink
 from caseclosed.db.models import MailSummary
 from caseclosed.db.models import MailThreadSummary
 from caseclosed.db.models import MailUserState
@@ -49,6 +53,7 @@ from caseclosed.db.models import TaskLink
 from caseclosed.db.runtime import get_session
 from caseclosed.db.runtime import jst_now
 from caseclosed.db.runtime import jst_iso
+from caseclosed.db.runtime import parse_iso_datetime
 from caseclosed.email_addressing import normalize_address_list
 from caseclosed.email_addressing import normalize_email_address
 from caseclosed.services.case_mail_stakeholders import ensure_case_stakeholders_for_mail_senders
@@ -324,6 +329,22 @@ def mail_send_request_data(send_request: MailSendRequest) -> dict[str, object]:
     }
 
 
+def send_request_case_link_items(
+    session: DatabaseSession,
+    send_request_id: str,
+) -> list[dict[str, object]]:
+    cases = session.scalars(
+        select(Case)
+        .join(MailSendRequestCaseLink, MailSendRequestCaseLink.case_id == Case.id)
+        .where(MailSendRequestCaseLink.send_request_id == send_request_id)
+        .order_by(Case.is_system_case.desc(), Case.updated_at.desc(), Case.name.asc())
+    ).all()
+    return [
+        {"id": case.id, "case_id": case.id, "title": case.name}
+        for case in cases
+    ]
+
+
 def attachment_payloads_json(
     attachments: list[MailSendAttachmentPayload] | None,
 ) -> str | None:
@@ -445,9 +466,62 @@ def send_request_matches_query(send_request: MailSendRequest, tokens: list[str])
     return all(token in searchable_text for token in tokens)
 
 
-def send_request_list_item_data(send_request: MailSendRequest) -> dict[str, object]:
+def contact_participant_addresses(
+    session: DatabaseSession,
+    contact_id: str,
+) -> set[str]:
+    contact = session.get(Contact, contact_id)
+    if contact is None or contact.deleted_at is not None:
+        raise json_error(404, "NOT_FOUND", "Contact not found.")
+    addresses = session.scalars(
+        select(ContactEmailAddress.normalized_email_address)
+        .where(ContactEmailAddress.contact_id == contact.id)
+        .where(ContactEmailAddress.status != "deleted")
+    ).all()
+    return {normalize_email_address(address) for address in addresses if address.strip() != ""}
+
+
+def message_has_participant(
+    message: GmailMessage,
+    participant_addresses: set[str],
+) -> bool:
+    message_addresses = [
+        message.from_address,
+        message.sender_address,
+        message.reply_to_address,
+        *json_list(message.to_addresses_json),
+        *json_list(message.cc_addresses_json),
+        *json_list(message.bcc_addresses_json),
+    ]
+    return any(
+        address is not None
+        and normalize_email_address(str(address)) in participant_addresses
+        for address in message_addresses
+    )
+
+
+def send_request_has_participant(
+    send_request: MailSendRequest,
+    participant_addresses: set[str],
+) -> bool:
+    recipient_addresses = [
+        *json_list(send_request.to_addresses_json),
+        *json_list(send_request.cc_addresses_json),
+        *json_list(send_request.bcc_addresses_json),
+    ]
+    return any(
+        normalize_email_address(str(address)) in participant_addresses
+        for address in recipient_addresses
+    )
+
+
+def send_request_list_item_data(
+    session: DatabaseSession,
+    send_request: MailSendRequest,
+) -> dict[str, object]:
     visible_at = send_request_visible_at(send_request)
     attachments = sent_attachment_items(send_request)
+    case_links = send_request_case_link_items(session, send_request.id)
     return {
         "id": send_request.id,
         "gmail_message_id": f"provisional:{send_request.id}",
@@ -457,7 +531,7 @@ def send_request_list_item_data(send_request: MailSendRequest) -> dict[str, obje
         "received_date": visible_at[:10],
         "subject": send_request.subject,
         "from_address": MOCK_FROM_ADDRESS,
-        "from_name": "CaseClosed",
+        "from_name": "C@seClosed",
         "reply_to_address": None,
         "list_id": None,
         "processed_status": "processed",
@@ -471,7 +545,7 @@ def send_request_list_item_data(send_request: MailSendRequest) -> dict[str, obje
         "llm_run_id": None,
         "pending_reason": None,
         "sender_contact": None,
-        "case_links": [],
+        "case_links": case_links,
         "summary": None,
         "attachment_count": len(attachments),
         "has_attachments": len(attachments) > 0,
@@ -494,7 +568,7 @@ def send_request_message_data(send_request: MailSendRequest) -> dict[str, object
         "received_date": visible_at[:10],
         "subject": send_request.subject,
         "from_address": MOCK_FROM_ADDRESS,
-        "from_name": "CaseClosed",
+        "from_name": "C@seClosed",
         "from_contact": None,
         "sender_contact": None,
         "sender_address": None,
@@ -534,7 +608,10 @@ def send_request_message_data(send_request: MailSendRequest) -> dict[str, object
     }
 
 
-def send_request_detail_data(send_request: MailSendRequest) -> dict[str, object]:
+def send_request_detail_data(
+    session: DatabaseSession,
+    send_request: MailSendRequest,
+) -> dict[str, object]:
     message = send_request_message_data(send_request)
     user_state = {
         "user_importance": None,
@@ -558,7 +635,7 @@ def send_request_detail_data(send_request: MailSendRequest) -> dict[str, object]
         "user_state": user_state,
         "auto_state": auto_state,
         "summary": None,
-        "case_links": [],
+        "case_links": send_request_case_link_items(session, send_request.id),
         "attachments": message["attachments"],
         "drafts": [],
         "available_actions": [],
@@ -580,7 +657,11 @@ def enqueue_mail_send_mock_job(
             priority=80,
             status="pending",
             payload_json=json.dumps(
-                {"send_request_id": send_request.id},
+                {
+                    "send_request_id": send_request.id,
+                    "send_request_version": send_request.version,
+                    "scheduled_at": send_request.scheduled_at,
+                },
                 ensure_ascii=True,
                 sort_keys=True,
             ),
@@ -600,6 +681,56 @@ def enqueue_mail_send_mock_job(
         )
     )
     return job_id
+
+
+def supersede_pending_mail_send_jobs(
+    session: DatabaseSession,
+    send_request_id: str,
+    now: str,
+) -> list[str]:
+    superseded_ids: list[str] = []
+    jobs = session.scalars(
+        select(Job)
+        .where(Job.job_type == "mail_send_mock")
+        .where(Job.status == "pending")
+        .order_by(Job.created_at, Job.id)
+    ).all()
+    for job in jobs:
+        try:
+            payload = json.loads(job.payload_json)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict) or payload.get("send_request_id") != send_request_id:
+            continue
+        job.status = "succeeded"
+        job.result_json = json.dumps(
+            {
+                "send_request_id": send_request_id,
+                "status": "superseded",
+                "idempotent": True,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        )
+        job.error_type = None
+        job.error_message = None
+        job.finished_at = now
+        job.updated_at = now
+        superseded_ids.append(job.id)
+    return superseded_ids
+
+
+def validated_future_send_time(value: str) -> str:
+    scheduled_at = value.strip()
+    if scheduled_at == "":
+        raise json_error(422, "VALIDATION_ERROR", "Scheduled time is required.")
+    try:
+        parsed = parse_iso_datetime(scheduled_at)
+    except (TypeError, ValueError):
+        raise json_error(422, "VALIDATION_ERROR", "Scheduled time is invalid.") from None
+    if parsed <= jst_now():
+        raise json_error(422, "VALIDATION_ERROR", "Scheduled time must be in the future.")
+    return scheduled_at
 
 
 def contact_tags(session: DatabaseSession, contact_id: str) -> list[str]:
@@ -874,6 +1005,22 @@ def mail_attachment_data(
     }
 
 
+LEGACY_INLINE_IMAGE_FILENAME_PATTERN = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    re.IGNORECASE,
+)
+
+
+def is_legacy_inline_image(attachment: GmailMessageAttachment) -> bool:
+    return (
+        (attachment.mime_type or "").lower().startswith("image/")
+        and attachment.byte_size <= 32 * 1024
+        and LEGACY_INLINE_IMAGE_FILENAME_PATTERN.fullmatch(
+            attachment.filename.strip()
+        ) is not None
+    )
+
+
 def attachment_rows_by_message_id(
     session: DatabaseSession,
     message_ids: list[str],
@@ -890,6 +1037,8 @@ def attachment_rows_by_message_id(
     ).all()
     grouped: dict[str, list[GmailMessageAttachment]] = {}
     for row in rows:
+        if is_legacy_inline_image(row):
+            continue
         grouped.setdefault(row.message_id, []).append(row)
     return grouped
 
@@ -898,11 +1047,12 @@ def attachment_count_for_message(
     session: DatabaseSession,
     message_id: str,
 ) -> int:
-    return session.scalar(
-        select(func.count())
-        .select_from(GmailMessageAttachment)
-        .where(GmailMessageAttachment.message_id == message_id)
-    ) or 0
+    rows = session.scalars(
+        select(GmailMessageAttachment).where(
+            GmailMessageAttachment.message_id == message_id
+        )
+    ).all()
+    return sum(1 for row in rows if not is_legacy_inline_image(row))
 
 
 def unique_thread_attachments(
@@ -1426,6 +1576,13 @@ def normalize_tab_filter(value: str) -> str:
     raise json_error(422, "VALIDATION_ERROR", "Invalid mail tab filter.")
 
 
+def normalize_mail_sort(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized in {"importance", "newest"}:
+        return normalized
+    raise json_error(422, "VALIDATION_ERROR", "Invalid mail sort.")
+
+
 def normalize_limit(limit: int) -> int:
     if limit < 1:
         raise json_error(422, "VALIDATION_ERROR", "Limit must be positive.")
@@ -1793,6 +1950,128 @@ def detail_data(
     }
 
 
+@dataclass
+class MailListItemContext:
+    sender_contacts_by_address: dict[str, dict[str, object]]
+    summaries_by_thread_id: dict[str, MailSummary]
+    thread_summaries_by_thread_id: dict[str, MailThreadSummary]
+    attachment_counts_by_message_id: dict[str, int]
+    sent_attachment_counts_by_message_id: dict[str, int]
+    case_links_by_thread_id: dict[str, list[dict[str, object]]]
+
+
+def build_mail_list_item_context(
+    session: DatabaseSession,
+    rows: list[
+        tuple[GmailMessage, MailUserState, MailAutoState, str, str, str, str | None]
+    ],
+) -> MailListItemContext:
+    messages = [row[0] for row in rows]
+    message_ids = [message.id for message in messages]
+    thread_ids = list({message.thread_id for message in messages})
+    normalized_addresses = {
+        normalize_email_address(message.from_address) for message in messages
+    }
+
+    sender_contacts_by_address: dict[str, dict[str, object]] = {}
+    contact_rows = []
+    if normalized_addresses:
+        contact_rows = session.execute(
+            select(ContactEmailAddress.normalized_email_address, Contact)
+            .join(Contact, Contact.id == ContactEmailAddress.contact_id)
+            .where(
+                ContactEmailAddress.normalized_email_address.in_(normalized_addresses),
+                ContactEmailAddress.deleted_at.is_(None),
+                Contact.deleted_at.is_(None),
+            )
+        ).all()
+    contact_ids = list({contact.id for _, contact in contact_rows})
+    tags_by_contact_id: dict[str, list[str]] = {contact_id: [] for contact_id in contact_ids}
+    if contact_ids:
+        for contact_id, tag in session.execute(
+            select(ContactTag.contact_id, ContactTag.tag)
+            .where(ContactTag.contact_id.in_(contact_ids))
+            .order_by(ContactTag.contact_id, ContactTag.tag)
+        ):
+            tags_by_contact_id[contact_id].append(tag)
+    for normalized_address, contact in contact_rows:
+        contact_data = contact_summary(contact, include_sender_resolution_mode=True)
+        contact_data["tags"] = tags_by_contact_id.get(contact.id, [])
+        sender_contacts_by_address[normalized_address] = contact_data
+
+    summaries_by_thread_id: dict[str, MailSummary] = {}
+    thread_summaries_by_thread_id: dict[str, MailThreadSummary] = {}
+    if thread_ids:
+        summary_rows = session.execute(
+            select(GmailMessage.thread_id, MailSummary)
+            .join(MailSummary, MailSummary.message_id == GmailMessage.id)
+            .where(GmailMessage.thread_id.in_(thread_ids))
+            .order_by(
+                GmailMessage.thread_id,
+                GmailMessage.received_at.desc(),
+                GmailMessage.id.desc(),
+            )
+        ).all()
+        for thread_id, summary in summary_rows:
+            summaries_by_thread_id.setdefault(thread_id, summary)
+        thread_summaries_by_thread_id = {
+            summary.thread_id: summary
+            for summary in session.scalars(
+                select(MailThreadSummary).where(MailThreadSummary.thread_id.in_(thread_ids))
+            ).all()
+        }
+
+    attachment_counts_by_message_id = {message_id: 0 for message_id in message_ids}
+    if message_ids:
+        for attachment in session.scalars(
+            select(GmailMessageAttachment).where(
+                GmailMessageAttachment.message_id.in_(message_ids)
+            )
+        ).all():
+            if not is_legacy_inline_image(attachment):
+                attachment_counts_by_message_id[attachment.message_id] += 1
+    sent_attachments = sent_request_attachments_by_message_id(session, message_ids)
+    sent_attachment_counts_by_message_id = {
+        message_id: len(attachments)
+        for message_id, attachments in sent_attachments.items()
+    }
+
+    case_links_by_thread_id: dict[str, list[dict[str, object]]] = {
+        thread_id: [] for thread_id in thread_ids
+    }
+    seen_case_links: set[tuple[str, str]] = set()
+    if thread_ids:
+        case_rows = session.execute(
+            select(GmailMessage.thread_id, Case)
+            .join(CaseMailLink, CaseMailLink.message_id == GmailMessage.id)
+            .join(Case, Case.id == CaseMailLink.case_id)
+            .where(GmailMessage.thread_id.in_(thread_ids))
+            .order_by(
+                GmailMessage.thread_id,
+                Case.is_system_case.desc(),
+                Case.updated_at.desc(),
+                Case.name.asc(),
+            )
+        ).all()
+        for thread_id, case in case_rows:
+            key = (thread_id, case.id)
+            if key in seen_case_links:
+                continue
+            seen_case_links.add(key)
+            case_links_by_thread_id[thread_id].append(
+                {"id": case.id, "case_id": case.id, "title": case.name}
+            )
+
+    return MailListItemContext(
+        sender_contacts_by_address=sender_contacts_by_address,
+        summaries_by_thread_id=summaries_by_thread_id,
+        thread_summaries_by_thread_id=thread_summaries_by_thread_id,
+        attachment_counts_by_message_id=attachment_counts_by_message_id,
+        sent_attachment_counts_by_message_id=sent_attachment_counts_by_message_id,
+        case_links_by_thread_id=case_links_by_thread_id,
+    )
+
+
 def list_item_data(
     session: DatabaseSession,
     message: GmailMessage,
@@ -1803,19 +2082,41 @@ def list_item_data(
     processed_status_override: str | None = None,
     read_status_override: str | None = None,
     read_at_override: str | None = None,
+    context: MailListItemContext | None = None,
 ) -> dict[str, object]:
     effective_importance = (
         effective_importance_override
         or user_state.user_importance
         or auto_state.effective_importance
     )
-    contact_row = contact_for_address(session, message.from_address)
     is_sent = message_is_sent(message)
-    summary = latest_thread_summary(session, message.thread_id)
-    thread_summary = stored_thread_summary(session, message.thread_id)
-    attachment_count = attachment_count_for_message(session, message.id) + len(
-        sent_request_attachments_by_message_id(session, [message.id]).get(message.id, [])
-    )
+    if context is None:
+        contact_row = contact_for_address(session, message.from_address)
+        sender_contact = (
+            contact_summary(
+                contact_row,
+                session,
+                include_sender_resolution_mode=True,
+            )
+            if contact_row is not None
+            else None
+        )
+        summary = latest_thread_summary(session, message.thread_id)
+        thread_summary = stored_thread_summary(session, message.thread_id)
+        attachment_count = attachment_count_for_message(session, message.id) + len(
+            sent_request_attachments_by_message_id(session, [message.id]).get(message.id, [])
+        )
+        case_links = mail_thread_case_link_items(session, message.thread_id)
+    else:
+        sender_contact = context.sender_contacts_by_address.get(
+            normalize_email_address(message.from_address)
+        )
+        summary = context.summaries_by_thread_id.get(message.thread_id)
+        thread_summary = context.thread_summaries_by_thread_id.get(message.thread_id)
+        attachment_count = context.attachment_counts_by_message_id.get(message.id, 0) + (
+            context.sent_attachment_counts_by_message_id.get(message.id, 0)
+        )
+        case_links = context.case_links_by_thread_id.get(message.thread_id, [])
     return {
         "id": message.id,
         "gmail_message_id": message.gmail_message_id,
@@ -1841,18 +2142,10 @@ def list_item_data(
         "llm_blocked": bool(auto_state.llm_blocked),
         "llm_block_reason": auto_state.llm_block_reason,
         "llm_blocked_at": auto_state.llm_blocked_at,
-        "sender_contact": (
-            contact_summary(
-                contact_row,
-                session,
-                include_sender_resolution_mode=True,
-            )
-            if contact_row is not None
-            else None
-        ),
+        "sender_contact": sender_contact,
         "attachment_count": attachment_count,
         "has_attachments": attachment_count > 0,
-        "case_links": mail_thread_case_link_items(session, message.thread_id),
+        "case_links": case_links,
         "summary": None
         if is_sent or effective_importance not in SUMMARY_TARGET_IMPORTANCE
         else (
@@ -1893,7 +2186,11 @@ def download_mail_attachment(
     attachment.updated_at = now
     attachment.version += 1
     session.commit()
-    return storage_object_file_response(storage_object, session)
+    return storage_object_file_response(
+        storage_object,
+        session,
+        download_filename=attachment.filename,
+    )
 
 
 @router.post("/attachments/{attachment_id}/move-to-storage")
@@ -2066,7 +2363,11 @@ def cached_mail_attachment_response(
         attachment.updated_at = jst_iso()
         attachment.version += 1
         session.commit()
-    return storage_object_file_response(storage_object, session)
+    return storage_object_file_response(
+        storage_object,
+        session,
+        download_filename=attachment.filename,
+    )
 
 
 def managed_storage_object_for_attachment(
@@ -2094,12 +2395,16 @@ def managed_storage_object_for_attachment(
 def storage_object_file_response(
     storage_object: StorageObject,
     session: DatabaseSession,
+    *,
+    download_filename: str,
 ) -> FileResponse:
-    return FileResponse(
+    response = FileResponse(
         storage_object_absolute_path(storage_object, session),
         media_type=storage_object.content_type or "application/octet-stream",
-        filename=storage_object.original_filename,
+        filename=download_filename,
     )
+    session.close()
+    return response
 
 
 def sent_attachment_content(
@@ -2231,7 +2536,7 @@ def send_mail(
     if payload.attachments:
         attachment_names = [attachment.filename.strip() for attachment in payload.attachments]
     scheduled_at = (
-        payload.scheduled_at.strip()
+        validated_future_send_time(payload.scheduled_at)
         if payload.scheduled_at is not None and payload.scheduled_at.strip() != ""
         else jst_iso(jst_now() + timedelta(minutes=1))
     )
@@ -2523,18 +2828,60 @@ def ensure_send_request_mutable(send_request: MailSendRequest) -> None:
         raise json_error(409, "CONFLICT", "Mail send request cannot be changed.")
 
 
+def update_mutable_send_request(
+    session: DatabaseSession,
+    send_request_id: str,
+    *,
+    status: str,
+    scheduled_at: str | None,
+    now: str,
+    preserve_scheduled_at: bool = False,
+) -> MailSendRequest:
+    immutable_statuses = {
+        "sent_mock",
+        "sent_gmail",
+        "sending_mock",
+        "sending_gmail",
+        "canceled",
+    }
+    values: dict[str, object] = {
+        "status": status,
+        "updated_at": now,
+        "version": MailSendRequest.version + 1,
+    }
+    if not preserve_scheduled_at:
+        values["scheduled_at"] = scheduled_at
+    result = session.execute(
+        update(MailSendRequest)
+        .where(MailSendRequest.id == send_request_id)
+        .where(MailSendRequest.status.notin_(immutable_statuses))
+        .values(**values)
+    )
+    if result.rowcount != 1:
+        session.rollback()
+        send_request = get_send_request_or_404(session, send_request_id)
+        ensure_send_request_mutable(send_request)
+        raise json_error(409, "CONFLICT", "Mail send request changed concurrently.")
+    send_request = session.get(MailSendRequest, send_request_id)
+    if send_request is None:
+        raise json_error(404, "NOT_FOUND", "Mail send request not found.")
+    return send_request
+
+
 @router.post("/send-requests/{send_request_id}/send-now")
 def send_mail_request_now(
     send_request_id: str,
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
-    send_request = get_send_request_or_404(session, send_request_id)
-    ensure_send_request_mutable(send_request)
     now = jst_iso()
-    send_request.status = "queued_mock"
-    send_request.scheduled_at = None
-    send_request.updated_at = now
-    send_request.version += 1
+    send_request = update_mutable_send_request(
+        session,
+        send_request_id,
+        status="queued_mock",
+        scheduled_at=None,
+        now=now,
+    )
+    supersede_pending_mail_send_jobs(session, send_request.id, now)
     enqueue_mail_send_mock_job(session, send_request, now)
     session.commit()
     return {"ok": True, "data": mail_send_request_data(send_request)}
@@ -2546,17 +2893,16 @@ def reschedule_mail_request(
     payload: MailSendSchedulePayload,
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
-    send_request = get_send_request_or_404(session, send_request_id)
-    ensure_send_request_mutable(send_request)
-    scheduled_at = payload.scheduled_at.strip()
-    if scheduled_at == "":
-        raise json_error(422, "VALIDATION_ERROR", "Scheduled time is required.")
-
+    scheduled_at = validated_future_send_time(payload.scheduled_at)
     now = jst_iso()
-    send_request.status = "scheduled_mock"
-    send_request.scheduled_at = scheduled_at
-    send_request.updated_at = now
-    send_request.version += 1
+    send_request = update_mutable_send_request(
+        session,
+        send_request_id,
+        status="scheduled_mock",
+        scheduled_at=scheduled_at,
+        now=now,
+    )
+    supersede_pending_mail_send_jobs(session, send_request.id, now)
     enqueue_mail_send_mock_job(session, send_request, now, available_at=scheduled_at)
     session.commit()
     return {"ok": True, "data": mail_send_request_data(send_request)}
@@ -2567,13 +2913,16 @@ def cancel_mail_send_request(
     send_request_id: str,
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
-    send_request = get_send_request_or_404(session, send_request_id)
-    if send_request.status in {"sent_mock", "sent_gmail", "sending_mock", "sending_gmail"}:
-        raise json_error(409, "CONFLICT", "Mail send request cannot be canceled.")
     now = jst_iso()
-    send_request.status = "canceled"
-    send_request.updated_at = now
-    send_request.version += 1
+    send_request = update_mutable_send_request(
+        session,
+        send_request_id,
+        status="canceled",
+        scheduled_at=None,
+        now=now,
+        preserve_scheduled_at=True,
+    )
+    supersede_pending_mail_send_jobs(session, send_request.id, now)
     session.commit()
     return {"ok": True, "data": mail_send_request_data(send_request)}
 
@@ -2689,8 +3038,10 @@ def list_mails(
     contact_status: str = "all",
     read: str = "all",
     q: str | None = None,
+    contact_id: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    sort: str = "newest",
     limit: int = 50,
     cursor: str | None = None,
     session: DatabaseSession = Depends(get_session),
@@ -2700,28 +3051,76 @@ def list_mails(
     normalized_contact_status = normalize_contact_status_filter(contact_status)
     normalized_read = normalize_read_filter(read)
     normalized_importance_any = normalize_importance_filter_set(importance_any)
+    normalized_sort = normalize_mail_sort(sort)
     normalized_limit = normalize_limit(limit)
+    query_tokens = [token.lower() for token in q.strip().split()] if q else []
     statement = (
         select(GmailMessage, MailUserState, MailAutoState)
         .join(MailUserState, MailUserState.message_id == GmailMessage.id)
         .join(MailAutoState, MailAutoState.message_id == GmailMessage.id)
-        .order_by(GmailMessage.received_at.desc(), GmailMessage.id)
+        .options(
+            load_only(
+                GmailMessage.id,
+                GmailMessage.gmail_message_id,
+                GmailMessage.gmail_thread_id,
+                GmailMessage.thread_id,
+                GmailMessage.received_at,
+                GmailMessage.subject,
+                GmailMessage.from_address,
+                GmailMessage.from_name,
+                GmailMessage.sender_address,
+                GmailMessage.reply_to_address,
+                GmailMessage.to_addresses_json,
+                GmailMessage.cc_addresses_json,
+                GmailMessage.bcc_addresses_json,
+                GmailMessage.message_id_header,
+                GmailMessage.list_id,
+                GmailMessage.gmail_labels_json,
+            )
+        )
     )
-    all_rows = session.execute(statement).all()
-    query_tokens = [token.lower() for token in q.strip().split()] if q else []
+    if date_from is not None and date_from.strip() != "":
+        statement = statement.where(GmailMessage.received_at >= date_from.strip())
+    if date_to is not None and date_to.strip() != "":
+        statement = statement.where(GmailMessage.received_at <= date_to.strip())
     if query_tokens:
+        searchable_columns = (
+            GmailMessage.subject,
+            GmailMessage.from_address,
+            GmailMessage.from_name,
+            GmailMessage.sender_address,
+            GmailMessage.reply_to_address,
+            GmailMessage.to_addresses_json,
+            GmailMessage.cc_addresses_json,
+            GmailMessage.bcc_addresses_json,
+            GmailMessage.message_id_header,
+            GmailMessage.list_id,
+            GmailMessage.body_text,
+            GmailMessage.snippet,
+        )
+        matching_threads = select(GmailMessage.thread_id).where(
+            *[
+                or_(
+                    *[
+                        func.instr(func.lower(func.coalesce(column, "")), token) > 0
+                        for column in searchable_columns
+                    ]
+                )
+                for token in query_tokens
+            ]
+        )
+        statement = statement.where(GmailMessage.thread_id.in_(matching_threads))
+    statement = statement.order_by(GmailMessage.received_at.desc(), GmailMessage.id)
+    all_rows = session.execute(statement).all()
+    participant_addresses: set[str] | None = None
+    if contact_id is not None and contact_id.strip() != "":
+        participant_addresses = contact_participant_addresses(session, contact_id.strip())
         matching_thread_ids = {
             message.thread_id
             for message, _, _ in all_rows
-            if not message_is_sent(message)
-            and row_matches_llm_block_query(message, query_tokens)
+            if message_has_participant(message, participant_addresses)
         }
-        all_rows = [
-            row
-            for row in all_rows
-            if row[0].thread_id in matching_thread_ids
-        ]
-
+        all_rows = [row for row in all_rows if row[0].thread_id in matching_thread_ids]
     if needs_action:
         all_rows = [row for row in all_rows if row_needs_action(row)]
 
@@ -2804,6 +3203,12 @@ def list_mails(
                 for send_request in send_requests
                 if send_request_matches_query(send_request, query_tokens)
             ]
+        if participant_addresses is not None:
+            send_requests = [
+                send_request
+                for send_request in send_requests
+                if send_request_has_participant(send_request, participant_addresses)
+            ]
 
     if date_from is not None and date_from.strip() != "":
         aggregated_rows = [
@@ -2824,8 +3229,11 @@ def list_mails(
             if send_request_visible_at(send_request) <= date_to.strip()
         ]
 
+    cursor_values: tuple[str, str] | None = None
     if cursor is not None and cursor.strip() != "":
-        cursor_received_at, cursor_id = decode_cursor(cursor.strip())
+        cursor_values = decode_cursor(cursor.strip())
+        cursor_received_at, cursor_id = cursor_values
+    if cursor_values is not None and normalized_sort == "newest":
         aggregated_rows = [
             row
             for row in aggregated_rows
@@ -2842,10 +3250,76 @@ def list_mails(
             )
         ]
 
-    real_items = [
+    real_candidates = [
         (
-            message.received_at,
-            message.id,
+            row[0].received_at,
+            row[0].id,
+            "mail",
+            row,
+            IMPORTANCE_RANKS.get(row[3], 99),
+        )
+        for row in aggregated_rows
+    ]
+    send_candidates = [
+        (
+            send_request_visible_at(send_request),
+            send_request.id,
+            "send_request",
+            send_request,
+            IMPORTANCE_RANKS["sent"],
+        )
+        for send_request in send_requests
+    ]
+    combined_candidates = sorted(
+        [*real_candidates, *send_candidates],
+        key=lambda row: (row[0], row[1]),
+        reverse=True,
+    )
+    if normalized_sort == "importance":
+        # The existing newest-first order remains the stable tie breaker.
+        combined_candidates.sort(key=lambda row: row[4])
+        if cursor_values is not None:
+            cursor_index = next(
+                (
+                    index
+                    for index, row in enumerate(combined_candidates)
+                    if (row[0], row[1]) == cursor_values
+                ),
+                None,
+            )
+            combined_candidates = (
+                combined_candidates[cursor_index + 1 :]
+                if cursor_index is not None
+                else []
+            )
+    visible_candidates = combined_candidates[:normalized_limit]
+    has_next = len(combined_candidates) > normalized_limit
+    next_cursor = (
+        encode_cursor_values(visible_candidates[-1][0], visible_candidates[-1][1])
+        if has_next and visible_candidates
+        else None
+    )
+    visible_mail_rows = [
+        candidate[3]
+        for candidate in visible_candidates
+        if candidate[2] == "mail"
+    ]
+    item_context = build_mail_list_item_context(session, visible_mail_rows)
+    items: list[dict[str, object]] = []
+    for candidate in visible_candidates:
+        if candidate[2] == "send_request":
+            items.append(send_request_list_item_data(session, candidate[3]))
+            continue
+        (
+            message,
+            user_state,
+            auto_state,
+            effective_importance,
+            processed_status,
+            thread_read_status,
+            thread_read_at,
+        ) = candidate[3]
+        items.append(
             list_item_data(
                 session,
                 message,
@@ -2855,46 +3329,18 @@ def list_mails(
                 processed_status_override=processed_status,
                 read_status_override=thread_read_status,
                 read_at_override=thread_read_at,
-            ),
+                context=item_context,
+            )
         )
-        for (
-            message,
-            user_state,
-            auto_state,
-            effective_importance,
-            processed_status,
-            thread_read_status,
-            thread_read_at,
-        ) in aggregated_rows
-    ]
-    send_items = [
-        (
-            send_request_visible_at(send_request),
-            send_request.id,
-            send_request_list_item_data(send_request),
-        )
-        for send_request in send_requests
-    ]
-    combined_items = sorted(
-        [*real_items, *send_items],
-        key=lambda row: (row[0], row[1]),
-        reverse=True,
-    )
-    visible_items = combined_items[:normalized_limit]
-    has_next = len(combined_items) > normalized_limit
-    next_cursor = (
-        encode_cursor_values(visible_items[-1][0], visible_items[-1][1])
-        if has_next and len(visible_items) > 0
-        else None
-    )
     return {
         "ok": True,
         "data": {
-            "items": [item for _, _, item in visible_items],
+            "items": items,
             "next_cursor": next_cursor,
             "limit": normalized_limit,
         },
     }
+
 
 
 @router.get("/llm-blocked")
@@ -3078,6 +3524,14 @@ def list_mail_dates(
         select(GmailMessage, MailUserState, MailAutoState)
         .join(MailUserState, MailUserState.message_id == GmailMessage.id)
         .join(MailAutoState, MailAutoState.message_id == GmailMessage.id)
+        .options(
+            load_only(
+                GmailMessage.id,
+                GmailMessage.thread_id,
+                GmailMessage.received_at,
+                GmailMessage.gmail_labels_json,
+            )
+        )
     )
     aggregated_rows = aggregate_thread_rows(session.execute(statement).all())
     if normalized_tab == "pending":
@@ -3137,6 +3591,13 @@ def get_mail_day_stats(
         select(GmailMessage, MailUserState, MailAutoState)
         .join(MailUserState, MailUserState.message_id == GmailMessage.id)
         .join(MailAutoState, MailAutoState.message_id == GmailMessage.id)
+        .options(
+            load_only(
+                GmailMessage.id,
+                GmailMessage.received_at,
+                GmailMessage.gmail_labels_json,
+            )
+        )
         .where(GmailMessage.received_at >= start, GmailMessage.received_at <= end)
     ).all()
     rows = [
@@ -3173,15 +3634,41 @@ def get_mail_day_stats(
     }
 
 
+def mail_case_assignment_target(
+    session: DatabaseSession,
+    target_id: str,
+) -> tuple[GmailMessage | None, MailSendRequest | None]:
+    message = session.get(GmailMessage, target_id)
+    if message is not None:
+        return message, None
+    send_request = session.get(MailSendRequest, target_id)
+    if send_request is None:
+        raise json_error(404, "NOT_FOUND", "Mail not found.")
+    if send_request.sent_message_id is not None:
+        sent_message = session.get(GmailMessage, send_request.sent_message_id)
+        if sent_message is None:
+            raise json_error(409, "SEND_NOT_INGESTED", "Sent mail is not available yet.")
+        return sent_message, send_request
+    if send_request.status == "canceled":
+        raise json_error(409, "SEND_CANCELED", "Canceled mail cannot be assigned to a Case.")
+    return None, send_request
+
+
 @router.get("/{message_id}/case-links")
 def get_mail_thread_case_links(
     message_id: str,
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
-    message, _user_state, _auto_state = get_mail_bundle(session, message_id)
+    message, send_request = mail_case_assignment_target(session, message_id)
+    if message is not None:
+        return {
+            "ok": True,
+            "data": {"items": mail_thread_case_link_items(session, message.thread_id)},
+        }
+    assert send_request is not None
     return {
         "ok": True,
-        "data": {"items": mail_thread_case_link_items(session, message.thread_id)},
+        "data": {"items": send_request_case_link_items(session, send_request.id)},
     }
 
 
@@ -3191,9 +3678,41 @@ def assign_mail_thread_to_case(
     payload: MailThreadCaseAssignRequest,
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
-    message, user_state, auto_state = get_mail_bundle(session, message_id)
+    message, send_request = mail_case_assignment_target(session, message_id)
     case = ensure_case_for_mail_assignment(session, payload.case_id)
     now = jst_iso()
+    if message is None:
+        assert send_request is not None
+        existing = session.scalar(
+            select(MailSendRequestCaseLink).where(
+                MailSendRequestCaseLink.send_request_id == send_request.id,
+                MailSendRequestCaseLink.case_id == case.id,
+            )
+        )
+        if existing is None:
+            session.add(
+                MailSendRequestCaseLink(
+                    id=new_id("mail_send_case_link"),
+                    send_request_id=send_request.id,
+                    case_id=case.id,
+                    created_at=now,
+                    updated_at=now,
+                    version=1,
+                )
+            )
+            case.updated_at = now
+            case.version += 1
+        session.commit()
+        return {"ok": True, "data": send_request_detail_data(session, send_request)}
+
+    user_state = session.scalar(
+        select(MailUserState).where(MailUserState.message_id == message.id)
+    )
+    auto_state = session.scalar(
+        select(MailAutoState).where(MailAutoState.message_id == message.id)
+    )
+    if user_state is None or auto_state is None:
+        raise json_error(500, "DATA_INTEGRITY_ERROR", "Mail state is missing.")
     messages = thread_messages(session, message.thread_id)
     message_ids = [thread_message.id for thread_message in messages]
     existing_message_ids = set(
@@ -3230,8 +3749,33 @@ def unassign_mail_thread_from_case(
     case_id: str,
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
-    message, user_state, auto_state = get_mail_bundle(session, message_id)
+    message, send_request = mail_case_assignment_target(session, message_id)
     case = ensure_case_for_mail_assignment(session, case_id)
+    if message is None:
+        assert send_request is not None
+        links = session.scalars(
+            select(MailSendRequestCaseLink).where(
+                MailSendRequestCaseLink.send_request_id == send_request.id,
+                MailSendRequestCaseLink.case_id == case.id,
+            )
+        ).all()
+        for link in links:
+            session.delete(link)
+        if links:
+            now = jst_iso()
+            case.updated_at = now
+            case.version += 1
+        session.commit()
+        return {"ok": True, "data": send_request_detail_data(session, send_request)}
+
+    user_state = session.scalar(
+        select(MailUserState).where(MailUserState.message_id == message.id)
+    )
+    auto_state = session.scalar(
+        select(MailAutoState).where(MailAutoState.message_id == message.id)
+    )
+    if user_state is None or auto_state is None:
+        raise json_error(500, "DATA_INTEGRITY_ERROR", "Mail state is missing.")
     message_ids = [thread_message.id for thread_message in thread_messages(session, message.thread_id)]
     links = session.scalars(
         select(CaseMailLink)
@@ -3277,14 +3821,16 @@ def get_mail_detail(
     message = session.get(GmailMessage, message_id)
     if message is None:
         send_request = session.get(MailSendRequest, message_id)
-        if (
-            send_request is None
-            or send_request.reply_to_message_id is not None
-            or send_request.sent_message_id is not None
-            or send_request.status not in SEND_REQUEST_VISIBLE_STATUSES
-        ):
+        if send_request is None or send_request.reply_to_message_id is not None:
             raise json_error(404, "NOT_FOUND", "Mail not found.")
-        return {"ok": True, "data": send_request_detail_data(send_request)}
+        if send_request.sent_message_id is not None:
+            message = session.get(GmailMessage, send_request.sent_message_id)
+            if message is None:
+                raise json_error(409, "SEND_NOT_INGESTED", "Sent mail is not available yet.")
+        elif send_request.status in SEND_REQUEST_VISIBLE_STATUSES:
+            return {"ok": True, "data": send_request_detail_data(session, send_request)}
+        else:
+            raise json_error(404, "NOT_FOUND", "Mail not found.")
     user_state = session.scalar(
         select(MailUserState).where(MailUserState.message_id == message.id)
     )

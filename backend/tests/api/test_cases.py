@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+from io import BytesIO
 import sqlite3
+from zipfile import ZipFile
 
 
 def test_cases_can_be_listed_and_read(client) -> None:
@@ -169,6 +171,151 @@ def test_case_current_situation_can_be_generated(client, database_path) -> None:
     assert "This case is used to check" not in llm_run_row[1]
     assert '"file_count": 1' in llm_run_row[1]
     assert "Context Case" in llm_run_row[3]
+
+
+def test_completed_case_handover_preserves_report_and_related_mail(client, database_path) -> None:
+    case_response = client.post(
+        "/api/v1/cases",
+        json={
+            "name": "Annual Handover",
+            "description": "Prepare the annual programme and preserve its history.",
+            "progress_status": "in_progress",
+            "ball_status": "user",
+        },
+    )
+    case_data = case_response.json()["data"]["case"]
+    case_id = case_data["id"]
+    before_complete = client.post(f"/api/v1/cases/{case_id}/handover")
+    assert before_complete.status_code == 409
+    assert before_complete.json()["error"]["code"] == "CASE_NOT_COMPLETED"
+
+    mail_response = client.post(
+        "/api/v1/mails/mock-ingest",
+        json={
+            "gmail_message_id": "gmail_handover_schedule",
+            "gmail_thread_id": "thread_handover_schedule",
+            "message_id_header": "<handover-schedule@example.com>",
+            "subject": "Programme schedule confirmed",
+            "from_address": "programme@example.com",
+            "to_addresses": ["owner@example.com"],
+            "received_at": "2026-06-10T14:00:00+09:00",
+            "body_text": "The orientation is on July 3 and the report is due July 20.",
+        },
+    )
+    message_id = mail_response.json()["data"]["message_id"]
+    daemon_response = client.post(
+        "/api/v1/mails/mock-ingest",
+        json={
+            "gmail_message_id": "gmail_handover_daemon",
+            "gmail_thread_id": "thread_handover_daemon",
+            "subject": "Delivery Status Notification (Failure)",
+            "from_address": "mailer-daemon@example.com",
+            "received_at": "2026-06-10T14:01:00+09:00",
+            "body_text": "This delivery failure must not be included.",
+        },
+    )
+    daemon_message_id = daemon_response.json()["data"]["message_id"]
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO case_mail_links (
+                id, case_id, message_id, created_at, updated_at, version
+            ) VALUES (?, ?, ?, ?, ?, 1)
+            """,
+            (
+                "case_mail_link_handover",
+                case_id,
+                message_id,
+                "2026-06-10T14:05:00+09:00",
+                "2026-06-10T14:05:00+09:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO case_mail_links (
+                id, case_id, message_id, created_at, updated_at, version
+            ) VALUES (?, ?, ?, ?, ?, 1)
+            """,
+            (
+                "case_mail_link_handover_daemon",
+                case_id,
+                daemon_message_id,
+                "2026-06-10T14:06:00+09:00",
+                "2026-06-10T14:06:00+09:00",
+            ),
+        )
+
+    source_response = client.post(
+        "/api/v1/storage/objects",
+        json={
+            "filename": "previous-procedure.txt",
+            "content_type": "text/plain",
+            "data_base64": base64.b64encode(b"Previous annual procedure.").decode("ascii"),
+            "directory_id": case_data["handover_storage_directory_id"],
+        },
+    )
+    assert source_response.status_code == 200
+
+    assert client.post(f"/api/v1/cases/{case_id}/complete").status_code == 200
+    generate_response = client.post(f"/api/v1/cases/{case_id}/handover")
+
+    assert generate_response.status_code == 200
+    result = generate_response.json()["data"]
+    assert result["related_mail_count"] == 1
+    assert result["exported_mail_count"] == 1
+    assert result["source_file_count"] == 1
+    assert result["handover_artifact"]["original_filename"].endswith(".md")
+    assert result["handover_bundle"]["original_filename"].endswith(".zip")
+    report_response = client.get(result["handover_artifact"]["url"])
+    assert report_response.status_code == 200
+    report_text = report_response.content.decode("utf-8")
+    assert "# 引継ぎ資料: Annual Handover" in report_text
+    assert "## 仕事の内容と大まかな流れ" in report_text
+    assert "## 原本の確認方法" in report_text
+    assert "Programme schedule confirmed" not in report_text
+    assert "orientation is on July 3" not in report_text
+    assert "Delivery Status Notification" not in report_text
+
+    bundle_response = client.get(result["handover_bundle"]["url"])
+    assert bundle_response.status_code == 200
+    with ZipFile(BytesIO(bundle_response.content)) as archive:
+        archive_names = archive.namelist()
+        zipped_report = archive.read("handover.md").decode("utf-8")
+        zipped_eml = archive.read("mail/gmail_handover_schedule.eml")
+        mail_index = archive.read("mail/mail-index.csv").decode("utf-8-sig")
+    assert zipped_report == report_text
+    assert "files/previous-procedure.txt" in archive_names
+    assert "gmail_handover_schedule.eml" in mail_index
+    assert "Programme schedule confirmed" in mail_index
+    assert not any("gmail_handover_daemon" in name for name in archive_names)
+    assert b"Programme schedule confirmed" in zipped_eml
+    assert b"orientation is on July 3" in zipped_eml
+
+    with sqlite3.connect(database_path) as connection:
+        artifacts = connection.execute(
+            """
+            SELECT source_type, original_filename, content_type, source_message_id
+            FROM storage_objects
+            WHERE directory_id = ? AND status = 'active'
+            ORDER BY source_type
+            """,
+            (case_data["handover_storage_directory_id"],),
+        ).fetchall()
+    assert (
+        "case_handover_mail_export",
+        "gmail_handover_schedule.eml",
+        "message/rfc822",
+        message_id,
+    ) in artifacts
+    assert not any(row[3] == daemon_message_id for row in artifacts)
+    assert any(row[0] == "case_handover_report" for row in artifacts)
+    assert any(row[0] == "case_handover_bundle" for row in artifacts)
+
+    detail = client.get(f"/api/v1/cases/{case_id}").json()["data"]
+    assert detail["handover_artifact"]["id"] == result["handover_artifact"]["id"]
+    assert detail["handover_bundle"]["id"] == result["handover_bundle"]["id"]
+    second_result = client.post(f"/api/v1/cases/{case_id}/handover").json()["data"]
+    assert second_result["exported_mail_count"] == 0
 
 
 def test_case_files_can_be_linked_and_unlinked_without_moving_source_file(

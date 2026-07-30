@@ -8,10 +8,16 @@ from email.utils import formatdate
 from mimetypes import guess_type
 from uuid import uuid4
 
+from sqlalchemy import select
+from sqlalchemy import update
+
 from caseclosed.db import runtime
+from caseclosed.db.models import Case
+from caseclosed.db.models import CaseMailLink
 from caseclosed.db.models import GmailMessage
 from caseclosed.db.models import Job
 from caseclosed.db.models import MailSendRequest
+from caseclosed.db.models import MailSendRequestCaseLink
 from caseclosed.db.models import StorageObject
 from caseclosed.mail_drafts import MAIL_DRAFT_ATTACHMENT_STORAGE_SCOPES
 from caseclosed.mail_drafts import delete_mail_drafts_for_reply_target
@@ -90,10 +96,59 @@ def handle_mail_send_mock(job: Job) -> dict[str, object]:
                 "status": send_request.status,
                 "idempotent": True,
             }
+        expected_version_value = payload.get("send_request_version")
+        expected_version = (
+            expected_version_value
+            if isinstance(expected_version_value, int)
+            else send_request.version
+        )
+        expected_scheduled_at = (
+            payload.get("scheduled_at")
+            if "scheduled_at" in payload
+            else job.available_at
+        )
+        if send_request.version != expected_version:
+            return superseded_send_result(send_request, "request_version_changed")
+        if send_request.scheduled_at != expected_scheduled_at:
+            return superseded_send_result(send_request, "scheduled_time_changed")
         if send_request.status not in {"scheduled_mock", "queued_mock", "ready_to_send"}:
             raise ValueError(
                 f"Mail send request cannot be mock-sent from status: {send_request.status}"
             )
+        if (
+            send_request.scheduled_at is not None
+            and runtime.parse_iso_datetime(send_request.scheduled_at) > runtime.jst_now()
+        ):
+            return superseded_send_result(send_request, "scheduled_time_not_reached")
+
+        scheduled_at_condition = (
+            MailSendRequest.scheduled_at.is_(None)
+            if expected_scheduled_at is None
+            else MailSendRequest.scheduled_at == expected_scheduled_at
+        )
+        claim_result = session.execute(
+            update(MailSendRequest)
+            .where(MailSendRequest.id == send_request.id)
+            .where(MailSendRequest.version == expected_version)
+            .where(MailSendRequest.status == send_request.status)
+            .where(scheduled_at_condition)
+            .values(
+                status="sending_gmail",
+                updated_at=now,
+                version=MailSendRequest.version + 1,
+            )
+        )
+        if claim_result.rowcount != 1:
+            session.rollback()
+            current = session.get(MailSendRequest, send_request.id)
+            if current is None:
+                raise LookupError(f"Mail send request not found: {send_request_id}")
+            return superseded_send_result(current, "send_claim_lost")
+        session.commit()
+        session.expire_all()
+        send_request = session.get(MailSendRequest, send_request_id)
+        if send_request is None:
+            raise LookupError(f"Mail send request not found: {send_request_id}")
 
         reply_target = (
             session.get(GmailMessage, send_request.reply_to_message_id)
@@ -124,6 +179,64 @@ def handle_mail_send_mock(job: Job) -> dict[str, object]:
         return send_request_via_gmail(session, send_request, reply_target, now)
 
 
+def superseded_send_result(
+    send_request: MailSendRequest,
+    reason: str,
+) -> dict[str, object]:
+    return {
+        "send_request_id": send_request.id,
+        "sent_message_id": send_request.sent_message_id,
+        "status": "superseded",
+        "current_status": send_request.status,
+        "reason": reason,
+        "idempotent": True,
+    }
+
+
+def transfer_send_request_case_links(
+    session,
+    send_request: MailSendRequest,
+    sent_message: GmailMessage,
+    now: str,
+) -> None:
+    request_links = session.scalars(
+        select(MailSendRequestCaseLink).where(
+            MailSendRequestCaseLink.send_request_id == send_request.id
+        )
+    ).all()
+    if not request_links:
+        return
+    messages = session.scalars(
+        select(GmailMessage).where(GmailMessage.thread_id == sent_message.thread_id)
+    ).all()
+    message_ids = [message.id for message in messages]
+    for request_link in request_links:
+        existing_message_ids = set(
+            session.scalars(
+                select(CaseMailLink.message_id)
+                .where(CaseMailLink.case_id == request_link.case_id)
+                .where(CaseMailLink.message_id.in_(message_ids))
+            ).all()
+        )
+        for message in messages:
+            if message.id in existing_message_ids:
+                continue
+            session.add(
+                CaseMailLink(
+                    id=new_id("case_mail_link"),
+                    case_id=request_link.case_id,
+                    message_id=message.id,
+                    created_at=now,
+                    updated_at=now,
+                    version=1,
+                )
+            )
+        case = session.get(Case, request_link.case_id)
+        if case is not None:
+            case.updated_at = now
+            case.version += 1
+
+
 def send_request_via_gmail(
     session,
     send_request: MailSendRequest,
@@ -140,11 +253,6 @@ def send_request_via_gmail(
     from_address = profile.get("emailAddress")
     if not isinstance(from_address, str) or from_address.strip() == "":
         raise RuntimeError("Gmail profile did not include an email address.")
-
-    send_request.status = "sending_gmail"
-    send_request.updated_at = now
-    send_request.version += 1
-    session.commit()
 
     try:
         raw_message = build_gmail_raw_message(
@@ -178,6 +286,12 @@ def send_request_via_gmail(
         raise
 
     send_request.sent_message_id = result.message_id
+    sent_message = session.get(GmailMessage, result.message_id)
+    if sent_message is None:
+        raise RuntimeError("Sent Gmail message was not ingested.")
+    transfer_send_request_case_links(
+        session, send_request, sent_message, runtime.jst_iso()
+    )
     send_request.status = "sent_gmail"
     send_request.updated_at = runtime.jst_iso()
     send_request.version += 1

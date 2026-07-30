@@ -1,7 +1,20 @@
-import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import MaintenanceView from './MaintenanceView'
 import type { MaintenanceInitialData } from './MaintenanceView'
+
+function apiResponse(data: unknown) {
+  return Promise.resolve({
+    ok: true,
+    status: 200,
+    json: async () => ({ ok: true, data }),
+  } as Response)
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
 
 const initialData: MaintenanceInitialData = {
   status: {
@@ -62,5 +75,129 @@ describe('MaintenanceView system health', () => {
     expect(screen.getByText('Gmail auto import')).toBeInTheDocument()
     expect(screen.getByText('Calendar auto sync')).toBeInTheDocument()
     expect(screen.getByText('3')).toBeInTheDocument()
+  })
+})
+
+describe('MaintenanceView password management', () => {
+  it('changes both the full login and simple page passwords', async () => {
+    const user = userEvent.setup()
+    const fetchMock = vi.fn((input: string | URL | Request) => {
+      const path = input.toString()
+      if (path === '/api/v1/maintenance/usb-backups') {
+        return apiResponse({ devices: [] })
+      }
+      if (path === '/api/v1/auth/password') {
+        return apiResponse({ password_type: 'full', invalidated_sessions: 2 })
+      }
+      if (path === '/api/v1/auth/low-mail-review-password') {
+        return apiResponse({
+          password_type: 'low_mail_review',
+          invalidated_sessions: 1,
+        })
+      }
+      throw new Error()
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<MaintenanceView initialData={initialData} />)
+
+    await user.click(screen.getByRole('tab', { name: 'Security' }))
+    const fullForm = screen.getByRole('form', { name: 'Login password' })
+    const fullCard = fullForm.closest('article') as HTMLElement
+    expect(within(fullForm).getByLabelText('New login password')).toHaveAttribute(
+      'minLength',
+      '8',
+    )
+    await user.type(
+      within(fullForm).getByLabelText('Current login password'),
+      'current-password',
+    )
+    await user.type(
+      within(fullForm).getByLabelText('New login password'),
+      'new-login-password',
+    )
+    await user.type(
+      within(fullForm).getByLabelText('Confirm new password'),
+      'new-login-password',
+    )
+    await user.click(within(fullForm).getByRole('button', { name: 'Change password' }))
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/auth/password',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({
+          current_password: 'current-password',
+          new_password: 'new-login-password',
+        }),
+      }),
+    )
+    expect(
+      await within(fullCard).findByText(
+        'Password changed. Signed out 2 other session(s).',
+      ),
+    ).toBeInTheDocument()
+
+    const reviewForm = screen.getByRole('form', { name: 'Simple page password' })
+    const reviewCard = reviewForm.closest('article') as HTMLElement
+    await user.type(
+      within(reviewForm).getByLabelText('Current login password'),
+      'current-password',
+    )
+    await user.type(
+      within(reviewForm).getByLabelText('New simple page password'),
+      'new-review-password',
+    )
+    await user.type(
+      within(reviewForm).getByLabelText('Confirm new password'),
+      'new-review-password',
+    )
+    await user.click(
+      within(reviewForm).getByRole('button', { name: 'Change password' }),
+    )
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/auth/low-mail-review-password',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({
+          current_password: 'current-password',
+          new_password: 'new-review-password',
+        }),
+      }),
+    )
+    expect(
+      await within(reviewCard).findByText(
+        'Password changed. Signed out 1 other session(s).',
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it('does not submit mismatched confirmation values', async () => {
+    const user = userEvent.setup()
+    const fetchMock = vi.fn((input: string | URL | Request) => {
+      const path = input.toString()
+      if (path === '/api/v1/maintenance/usb-backups') {
+        return apiResponse({ devices: [] })
+      }
+      throw new Error()
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<MaintenanceView initialData={initialData} />)
+
+    await user.click(screen.getByRole('tab', { name: 'Security' }))
+    const form = screen.getByRole('form', { name: 'Login password' })
+    const card = form.closest('article') as HTMLElement
+    await user.type(within(form).getByLabelText('Current login password'), 'current-password')
+    await user.type(within(form).getByLabelText('New login password'), 'new-login-password')
+    await user.type(within(form).getByLabelText('Confirm new password'), 'different-password')
+    await user.click(within(form).getByRole('button', { name: 'Change password' }))
+
+    expect(
+      within(card).getByRole('alert'),
+    ).toHaveTextContent('The new password and confirmation do not match.')
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      '/api/v1/auth/password',
+      expect.anything(),
+    )
   })
 })

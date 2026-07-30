@@ -44,8 +44,9 @@ function withImplicitReturnTo(nextUrl: URL) {
   return withReturnTo
 }
 
-export function navigateTo(href: string, replace = false) {
-  const nextUrl = withImplicitReturnTo(new URL(href, window.location.origin))
+export function navigateTo(href: string, replace = false, attachImplicitReturnTo = true) {
+  const requestedUrl = new URL(href, window.location.origin)
+  const nextUrl = attachImplicitReturnTo ? withImplicitReturnTo(requestedUrl) : requestedUrl
   if (nextUrl.origin !== window.location.origin) {
     window.location.href = href
     return
@@ -80,13 +81,14 @@ export function returnToFromLocation() {
   }
   try {
     const destination = new URL(returnTo, window.location.origin)
+    const destinationPath = destination.pathname + destination.search + destination.hash
     if (
       destination.origin !== window.location.origin ||
-      destination.pathname === window.location.pathname
+      destinationPath === currentBrowserPath()
     ) {
       return null
     }
-    return destination.pathname + destination.search + destination.hash
+    return destinationPath
   } catch {
     return null
   }
@@ -119,24 +121,101 @@ export function returnToOrFallback(fallback: string) {
   }
   try {
     const destination = new URL(returnTo, window.location.origin)
+    const destinationPath = destination.pathname + destination.search + destination.hash
     if (
       destination.origin !== window.location.origin ||
-      destination.pathname === window.location.pathname
+      destinationPath === currentBrowserPath()
     ) {
       return fallback
     }
-    return `${destination.pathname}${destination.search}${destination.hash}`
+    return destinationPath
   } catch {
     return fallback
+  }
+}
+
+const standardNavigationAreas: Record<string, string> = {
+  '/': 'top',
+  '/academic-calendar': 'academic-calendar',
+  '/bookshelf': 'bookshelf',
+  '/calendar': 'calendar',
+  '/cases': 'cases',
+  '/case-auto-assign-rules': 'cases',
+  '/contacts': 'contacts',
+  '/contact-auto-tag-rules': 'contacts',
+  '/extensions': 'extensions',
+  '/external-tools': 'external-tools',
+  '/files': 'files',
+  '/follow-ups': 'follow-ups',
+  '/logs': 'logs',
+  '/mail': 'mail',
+  '/maintenance': 'maintenance',
+  '/manual': 'manual',
+  '/papers': 'papers',
+  '/pomodoro': 'pomodoro',
+  '/profile': 'profile',
+  '/settings': 'settings',
+  '/tasks': 'tasks',
+  '/today': 'today',
+  '/tomorrow': 'tomorrow',
+}
+
+function navigationAreaForPathname(pathname: string) {
+  if (pathname === '/mail/action-needed') return 'mail'
+  if (
+    /^\/mail\/[^/]+$/.test(pathname) &&
+    pathname !== '/mail/compose' &&
+    pathname !== '/mail/review'
+  ) return 'mail'
+  if (pathname === '/contacts/pending') return 'contacts'
+  if (
+    pathname === '/calendar/conflicts' ||
+    pathname === '/calendar/new' ||
+    pathname.startsWith('/calendar/events/')
+  ) {
+    return 'calendar'
+  }
+  if (pathname === '/tasks/new' || pathname.startsWith('/tasks/')) return 'tasks'
+  if (pathname === '/cases/new' || pathname === '/case-tool-icons' || pathname === '/case-auto-assign-rules' || pathname.startsWith('/cases/')) {
+    return 'cases'
+  }
+  if (pathname === '/file-icons' || pathname.startsWith('/files/')) return 'files'
+  if (pathname === '/bookshelf/tag-hierarchy' || pathname.startsWith('/bookshelf/')) return 'bookshelf'
+  if (pathname === '/paper-journal-icons' || pathname.startsWith('/papers/')) return 'papers'
+  if (pathname === '/extensions/help' || pathname === '/extensions/launch') return 'extensions'
+  return standardNavigationAreas[pathname] ?? null
+}
+
+export function resolveTopNavHref(href: string) {
+  const returnTo = returnToFromLocation()
+  if (returnTo === null) return href
+
+  try {
+    const standardDestination = new URL(href, window.location.origin)
+    if (standardDestination.origin !== window.location.origin) return href
+
+    const destinationArea = standardNavigationAreas[standardDestination.pathname]
+    if (destinationArea === undefined) return href
+
+    const returnDestination = new URL(returnTo, window.location.origin)
+    return navigationAreaForPathname(returnDestination.pathname) === destinationArea
+      ? returnTo
+      : href
+  } catch {
+    return href
   }
 }
 
 export function AppLink({
   href,
   onClick,
+  preserveReturnTo = false,
   target,
   ...props
-}: AnchorHTMLAttributes<HTMLAnchorElement> & { href: string }) {
+}: AnchorHTMLAttributes<HTMLAnchorElement> & {
+  href: string
+  preserveReturnTo?: boolean
+}) {
   function handleClick(event: MouseEvent<HTMLAnchorElement>) {
     onClick?.(event)
     if (
@@ -152,7 +231,7 @@ export function AppLink({
     }
 
     event.preventDefault()
-    navigateTo(href)
+    navigateTo(href, false, !preserveReturnTo)
   }
 
   return <a href={href} onClick={handleClick} target={target} {...props} />
@@ -178,7 +257,7 @@ function topNavRank(href: string) {
   if (pathname === '/today' || pathname === '/tomorrow') return 5
   if (pathname === '/follow-ups') return 15
   if (pathname === '/contacts' || pathname === '/contacts/pending') return 20
-  if (pathname === '/cases') return 30
+  if (pathname === '/cases' || pathname === '/case-auto-assign-rules') return 30
   if (pathname === '/tasks' || pathname === '/tasks/new') return 40
   if (pathname === '/calendar' || pathname === '/calendar/new') return 50
   if (pathname === '/academic-calendar') return 55
@@ -205,17 +284,20 @@ export function TopNav({
 }) {
   const label = ariaLabel ?? (ariaLabelKey !== undefined ? t(ariaLabelKey) : undefined)
   const sortedItems = items
-    .map((item, index) => ({ item, index }))
+    .map((item, index) => ({ item, index, resolvedHref: resolveTopNavHref(item.href) }))
     .sort((left, right) => {
       const rankDifference = topNavRank(left.item.href) - topNavRank(right.item.href)
       return rankDifference !== 0 ? rankDifference : left.index - right.index
     })
-    .map(({ item }) => item)
 
   return (
     <nav aria-label={label} className={className}>
-      {sortedItems.map((item) => (
-        <AppLink href={item.href} key={`${item.href}:${item.labelKey ?? item.label ?? ''}`}>
+      {sortedItems.map(({ item, resolvedHref }) => (
+        <AppLink
+          href={resolvedHref}
+          key={`${item.href}:${item.labelKey ?? item.label ?? ''}`}
+          preserveReturnTo={resolvedHref !== item.href}
+        >
           {item.label ?? (item.labelKey !== undefined ? t(item.labelKey) : item.href)}
         </AppLink>
       ))}

@@ -48,7 +48,7 @@ const manualSections = [
   },
   {
     title: 'Extensions / External Tools',
-    body: 'CaseClosed本体から独立した自動化ツールや外部Webリンクを管理します。CaseのToolsから起動用URLを登録できます。',
+    body: 'C@seClosed本体から独立した自動化ツールや外部Webリンクを管理します。CaseのToolsから起動用URLを登録できます。',
     links: [
       { href: '/extensions', label: 'Extensions' },
       { href: '/external-tools', label: 'External Tools' },

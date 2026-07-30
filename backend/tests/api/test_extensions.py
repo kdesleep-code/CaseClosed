@@ -484,3 +484,126 @@ def test_extension_api_can_create_cases_and_search_contacts_without_case_context
         "extension.case_auto_assign_rule_created",
         "extension.case_auto_assign_rule_reused",
     } <= action_types
+
+
+def test_extension_calendar_events_include_case_links_and_reject_bucket(
+    client,
+    tmp_path: Path,
+) -> None:
+    from uuid import uuid4
+
+    from sqlalchemy import select
+
+    from caseclosed.db.models import CalendarEvent
+    from caseclosed.db.models import Case
+    from caseclosed.db.runtime import SessionLocal
+    from caseclosed.db.runtime import jst_iso
+
+    manifest = {
+        "slug": "calendar-case-link-extension-test",
+        "name": "Calendar Case Link Extension Test",
+        "command": [
+            sys.executable,
+            "-c",
+            (
+                "import http.server, os; "
+                "http.server.HTTPServer((\"127.0.0.1\", "
+                "int(os.environ[\"CASECLOSED_EXTENSION_PORT\"])), "
+                "http.server.SimpleHTTPRequestHandler).serve_forever()"
+            ),
+        ],
+        "url_path": "/",
+        "tags": ["reports"],
+    }
+    register_response = client.post(
+        "/api/v1/extensions/register",
+        json={"root_path": str(tmp_path), "manifest": manifest},
+    )
+    assert register_response.status_code == 200
+    extension = register_response.json()["data"]["extension"]
+    start_response = client.post(
+        f"/api/v1/extensions/{extension['id']}/start",
+        json={"context": {"mode": "calendar-report"}},
+    )
+    assert start_response.status_code == 200
+    start_data = start_response.json()["data"]
+    headers = {"X-CaseClosed-Extension-Token": start_data["extension_token"]}
+
+    report_case = create_case(client, "CCS Report Case")
+    event_id = f"calendar_event_{uuid4().hex}"
+    now = jst_iso()
+    with SessionLocal() as session:
+        bucket = session.scalar(select(Case).where(Case.system_case_key == "inbox"))
+        assert bucket is not None
+        bucket_id = bucket.id
+        session.add(
+            CalendarEvent(
+                id=event_id,
+                source="local",
+                external_calendar_id="calendar-extension-test",
+                external_event_id="calendar-instance-extension-test",
+                recurring_event_id="calendar-series-extension-test",
+                summary="CCS Calendar Event",
+                start_at="2026-07-15T10:00:00+09:00",
+                end_at="2026-07-15T11:00:00+09:00",
+                all_day=0,
+                time_zone="Asia/Tokyo",
+                attendance_requirement="required",
+                sync_status="synced",
+                created_at=now,
+                updated_at=now,
+                version=1,
+            )
+        )
+        session.commit()
+
+    list_response = client.get(
+        "/api/v1/extension-api/calendar/db-events"
+        "?time_min=2026-07-01T00%3A00%3A00%2B09%3A00"
+        "&time_max=2026-08-01T00%3A00%3A00%2B09%3A00",
+        headers=headers,
+    )
+    assert list_response.status_code == 200
+    event = next(
+        item
+        for item in list_response.json()["data"]["items"]
+        if item["id"] == event_id
+    )
+    assert event["case_links"] == []
+    assert event["recurring_event_id"] == "calendar-series-extension-test"
+
+    link_response = client.post(
+        f"/api/v1/extension-api/calendar/db-events/{event_id}/case-link",
+        headers=headers,
+        json={"case_id": report_case["id"]},
+    )
+    assert link_response.status_code == 200
+    assert link_response.json()["data"]["link"]["linked_id"] == report_case["id"]
+
+    linked_list_response = client.get(
+        "/api/v1/extension-api/calendar/db-events"
+        "?time_min=2026-07-01T00%3A00%3A00%2B09%3A00"
+        "&time_max=2026-08-01T00%3A00%3A00%2B09%3A00",
+        headers=headers,
+    )
+    linked_event = next(
+        item
+        for item in linked_list_response.json()["data"]["items"]
+        if item["id"] == event_id
+    )
+    assert [item["linked_id"] for item in linked_event["case_links"]] == [
+        report_case["id"]
+    ]
+
+    bucket_response = client.post(
+        f"/api/v1/extension-api/calendar/db-events/{event_id}/case-link",
+        headers=headers,
+        json={"case_id": bucket_id},
+    )
+    assert bucket_response.status_code == 422
+    assert bucket_response.json()["error"]["code"] == "BUCKET_NOT_ALLOWED"
+
+    stop_response = client.post(
+        f"/api/v1/extensions/instances/{start_data['instance']['id']}/stop"
+    )
+    assert stop_response.status_code == 200

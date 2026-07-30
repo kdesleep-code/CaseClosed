@@ -34,6 +34,7 @@ from fastapi import Response
 from PIL import Image
 from PIL import ImageOps
 from PIL import UnidentifiedImageError
+from pillow_heif import register_heif_opener
 from pydantic import BaseModel
 from sqlalchemy import delete
 from sqlalchemy import func
@@ -78,8 +79,11 @@ from caseclosed.services.llm_provider import build_file_summary_provider
 
 router = APIRouter(prefix="/api/v1/storage", tags=["storage"])
 
+register_heif_opener(thumbnails=False)
+
 MAX_CONTACT_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_CONTACT_IMAGE_SIDE = 256
+MAX_STORAGE_IMAGE_PREVIEW_SIDE = 2048
 MAX_TMP_OBJECT_BYTES = 1024 * 1024 * 1024
 MAX_ARCHIVE_TREE_ENTRIES = 1000
 MAX_EML_PREVIEW_BYTES = 25 * 1024 * 1024
@@ -90,18 +94,23 @@ CONTACT_IMAGE_CONTENT_TYPES = {
     "image/png",
     "image/jpeg",
     "image/gif",
+    "image/heic",
+    "image/heif",
     "image/webp",
     "image/svg+xml",
 }
 FILE_ICON_CONTENT_TYPES = CONTACT_IMAGE_CONTENT_TYPES
-MAX_FILE_ICON_BYTES = 512 * 1024
+MAX_FILE_ICON_BYTES = 5 * 1024 * 1024
 CONTENT_TYPE_EXTENSIONS = {
     "image/png": ".png",
     "image/jpeg": ".jpg",
     "image/gif": ".gif",
+    "image/heic": ".heic",
+    "image/heif": ".heif",
     "image/webp": ".webp",
     "image/svg+xml": ".svg",
     "application/pdf": ".pdf",
+    "application/zip": ".zip",
 }
 INTERNAL_STORAGE_LOCATION_ID = "storage_location_internal"
 GMAIL_ATTACHMENT_STORAGE_SCOPE = "tmp/gmail-attachments"
@@ -891,6 +900,50 @@ def resize_contact_image(
             return "image/webp", output.getvalue()
     except (UnidentifiedImageError, OSError) as error:
         raise json_error(422, "VALIDATION_ERROR", "Invalid contact image data.") from error
+
+
+def is_heic_image(*, content_type: str | None, filename: str | None) -> bool:
+    normalized_content_type = (content_type or "").lower().split(";", maxsplit=1)[0].strip()
+    if normalized_content_type in {
+        "image/heic",
+        "image/heic-sequence",
+        "image/heif",
+        "image/heif-sequence",
+    }:
+        return True
+    return Path(filename or "").suffix.lower() in {".heic", ".heif"}
+
+
+def storage_image_preview_response(
+    *,
+    source_path: Path,
+    content_type: str | None,
+    filename: str | None,
+    sha256_hex: str,
+) -> Response:
+    if not is_heic_image(content_type=content_type, filename=filename):
+        raise json_error(415, "UNSUPPORTED_MEDIA_TYPE", "Image preview conversion is not required.")
+    try:
+        with Image.open(source_path) as source_image:
+            image = ImageOps.exif_transpose(source_image)
+            image.thumbnail(
+                (MAX_STORAGE_IMAGE_PREVIEW_SIDE, MAX_STORAGE_IMAGE_PREVIEW_SIDE),
+                Image.Resampling.LANCZOS,
+            )
+            if image.mode not in {"RGB", "RGBA"}:
+                image = image.convert("RGBA")
+            output = BytesIO()
+            image.save(output, format="WEBP", quality=85, method=6)
+    except (UnidentifiedImageError, OSError, ValueError) as error:
+        raise json_error(422, "INVALID_IMAGE", "Storage image preview could not be generated.") from error
+    return Response(
+        content=output.getvalue(),
+        media_type="image/webp",
+        headers={
+            **CACHEABLE_IMAGE_FILE_HEADERS,
+            "ETag": f'"{sha256_hex}-storage-preview-v1"',
+        },
+    )
 
 
 def object_relative_path(
@@ -5438,12 +5491,36 @@ def get_storage_object_version_content(
             },
         )
         session.commit()
-    return FileResponse(
+    response = FileResponse(
         version_path,
         media_type=version.content_type,
         filename=version.original_filename,
         content_disposition_type="inline",
         headers=storage_content_response_headers(storage_object),
+    )
+    session.close()
+    return response
+
+
+@router.get("/objects/{storage_object_id}/versions/{version_id}/image-preview")
+def get_storage_object_version_image_preview(
+    storage_object_id: str,
+    version_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> Response:
+    storage_object, version = get_active_storage_object_version(
+        session,
+        storage_object_id,
+        version_id,
+    )
+    version_path = storage_object_version_absolute_path(storage_object, version, session)
+    if not version_path.is_file():
+        raise json_error(404, "NOT_FOUND", "Storage object version file not found.")
+    return storage_image_preview_response(
+        source_path=version_path,
+        content_type=version.content_type,
+        filename=version.original_filename,
+        sha256_hex=version.sha256_hex,
     )
 
 
@@ -5472,13 +5549,15 @@ def download_storage_object_version_content(
         },
     )
     session.commit()
-    return FileResponse(
+    response = FileResponse(
         version_path,
         media_type=version.content_type,
         filename=version.original_filename,
         content_disposition_type="attachment",
         headers=NO_STORE_FILE_HEADERS,
     )
+    session.close()
+    return response
 
 
 @router.get("/objects/{storage_object_id}")
@@ -5549,12 +5628,41 @@ def get_storage_object_content(
             storage_object=storage_object,
         )
         session.commit()
-    return FileResponse(
+    response = FileResponse(
         object_path,
         media_type=storage_object.content_type,
         filename=storage_object.original_filename,
         content_disposition_type="inline",
         headers=storage_content_response_headers(storage_object),
+    )
+    session.close()
+    return response
+
+
+@router.get("/objects/{storage_object_id}/image-preview")
+def get_storage_object_image_preview(
+    storage_object_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> Response:
+    storage_object = session.get(StorageObject, storage_object_id)
+    if storage_object is None or storage_object.status != "active":
+        raise json_error(404, "NOT_FOUND", "Storage object not found.")
+    object_path = storage_object_absolute_path(storage_object, session)
+    if not object_path.is_file():
+        raise json_error(404, "NOT_FOUND", "Storage object file not found.")
+    if should_record_storage_content_view(storage_object):
+        record_storage_operation(
+            session,
+            operation_type="viewed",
+            now=jst_iso(),
+            storage_object=storage_object,
+        )
+        session.commit()
+    return storage_image_preview_response(
+        source_path=object_path,
+        content_type=storage_object.content_type,
+        filename=storage_object.original_filename,
+        sha256_hex=storage_object.sha256_hex,
     )
 
 
@@ -5576,13 +5684,15 @@ def download_storage_object_content(
         storage_object=storage_object,
     )
     session.commit()
-    return FileResponse(
+    response = FileResponse(
         object_path,
         media_type=storage_object.content_type,
         filename=storage_object.original_filename,
         content_disposition_type="attachment",
         headers=NO_STORE_FILE_HEADERS,
     )
+    session.close()
+    return response
 
 
 @router.post("/tmp")

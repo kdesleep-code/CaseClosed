@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useState } from 'react'
+import type { FormEvent } from 'react'
 import { t } from './i18n'
 import type { MessageKey } from './i18n'
 import { AppLink, TopNav } from './navigation'
@@ -7,7 +8,16 @@ import {
   previewableTextExtensions,
 } from './storagePreview'
 import {
+  changeLoginPassword,
+  changeLowMailReviewPassword,
   discardJob,
+  createUsbBackup,
+  listUsbBackupDevices,
+  mountUsbBackupDevice,
+  Phase2ApiError,
+  readUsbBackupOperation,
+  restoreUsbBackup,
+  unmountUsbBackupDevice,
   listExternalOperations,
   listJobs,
   listPendingMails,
@@ -16,6 +26,7 @@ import {
   resolveExternalOperation,
   retryJob,
 } from './phase2Api'
+import type { UsbBackupDevice, UsbBackupOperation } from './phase2Api'
 import { listStorageLocations } from './phase3Api'
 import type {
   ExternalOperation,
@@ -98,7 +109,7 @@ const usageHistoryRanges = [
   axisLabelKeys: MessageKey[]
 }>
 
-type MaintenanceTab = 'usage' | 'jobs' | 'storage' | 'debug'
+type MaintenanceTab = 'usage' | 'jobs' | 'storage' | 'security' | 'debug'
 type UsageMetric = (typeof usageMetrics)[number]
 type UsageHistoryRange = (typeof usageHistoryRanges)[number]
 
@@ -153,6 +164,51 @@ function StorageLocationCard({ location }: { location: StorageLocation }) {
         </div>
       </dl>
     </article>
+  )
+}
+
+function UsbBackupPanel() {
+  const [devices, setDevices] = useState<UsbBackupDevice[]>([])
+  const [passphrase, setPassphrase] = useState('')
+  const [confirmation, setConfirmation] = useState('')
+  const [operation, setOperation] = useState<UsbBackupOperation | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
+  const refresh = () => listUsbBackupDevices().then(setDevices).catch((error) => setMessage(describeError(error)))
+  useEffect(() => { void refresh() }, [])
+  useEffect(() => {
+    if (operation === null || !['queued', 'running'].includes(operation.status)) return
+    const timer = window.setInterval(() => {
+      readUsbBackupOperation(operation.operation_id).then((next) => {
+        setOperation(next)
+        if (next.status === 'succeeded') void refresh()
+      }).catch(() => undefined)
+    }, 2000)
+    return () => window.clearInterval(timer)
+  }, [operation])
+  async function run(action: () => Promise<UsbBackupOperation>) {
+    setMessage(null)
+    try { setOperation(await action()) } catch (error) { setMessage(describeError(error)) }
+  }
+  return (
+    <section className="storage-backup-panel" aria-labelledby="usb-backup-heading">
+      <div className="section-heading"><div><h3 id="usb-backup-heading">{t('maintenance.usb.heading')}</h3><p>{t('maintenance.usb.description')}</p></div><button className="ui-button ui-button--compact" type="button" onClick={() => void refresh()}>{t('maintenance.health.refresh')}</button></div>
+      <label>{t('maintenance.usb.passphrase')}<input className="ui-control" type="password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} minLength={12} /></label>
+      {message && <p role="alert" className="maintenance-error">{message}</p>}
+      {operation && <p role="status">{t('maintenance.usb.operation', { status: operation.status, stage: operation.stage })}{operation.error_message ? `: ${operation.error_message}` : ''}</p>}
+      {devices.length === 0 && <p>{t('maintenance.usb.none')}</p>}
+      {devices.map((device) => (
+        <article className="storage-location-card" key={device.id}>
+          <div><h4>{device.label}</h4><p>{device.path} · {formatBytes(device.size)} · {device.filesystem}</p></div>
+          {!device.mounted ? <button className="ui-button" type="button" onClick={async () => { try { await mountUsbBackupDevice(device.id); await refresh() } catch (error) { setMessage(describeError(error)) } }}>{t('maintenance.usb.mount')}</button> : <>
+            <button className="ui-button ui-button--primary" disabled={!device.writable || passphrase.length < 12 || operation?.status === 'running'} type="button" onClick={() => void run(() => createUsbBackup(device.id, passphrase))}>{t('maintenance.usb.create')}</button>
+            <button className="ui-button" type="button" onClick={async () => { try { await unmountUsbBackupDevice(device.id); await refresh() } catch (error) { setMessage(describeError(error)) } }}>{t('maintenance.usb.unmount')}</button>
+            {device.backups.map((backup) => <div key={backup.backup_id}><strong>{new Date(backup.created_at).toLocaleString()}</strong> · {formatBytes(backup.byte_size)}<button className="ui-button ui-button--compact ui-button--danger" disabled={passphrase.length < 12 || confirmation !== 'RESTORE'} type="button" onClick={() => void run(() => restoreUsbBackup(device.id, backup.backup_id, passphrase, confirmation))}>{t('maintenance.usb.restore')}</button></div>)}
+          </>}
+        </article>
+      ))}
+      <label>{t('maintenance.usb.confirmation')}<input className="ui-control" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} placeholder="RESTORE" /></label>
+      <p>{t('maintenance.usb.envExcluded')}</p>
+    </section>
   )
 }
 
@@ -299,7 +355,7 @@ function SystemHealthPanel({
           </p>
         </div>
         <button
-          className={`button-loading-dot${refreshing ? ' is-loading' : ''}`}
+          className={`ui-button ui-button--compact button-loading-dot${refreshing ? ' is-loading' : ''}`}
           disabled={refreshing}
           onClick={onRefresh}
           type="button"
@@ -429,6 +485,133 @@ function externalOperationStatusDetail(operation: ExternalOperation) {
 
   return `The external operation is in ${operation.status} status.`
 }
+
+function describePasswordError(error: unknown) {
+  if (error instanceof Phase2ApiError) {
+    const messageKeyByCode: Partial<Record<string, MessageKey>> = {
+      CURRENT_PASSWORD_INVALID: 'maintenance.security.currentInvalid',
+      PASSWORD_CONFLICT: 'maintenance.security.conflict',
+      PASSWORD_TOO_LONG: 'maintenance.security.tooLong',
+      PASSWORD_TOO_SHORT: 'maintenance.security.tooShort',
+      PASSWORD_UNCHANGED: 'maintenance.security.unchanged',
+    }
+    const messageKey = messageKeyByCode[error.code]
+    if (messageKey !== undefined) return t(messageKey)
+  }
+  return describeError(error)
+}
+
+
+function PasswordChangeCard({
+  currentPasswordLabelKey,
+  descriptionKey,
+  headingKey,
+  newPasswordLabelKey,
+  onChangePassword,
+}: {
+  currentPasswordLabelKey: MessageKey
+  descriptionKey: MessageKey
+  headingKey: MessageKey
+  newPasswordLabelKey: MessageKey
+  onChangePassword: (
+    currentPassword: string,
+    newPassword: string,
+  ) => Promise<{ invalidated_sessions: number }>
+}) {
+  const [currentPassword, setCurrentPassword] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [confirmation, setConfirmation] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setError(null)
+    setNotice(null)
+    if (newPassword.length < 8) {
+      setError(t('maintenance.security.tooShort'))
+      return
+    }
+    if (newPassword !== confirmation) {
+      setError(t('maintenance.security.mismatch'))
+      return
+    }
+
+    setBusy(true)
+    try {
+      const result = await onChangePassword(currentPassword, newPassword)
+      setCurrentPassword('')
+      setNewPassword('')
+      setConfirmation('')
+      setNotice(
+        t('maintenance.security.saved', { count: result.invalidated_sessions }),
+      )
+    } catch (requestError) {
+      setError(describePasswordError(requestError))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <article className="mail-panel maintenance-password-card">
+      <div className="section-heading">
+        <div>
+          <h3>{t(headingKey)}</h3>
+          <p>{t(descriptionKey)}</p>
+        </div>
+      </div>
+      <form
+        aria-label={t(headingKey)}
+        className="settings-form maintenance-password-form"
+        onSubmit={handleSubmit}
+      >
+        <label>
+          <span>{t(currentPasswordLabelKey)}</span>
+          <input
+            autoComplete="current-password"
+            name="current-password"
+            onChange={(event) => setCurrentPassword(event.target.value)}
+            required
+            type="password"
+            value={currentPassword}
+          />
+        </label>
+        <label>
+          <span>{t(newPasswordLabelKey)}</span>
+          <input
+            autoComplete="new-password"
+            minLength={8}
+            name="new-password"
+            onChange={(event) => setNewPassword(event.target.value)}
+            required
+            type="password"
+            value={newPassword}
+          />
+        </label>
+        <label>
+          <span>{t('maintenance.security.confirmPassword')}</span>
+          <input
+            autoComplete="new-password"
+            minLength={8}
+            name="confirm-password"
+            onChange={(event) => setConfirmation(event.target.value)}
+            required
+            type="password"
+            value={confirmation}
+          />
+        </label>
+        <button className="ui-button ui-button--primary" disabled={busy} type="submit">
+          {busy ? t('maintenance.security.saving') : t('maintenance.security.save')}
+        </button>
+      </form>
+      {error !== null && <p className="maintenance-error" role="alert">{error}</p>}
+      {notice !== null && <p className="maintenance-notice" role="status">{notice}</p>}
+    </article>
+  )
+}
+
 
 function initialMaintenanceTab(): MaintenanceTab {
   return 'usage'
@@ -671,6 +854,16 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
               {t('maintenance.storage')}
             </button>
             <button
+              aria-controls="maintenance-security-panel"
+              aria-selected={activeTab === 'security'}
+              id="maintenance-security-tab"
+              onClick={() => setActiveTab('security')}
+              role="tab"
+              type="button"
+            >
+              {t('maintenance.security')}
+            </button>
+            <button
               aria-controls="maintenance-debug-panel"
               aria-selected={activeTab === 'debug'}
               id="maintenance-debug-tab"
@@ -837,22 +1030,7 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                       )}
                     </div>
                   ) : activeUsageMetric.key === 'storage' ? (
-                    <div className="storage-backup-panel">
-                      <div className="section-heading">
-                        <h3>{t('maintenance.storageBackup.heading')}</h3>
-                        <p>{t('maintenance.storageBackup.locations')}</p>
-                      </div>
-                      <dl className="gmail-auto-import-status">
-                        <div>
-                          <dt>{t('maintenance.storageBackup.status')}</dt>
-                          <dd>{status?.backup_status ?? t('common.none')}</dd>
-                        </div>
-                      </dl>
-                      <button disabled type="button">
-                        {t('maintenance.storageBackup.archive')}
-                      </button>
-                      <p>{t('maintenance.storageBackup.notImplemented')}</p>
-                    </div>
+                    <UsbBackupPanel />
                   ) : (
                     <>
                       <div className="usage-history-chart">
@@ -1195,6 +1373,38 @@ function MaintenanceView({ initialData }: { initialData?: MaintenanceInitialData
                   {storageLocations !== null && storageLocations.length === 0 && (
                     <p>{t('storage.noLocations')}</p>
                   )}
+                </div>
+              </section>
+            )}
+
+            {activeTab === 'security' && (
+              <section
+                aria-labelledby="maintenance-security-tab security-heading"
+                className="maintenance-panel maintenance-section"
+                id="maintenance-security-panel"
+                role="tabpanel"
+              >
+                <div className="section-heading">
+                  <div>
+                    <h2 id="security-heading">{t('maintenance.security.heading')}</h2>
+                    <p>{t('maintenance.security.description')}</p>
+                  </div>
+                </div>
+                <div className="maintenance-security-grid">
+                  <PasswordChangeCard
+                    currentPasswordLabelKey="maintenance.security.currentLoginPassword"
+                    descriptionKey="maintenance.security.full.description"
+                    headingKey="maintenance.security.full.heading"
+                    newPasswordLabelKey="maintenance.security.full.newPassword"
+                    onChangePassword={changeLoginPassword}
+                  />
+                  <PasswordChangeCard
+                    currentPasswordLabelKey="maintenance.security.currentLoginPassword"
+                    descriptionKey="maintenance.security.review.description"
+                    headingKey="maintenance.security.review.heading"
+                    newPasswordLabelKey="maintenance.security.review.newPassword"
+                    onChangePassword={changeLowMailReviewPassword}
+                  />
                 </div>
               </section>
             )}

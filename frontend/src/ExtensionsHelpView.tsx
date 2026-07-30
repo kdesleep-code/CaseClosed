@@ -35,9 +35,9 @@ export default function ExtensionsHelpView() {
             <section className="extension-guide-card">
               <h2>Extensionとは</h2>
               <p>
-                CaseClosed本体には入れにくい、自動採点・PDF生成・専用データ変換のようなCase特化処理を、
+                C@seClosed本体には入れにくい、自動採点・PDF生成・専用データ変換のようなCase特化処理を、
                 独立した小さなWebアプリとして起動する仕組みです。Extensionは別プロセスで動き、
-                CaseClosedは登録、起動、停止、Case情報への限定アクセスだけを担当します。
+                C@seClosedは登録、起動、停止、Case情報への限定アクセスだけを担当します。
               </p>
             </section>
 
@@ -56,7 +56,7 @@ export default function ExtensionsHelpView() {
                 </div>
                 <div>
                   <dt>CASECLOSED_API_BASE_URL</dt>
-                  <dd>CaseClosed backend APIのURLです。</dd>
+                  <dd>C@seClosed backend APIのURLです。</dd>
                 </div>
                 <div>
                   <dt>CASECLOSED_EXTENSION_TOKEN</dt>
@@ -136,7 +136,7 @@ export default function ExtensionsHelpView() {
               <ul>
                 <li>登録、起動、停止、自動停止、Case情報取得、ファイル一覧取得、ファイル保存はaudit logに残ります。</li>
                 <li>Extension tokenは秘匿情報です。画面・ファイル・ログへ出力しないでください。</li>
-                <li>ExtensionはCaseClosed本体とは別プロセスなので、失敗しても本体を巻き込みにくい設計です。</li>
+                <li>ExtensionはC@seClosed本体とは別プロセスなので、失敗しても本体を巻き込みにくい設計です。</li>
                 <li>現状のOpen URLはローカル起動を前提にしています。別PCからの利用はExtensionの待受ホスト設計を別途詰める必要があります。</li>
               </ul>
             </section>

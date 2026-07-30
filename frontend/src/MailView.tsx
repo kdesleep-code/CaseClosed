@@ -26,6 +26,7 @@ type SearchSort = 'newest' | 'importance'
 export type MailInitialData = {
   mails: MailListItem[]
   mailDates: MailDateSummary[]
+  mailDayStats?: MailDayStats | null
   nextCursor: string | null
   activeTab: MailTab
   selectedDate: string
@@ -233,13 +234,29 @@ function mailListReturnHref(
   isActionNeededMode: boolean,
   activeTab: MailTab,
   selectedDate: string,
+  searchQuery: string,
+  listSort: SearchSort,
+  contactId: string,
+  contactName: string,
 ) {
   if (isActionNeededMode) {
-    return '/mail/action-needed'
+    return `/mail/action-needed?sort=${listSort}`
+  }
+  if (searchQuery.trim() !== '') {
+    const params = new URLSearchParams({ q: searchQuery.trim(), sort: listSort })
+    if (contactId !== '') params.set('contact_id', contactId)
+    if (contactName !== '') params.set('contact_name', contactName)
+    return `/mail?${params.toString()}`
+  }
+  if (contactId !== '') {
+    const params = new URLSearchParams({ contact_id: contactId, sort: listSort })
+    if (contactName !== '') params.set('contact_name', contactName)
+    return `/mail?${params.toString()}`
   }
   const params = new URLSearchParams({
     tab: activeTab,
     date: selectedDate,
+    sort: listSort,
   })
   return `/mail?${params.toString()}`
 }
@@ -253,15 +270,21 @@ function initialQueryParams() {
   const params = new URLSearchParams(window.location.search)
   const tab = params.get('tab')
   const date = params.get('date')
+  const searchQuery = params.get('q')?.trim() ?? ''
+  const contactId = params.get('contact_id')?.trim() ?? ''
+  const contactName = params.get('contact_name')?.trim() ?? ''
+  const listSort: SearchSort = params.get('sort') === 'newest' ? 'newest' : 'importance'
   return {
     activeTab: isMailTab(tab) ? tab : 'unprocessed',
     selectedDate: date !== null && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : jstDateToday(),
+    searchQuery,
+    contactId,
+    contactName,
+    listSort,
   }
 }
 
 function MailView({ initialData }: { initialData?: MailInitialData }) {
-  const didUseInitialData = useRef(initialData !== undefined)
-  const didUsePreparedData = useRef(false)
   const lastSeenAutoImportSuccessAt = useRef<string | null>(null)
   const isAutoImportRefreshInFlight = useRef(false)
   const queryParams = useMemo(() => initialQueryParams(), [])
@@ -281,9 +304,9 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
   const [calendarMonth, setCalendarMonth] = useState(
     initialData?.calendarMonth ?? queryParams.selectedDate,
   )
-  const [searchText, setSearchText] = useState('')
-  const [searchQuery, setSearchQuery] = useState('')
-  const [listSort, setListSort] = useState<SearchSort>('importance')
+  const [searchText, setSearchText] = useState(queryParams.searchQuery)
+  const [searchQuery, setSearchQuery] = useState(queryParams.searchQuery)
+  const [listSort, setListSort] = useState<SearchSort>(queryParams.listSort)
   const [pageSize, setPageSize] = useState(25)
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -292,14 +315,34 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
   const [isGmailImporting, setIsGmailImporting] = useState(false)
   const [lastAutoImportRunAt, setLastAutoImportRunAt] = useState<string | null>(null)
   const [lastAutoImportError, setLastAutoImportError] = useState<string | null>(null)
-  const [mailDayStats, setMailDayStats] = useState<MailDayStats | null>(null)
+  const [mailDayStats, setMailDayStats] = useState<MailDayStats | null>(
+    initialData?.mailDayStats ?? null,
+  )
   const [autoImportUnloadedDates, setAutoImportUnloadedDates] = useState<Set<string>>(
     () => new Set(),
   )
 
   const isSearchMode = searchQuery.trim() !== ''
+  const isContactMailMode = queryParams.contactId !== ''
   const isActionNeededMode = initialData?.viewMode === 'action-needed'
-  const isSearchLikeMode = isSearchMode || isActionNeededMode
+  const isSearchLikeMode = isSearchMode || isContactMailMode || isActionNeededMode
+  function requestKeyFor(tab: MailTab, date: string, query: string) {
+    return JSON.stringify({
+      tab,
+      date,
+      query,
+      sort: listSort,
+      pageSize,
+      actionNeeded: isActionNeededMode,
+      contactId: queryParams.contactId,
+    })
+  }
+
+  const initialRequestKey = requestKeyFor(activeTab, selectedDate, searchQuery)
+  const lastLoadedRequestKey = useRef<string | null>(
+    initialData !== undefined ? initialRequestKey : null,
+  )
+
   const visibleMails = useMemo(
     () => [...mails].sort(compareVisibleMails(listSort)),
     [mails, listSort],
@@ -319,19 +362,29 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
     [...sortedMailDates].reverse().find((date) => date < selectedDate) ?? null
   const nextMailDate = sortedMailDates.find((date) => date > selectedDate) ?? null
   const selectedMonthDays = calendarDays(calendarMonth)
-  const returnHref = mailListReturnHref(isActionNeededMode, activeTab, selectedDate)
+  const returnHref = mailListReturnHref(
+    isActionNeededMode,
+    activeTab,
+    selectedDate,
+    searchQuery,
+    listSort,
+    queryParams.contactId,
+    queryParams.contactName,
+  )
 
   function listFilters(cursor?: string): MailListFilters {
     const filters: MailListFilters = {
       limit: pageSize,
       cursor,
       tab: activeTab,
+      sort: listSort,
     }
     if (isActionNeededMode) {
       filters.tab = 'all'
       filters.needs_action = true
-    } else if (isSearchMode) {
-      filters.q = searchQuery.trim()
+    } else if (isSearchMode || isContactMailMode) {
+      if (isSearchMode) filters.q = searchQuery.trim()
+      if (isContactMailMode) filters.contact_id = queryParams.contactId
       filters.tab = 'all'
     } else {
       filters.date_from = startOfDate(selectedDate)
@@ -344,6 +397,7 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
     return {
       limit: pageSize,
       tab,
+      sort: listSort,
       date_from: startOfDate(date),
       date_to: endOfDate(date),
     }
@@ -433,29 +487,9 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
       isMounted = false
       window.clearInterval(timerId)
     }
-  }, [activeTab, isActionNeededMode, pageSize, searchQuery, selectedDate])
+  }, [activeTab, isActionNeededMode, listSort, pageSize, searchQuery, selectedDate])
 
-  useEffect(() => {
-    if (isSearchLikeMode) {
-      setMailDayStats(null)
-      return
-    }
-    let isMounted = true
-    void getMailDayStats(selectedDate)
-      .then((stats) => {
-        if (isMounted) {
-          setMailDayStats(stats)
-        }
-      })
-      .catch(() => {
-        if (isMounted) {
-          setMailDayStats(null)
-        }
-      })
-    return () => {
-      isMounted = false
-    }
-  }, [isSearchLikeMode, selectedDate])
+
 
   async function importSelectedDateFromGmail() {
     setError(null)
@@ -505,7 +539,7 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
         listMailDates(nextTab),
         getMailDayStats(nextDate),
       ])
-      didUsePreparedData.current = true
+      lastLoadedRequestKey.current = requestKeyFor(nextTab, nextDate, "")
       setActiveTab(nextTab)
       setSelectedDate(nextDate)
       setCalendarMonth(nextDate)
@@ -523,7 +557,7 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
   }
 
   async function openLatestInbox() {
-    if (isActionNeededMode) {
+    if (isActionNeededMode || isContactMailMode) {
       navigateTo('/mail')
       return
     }
@@ -541,7 +575,11 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
         listMailPage(dayListFilters('unprocessed', latestDate)),
         getMailDayStats(latestDate),
       ])
-      didUsePreparedData.current = true
+      lastLoadedRequestKey.current = requestKeyFor(
+        "unprocessed",
+        latestDate,
+        "",
+      )
       setActiveTab('unprocessed')
       setSelectedDate(latestDate)
       setCalendarMonth(latestDate)
@@ -559,12 +597,8 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
   }
 
   useEffect(() => {
-    if (didUseInitialData.current) {
-      didUseInitialData.current = false
-      return
-    }
-    if (didUsePreparedData.current) {
-      didUsePreparedData.current = false
+    const requestKey = requestKeyFor(activeTab, selectedDate, searchQuery)
+    if (lastLoadedRequestKey.current === requestKey) {
       return
     }
     let isMounted = true
@@ -580,6 +614,7 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
           if (pageResult.status === 'fulfilled') {
             setMails(pageResult.value.items)
             setNextCursor(pageResult.value.next_cursor)
+            lastLoadedRequestKey.current = requestKey
             setError(null)
           } else {
             setError(describeError(pageResult.reason))
@@ -606,7 +641,7 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
     return () => {
       isMounted = false
     }
-  }, [activeTab, selectedDate, searchQuery, pageSize])
+  }, [activeTab, selectedDate, searchQuery, listSort, pageSize])
 
   useEffect(() => {
     if (!hasClassifyingMail) {
@@ -635,7 +670,7 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
       isMounted = false
       window.clearInterval(timerId)
     }
-  }, [activeTab, hasClassifyingMail, isActionNeededMode, pageSize, searchQuery, selectedDate])
+  }, [activeTab, hasClassifyingMail, isActionNeededMode, listSort, pageSize, searchQuery, selectedDate])
 
   async function handleLoadMore() {
     if (nextCursor === null) {
@@ -661,7 +696,25 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
     setNotice(null)
     setMails([])
     setNextCursor(null)
-    setSearchQuery(searchText)
+    const query = searchText.trim()
+    const url = new URL(window.location.href)
+    if (query === '') {
+      url.searchParams.delete('q')
+    } else {
+      url.searchParams.set('q', query)
+    }
+    window.history.replaceState(window.history.state, '', url)
+    setSearchQuery(query)
+  }
+
+  function handleSortChange(nextSort: SearchSort) {
+    if (nextSort === listSort) {
+      return
+    }
+    const url = new URL(window.location.href)
+    url.searchParams.set('sort', nextSort)
+    window.history.replaceState(window.history.state, '', url)
+    setListSort(nextSort)
   }
 
   function clearSearch() {
@@ -669,6 +722,9 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
     setNotice(null)
     setSearchText('')
     setSearchQuery('')
+    const url = new URL(window.location.href)
+    url.searchParams.delete('q')
+    window.history.replaceState(window.history.state, '', url)
   }
 
   function handleTabClick(nextTab: MailTab) {
@@ -801,11 +857,17 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
                       <h2 id="mail-list-heading">
                         {isActionNeededMode
                           ? t('mail.actionNeeded.heading')
+                          : isContactMailMode
+                            ? t('mail.contactResults.heading', {
+                                contact: queryParams.contactName || t('contacts.detail.heading'),
+                              })
                           : t('mail.search.results')}
                       </h2>
                       <p>
                         {isActionNeededMode
                           ? t('mail.actionNeeded.resultNote')
+                          : isContactMailMode
+                            ? t('mail.contactResults.note')
                           : t('mail.search.resultNote')}
                       </p>
                     </div>
@@ -871,7 +933,7 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
                     <div className="mail-empty mail-empty-action-needed">
                       <img alt={t('mail.actionNeeded.emptyAlt')} src={needsActionClearTanukiUrl} />
                     </div>
-                  ) : isSearchMode ? (
+                  ) : isSearchMode || isContactMailMode ? (
                     <p className="mail-empty">{t('mail.search.empty')}</p>
                   ) : (
                     <p className="mail-empty">{t('mail.empty')}</p>
@@ -1076,14 +1138,14 @@ function MailView({ initialData }: { initialData?: MailInitialData }) {
               <div aria-label={t('mail.sort.label')} className="mail-sort-control">
                 <button
                   aria-pressed={listSort === 'importance'}
-                  onClick={() => setListSort('importance')}
+                  onClick={() => handleSortChange('importance')}
                   type="button"
                 >
                   {t('mail.sort.importance')}
                 </button>
                 <button
                   aria-pressed={listSort === 'newest'}
-                  onClick={() => setListSort('newest')}
+                  onClick={() => handleSortChange('newest')}
                   type="button"
                 >
                   {t('mail.sort.newest')}

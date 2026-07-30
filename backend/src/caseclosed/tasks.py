@@ -40,8 +40,10 @@ from caseclosed.services.mail_thread_summary import split_quoted_reply_sections
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["tasks"])
 
-TASK_STATUSES = {"not_started", "in_progress", "completed", "canceled"}
+TASK_STATUSES = {"not_started", "in_progress", "frozen", "completed", "canceled"}
 OPEN_TASK_STATUSES = {"not_started", "in_progress"}
+UNFINISHED_TASK_STATUSES = {*OPEN_TASK_STATUSES, "frozen"}
+PROGRESS_TASK_STATUSES = UNFINISHED_TASK_STATUSES
 TASK_SOURCE_TYPES = {"manual", "mail", "llm", "recurring", "system"}
 TASK_PRIORITIES = {"high", "middle", "low"}
 TASK_RECURRENCE_RULE_TYPES = {"monthly", "weekly", "biweekly", "yearly"}
@@ -977,7 +979,7 @@ def task_has_open_children(session: DatabaseSession, task_id: str) -> bool:
         select(Task.id)
         .where(Task.parent_task_id == task_id)
         .where(Task.deleted_at.is_(None))
-        .where(Task.status.in_(OPEN_TASK_STATUSES))
+        .where(Task.status.in_(UNFINISHED_TASK_STATUSES))
         .limit(1)
     )
     return child_id is not None
@@ -1396,7 +1398,7 @@ def create_task_progress_entry(
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
     task = ensure_task_exists(session, task_id)
-    if task.status not in OPEN_TASK_STATUSES:
+    if task.status not in PROGRESS_TASK_STATUSES:
         raise json_error(409, "TASK_CLOSED", "Cannot append progress memo to closed Task.")
     body = payload.body.strip()
     if body == "":
@@ -1446,7 +1448,7 @@ def update_task_progress_entry(
         raise json_error(422, "VALIDATION_ERROR", "Progress memo cannot be empty.")
     now = jst_iso()
     entry.body = body
-    if task.status in OPEN_TASK_STATUSES:
+    if task.status in PROGRESS_TASK_STATUSES:
         task.progress_memo = latest_task_progress_memo(session, task.id)
     task.updated_at = now
     task.version += 1
@@ -1476,7 +1478,7 @@ def delete_task_progress_entry(
     now = jst_iso()
     session.delete(entry)
     session.flush()
-    if task.status in OPEN_TASK_STATUSES:
+    if task.status in PROGRESS_TASK_STATUSES:
         task.progress_memo = latest_task_progress_memo(session, task.id)
     task.updated_at = now
     task.version += 1
@@ -1512,11 +1514,11 @@ def update_task(
     )
     if payload.status is not None:
         validate_task_status(payload.status)
-        if payload.status in {"completed", "canceled"}:
+        if payload.status in {"completed", "canceled", "frozen"}:
             raise json_error(
                 400,
                 "USE_STATE_ENDPOINT",
-                "Use complete or cancel endpoint for closed Task states.",
+                "Use the complete, cancel, freeze, or unfreeze endpoint for Task state changes.",
             )
     if payload.priority is not None:
         validate_task_priority(payload.priority)
@@ -1644,12 +1646,65 @@ def update_task(
     }
 
 
+@router.post("/{task_id}/freeze")
+def freeze_task(
+    task_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    task = ensure_task_exists(session, task_id)
+    if task.status in {"completed", "canceled"}:
+        raise json_error(409, "TASK_CLOSED", "Closed Task cannot be frozen.")
+    if task.status != "frozen":
+        now = jst_iso()
+        task.status = "frozen"
+        task.completed_at = None
+        task.canceled_at = None
+        task.canceled_reason = None
+        task.updated_at = now
+        task.version += 1
+        session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "task": task_data(task, session, include_links=True, include_progress_entries=True),
+            "optimistic_state": {"status": "frozen"},
+        },
+    }
+
+
+@router.post("/{task_id}/unfreeze")
+def unfreeze_task(
+    task_id: str,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    task = ensure_task_exists(session, task_id)
+    if task.status != "frozen":
+        raise json_error(409, "TASK_NOT_FROZEN", "Task is not frozen.")
+    now = jst_iso()
+    task.status = "not_started" if task_is_waiting_to_start(session, task) else "in_progress"
+    task.completed_at = None
+    task.canceled_at = None
+    task.canceled_reason = None
+    task.updated_at = now
+    task.version += 1
+    session.commit()
+    return {
+        "ok": True,
+        "data": {
+            "task": task_data(task, session, include_links=True, include_progress_entries=True),
+            "optimistic_state": {"status": task.status},
+        },
+    }
+
+
 @router.post("/{task_id}/complete")
 def complete_task(
     task_id: str,
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
     task = ensure_task_exists(session, task_id)
+    if task.status == "frozen":
+        raise json_error(409, "TASK_FROZEN", "Unfreeze Task before completing it.")
     if task_has_open_children(session, task.id):
         raise json_error(409, "OPEN_CHILD_TASKS", "Cannot complete Task with open child Tasks.")
     now = jst_iso()
