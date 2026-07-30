@@ -286,10 +286,22 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return payload.data
 }
 
-export async function listCases(status: CaseListStatus | 'all' = 'user_ball'): Promise<CaseItem[]> {
+const listCasesInFlight = new Map<string, Promise<CaseItem[]>>()
+
+export function listCases(status: CaseListStatus | 'all' = 'user_ball'): Promise<CaseItem[]> {
+  const existingRequest = listCasesInFlight.get(status)
+  if (existingRequest !== undefined) return existingRequest
+
   const params = new URLSearchParams({ status })
-  const data = await request<ListResponse<CaseItem>>(`/api/v1/cases?${params.toString()}`)
-  return data.items
+  const pendingRequest = request<ListResponse<CaseItem>>(`/api/v1/cases?${params.toString()}`)
+    .then((data) => data.items)
+    .finally(() => {
+      if (listCasesInFlight.get(status) === pendingRequest) {
+        listCasesInFlight.delete(status)
+      }
+    })
+  listCasesInFlight.set(status, pendingRequest)
+  return pendingRequest
 }
 
 export async function listCaseGenres(): Promise<CaseGenre[]> {

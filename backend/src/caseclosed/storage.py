@@ -392,11 +392,127 @@ def storage_source_mail_data(
     }
 
 
+@dataclass
+class StorageObjectListContext:
+    source_mails: dict[str, dict[str, object]]
+    directory_paths: dict[str | None, list[str]]
+    file_icons: dict[str, FileIconSetting]
+
+
+def load_storage_object_list_context(
+    session: DatabaseSession,
+    storage_objects: list[StorageObject],
+) -> StorageObjectListContext:
+    message_ids = {
+        storage_object.source_message_id
+        for storage_object in storage_objects
+        if storage_object.source_message_id is not None
+    }
+    messages = (
+        session.scalars(
+            select(GmailMessage).where(GmailMessage.id.in_(message_ids))
+        ).all()
+        if message_ids
+        else []
+    )
+    messages_by_id = {message.id: message for message in messages}
+    user_states = {
+        state.message_id: state
+        for state in session.scalars(
+            select(MailUserState).where(MailUserState.message_id.in_(message_ids))
+        ).all()
+    } if message_ids else {}
+    auto_states = {
+        state.message_id: state
+        for state in session.scalars(
+            select(MailAutoState).where(MailAutoState.message_id.in_(message_ids))
+        ).all()
+    } if message_ids else {}
+    thread_ids = {message.thread_id for message in messages}
+    thread_summaries = {
+        summary.thread_id: summary
+        for summary in session.scalars(
+            select(MailThreadSummary).where(MailThreadSummary.thread_id.in_(thread_ids))
+        ).all()
+    } if thread_ids else {}
+    message_summaries: dict[str, MailSummary] = {}
+    if message_ids:
+        for summary in session.scalars(
+            select(MailSummary).where(MailSummary.message_id.in_(message_ids))
+        ).all():
+            message_summaries.setdefault(summary.message_id, summary)
+
+    source_mails: dict[str, dict[str, object]] = {}
+    for message_id, message in messages_by_id.items():
+        user_state = user_states.get(message_id)
+        auto_state = auto_states.get(message_id)
+        effective_importance = (
+            user_state.user_importance
+            if user_state is not None and user_state.user_importance is not None
+            else auto_state.effective_importance
+            if auto_state is not None
+            else "pending"
+        )
+        summary = thread_summaries.get(message.thread_id) or message_summaries.get(message_id)
+        source_mails[message_id] = {
+            "id": message.id,
+            "received_at": message.received_at,
+            "subject": message.subject,
+            "from_address": message.from_address,
+            "from_name": message.from_name,
+            "effective_importance": effective_importance,
+            "read_status": user_state.read_status if user_state is not None else "read",
+            "summary": summary.summary_text if summary is not None else message.snippet,
+            "has_attachments": True,
+        }
+
+    directories = session.scalars(select(StorageDirectory)).all()
+    directories_by_id = {directory.id: directory for directory in directories}
+    directory_paths: dict[str | None, list[str]] = {None: []}
+    for directory_id in {item.directory_id for item in storage_objects}:
+        names: list[str] = []
+        seen: set[str] = set()
+        current = directories_by_id.get(directory_id) if directory_id is not None else None
+        while current is not None and current.id not in seen:
+            seen.add(current.id)
+            names.append(current.name)
+            current = (
+                directories_by_id.get(current.parent_id)
+                if current.parent_id is not None
+                else None
+            )
+        directory_paths[directory_id] = list(reversed(names))
+
+    file_icons: dict[str, FileIconSetting] = {}
+    settings = session.scalars(
+        select(FileIconSetting).order_by(
+            FileIconSetting.created_at.asc(),
+            FileIconSetting.id.asc(),
+        )
+    ).all()
+    for setting in settings:
+        try:
+            extensions = json.loads(setting.extensions_json)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(extensions, list):
+            continue
+        for extension in extensions:
+            file_icons.setdefault(str(extension), setting)
+
+    return StorageObjectListContext(
+        source_mails=source_mails,
+        directory_paths=directory_paths,
+        file_icons=file_icons,
+    )
+
+
 def storage_object_data(
     storage_object: StorageObject,
     session: DatabaseSession | None = None,
     *,
     display_source: str | None = None,
+    list_context: StorageObjectListContext | None = None,
 ) -> dict[str, object]:
     data = {
         "id": storage_object.id,
@@ -417,17 +533,29 @@ def storage_object_data(
     }
     if display_source is not None:
         data["display_source"] = display_source
-    if session is not None:
+    if list_context is not None:
+        data["source_mail"] = list_context.source_mails.get(storage_object.source_message_id)
+        data["directory_path"] = list_context.directory_paths.get(
+            storage_object.directory_id,
+            [],
+        )
+        file_icon = list_context.file_icons.get(
+            normalized_file_extension(storage_object.original_filename)
+        )
+    elif session is not None:
         data["source_mail"] = storage_source_mail_data(
             session,
             storage_object.source_message_id,
         )
         data["directory_path"] = storage_directory_path(session, storage_object.directory_id)
+        file_icon = file_icon_for_filename(session, storage_object.original_filename)
+    else:
+        file_icon = None
+    if session is not None or list_context is not None:
         data["physical_directory_id"] = storage_object.directory_id
         data["physical_directory_path"] = data["directory_path"]
         storage_directory_param = storage_object.directory_id or "root"
         data["physical_directory_url"] = f"/storage?directory={storage_directory_param}"
-        file_icon = file_icon_for_filename(session, storage_object.original_filename)
         data["file_icon_setting_id"] = file_icon.id if file_icon is not None else None
         data["file_icon_url"] = (
             storage_object_url(file_icon.storage_object_id)
@@ -4269,6 +4397,49 @@ def delete_storage_directory(
     }
 
 
+@router.get("/extensions")
+def list_storage_extensions(
+    status: str = "active",
+    directory_id: str = "root",
+    recursive: bool = True,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    normalized_directory_id = normalize_directory_id(directory_id)
+    ensure_storage_directory(session, normalized_directory_id)
+    statement = select(StorageObject.original_filename).where(
+        StorageObject.scope == "managed"
+    )
+    if status != "all":
+        statement = statement.where(StorageObject.status == status)
+    if recursive:
+        if normalized_directory_id is None:
+            statement = statement.where(
+                (StorageObject.directory_id.is_(None))
+                | (StorageObject.directory_id.not_in(HIDDEN_STORAGE_DIRECTORY_IDS))
+            )
+        else:
+            directory_ids = storage_directory_descendant_ids(
+                session,
+                normalized_directory_id,
+            )
+            statement = statement.where(StorageObject.directory_id.in_(directory_ids))
+    elif normalized_directory_id is None:
+        statement = statement.where(StorageObject.directory_id.is_(None))
+    else:
+        statement = statement.where(StorageObject.directory_id == normalized_directory_id)
+    filenames = session.scalars(statement.limit(1000)).all()
+    extensions = sorted(
+        {
+            extension
+            for extension in (
+                storage_file_extension(filename) for filename in filenames
+            )
+            if extension is not None
+        }
+    )
+    return {"ok": True, "data": {"extensions": extensions}}
+
+
 @router.get("/objects")
 def list_storage_objects(
     status: str = "active",
@@ -4315,6 +4486,7 @@ def list_storage_objects(
         objects = sort_storage_objects_for_directory(
             [*objects, *linked_objects]
         )[:safe_limit]
+    list_context = load_storage_object_list_context(session, objects)
     return {
         "ok": True,
         "data": {
@@ -4325,6 +4497,7 @@ def list_storage_objects(
                     display_source="link"
                     if storage_object.id in linked_object_ids
                     else "physical",
+                    list_context=list_context,
                 )
                 for storage_object in objects
             ]
@@ -4413,11 +4586,16 @@ def search_storage_objects(
         statement = statement.order_by(StorageObject.created_at.desc(), StorageObject.id.desc())
 
     objects = session.scalars(statement.limit(safe_limit)).all()
+    list_context = load_storage_object_list_context(session, objects)
     return {
         "ok": True,
         "data": {
             "items": [
-                storage_object_data(storage_object, session) for storage_object in objects
+                storage_object_data(
+                    storage_object,
+                    list_context=list_context,
+                )
+                for storage_object in objects
             ],
             "extensions": available_extensions,
         },

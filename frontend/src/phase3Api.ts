@@ -603,6 +603,22 @@ export function uploadTemporaryObject(payload: {
   })
 }
 
+const storageReadInFlight = new Map<string, Promise<unknown>>()
+
+function sharedStorageRead<T>(path: string): Promise<T> {
+  const existingRequest = storageReadInFlight.get(path)
+  if (existingRequest !== undefined) return existingRequest as Promise<T>
+
+  const pendingRequest = request<T>(path).finally(() => {
+    if (storageReadInFlight.get(path) === pendingRequest) {
+      storageReadInFlight.delete(path)
+    }
+  })
+  storageReadInFlight.set(path, pendingRequest)
+  return pendingRequest
+}
+
+
 export async function listStorageObjects(params: {
   status?: string
   location_id?: string
@@ -617,7 +633,7 @@ export async function listStorageObjects(params: {
   }
   if (params.limit !== undefined) query.set('limit', String(params.limit))
   const suffix = query.toString() === '' ? '' : `?${query.toString()}`
-  const data = await request<ListResponse<StorageObject>>(`/api/v1/storage/objects${suffix}`)
+  const data = await sharedStorageRead<ListResponse<StorageObject>>(`/api/v1/storage/objects${suffix}`)
   return data.items
 }
 
@@ -636,15 +652,28 @@ export function searchStorageObjects(params: {
   query.set('sort', params.sort ?? 'created_desc')
   query.set('extension', params.extension ?? 'all')
   if (params.limit !== undefined) query.set('limit', String(params.limit))
-  return request<StorageObjectSearchResult>(
+  return sharedStorageRead<StorageObjectSearchResult>(
     `/api/v1/storage/search/objects?${query.toString()}`,
   )
+}
+
+export async function listStorageExtensions(params: {
+  directory_id?: string | null
+  recursive?: boolean
+} = {}): Promise<string[]> {
+  const query = new URLSearchParams()
+  query.set("directory_id", params.directory_id ?? "root")
+  query.set("recursive", params.recursive === false ? "false" : "true")
+  const data = await sharedStorageRead<{ extensions: string[] }>(
+    `/api/v1/storage/extensions?${query.toString()}`,
+  )
+  return data.extensions
 }
 
 export function listStorageDirectories(parentId: string | null = null): Promise<StorageDirectoryList> {
   const query = new URLSearchParams()
   query.set('parent_id', parentId ?? 'root')
-  return request<StorageDirectoryList>(`/api/v1/storage/directories?${query.toString()}`)
+  return sharedStorageRead<StorageDirectoryList>(`/api/v1/storage/directories?${query.toString()}`)
 }
 
 export function createStorageDirectory(payload: {
@@ -683,7 +712,7 @@ export async function moveStorageDirectoryToDirectory(
 }
 
 export async function getStorageObject(storageObjectId: string): Promise<StorageObject> {
-  const data = await request<{ storage_object: StorageObject }>(
+  const data = await sharedStorageRead<{ storage_object: StorageObject }>(
     `/api/v1/storage/objects/${encodeURIComponent(storageObjectId)}`,
   )
   return data.storage_object
@@ -747,7 +776,7 @@ export function getStorageObjectVersionEmlPreview(
 export async function listStorageObjectVersions(
   storageObjectId: string,
 ): Promise<StorageObjectVersion[]> {
-  const data = await request<ListResponse<StorageObjectVersion>>(
+  const data = await sharedStorageRead<ListResponse<StorageObjectVersion>>(
     `/api/v1/storage/objects/${encodeURIComponent(storageObjectId)}/versions`,
   )
   return data.items
@@ -825,7 +854,7 @@ export function deleteStorageObject(
 export async function listStorageObjectLinkedCases(
   storageObjectId: string,
 ): Promise<StorageObjectLinkedCase[]> {
-  const data = await request<ListResponse<StorageObjectLinkedCase>>(
+  const data = await sharedStorageRead<ListResponse<StorageObjectLinkedCase>>(
     `/api/v1/storage/objects/${encodeURIComponent(storageObjectId)}/linked-cases`,
   )
   return data.items
@@ -880,7 +909,7 @@ export function getStorageObjectLlmDigest(
     params.set('version_id', versionId)
   }
   const suffix = params.toString() === '' ? '' : `?${params.toString()}`
-  return request<FileSummaryReadResponse>(
+  return sharedStorageRead<FileSummaryReadResponse>(
     `/api/v1/storage/objects/${encodeURIComponent(storageObjectId)}/llm-digest${suffix}`,
   )
 }

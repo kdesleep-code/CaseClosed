@@ -1050,6 +1050,11 @@ export function listGoogleCalendarEvents(params: {
   )
 }
 
+const calendarDbEventsInFlight = new Map<
+  string,
+  Promise<{ items: GoogleCalendarEvent[]; calendar_ids: string[] }>
+>()
+
 export function listCalendarDbEvents(params: {
   calendar_id?: string[]
   time_min?: string
@@ -1067,9 +1072,19 @@ export function listCalendarDbEvents(params: {
   if (params.time_max !== undefined && params.time_max.trim() !== '') {
     query.set('time_max', params.time_max)
   }
-  return request(
-    `/api/v1/google/gmail/calendar/db-events${query.size === 0 ? '' : `?${query}`}`,
-  )
+  const url = '/api/v1/google/gmail/calendar/db-events' +
+    (query.size === 0 ? '' : '?' + query.toString())
+  const existingRequest = calendarDbEventsInFlight.get(url)
+  if (existingRequest !== undefined) return existingRequest
+
+  const pendingRequest = request<{ items: GoogleCalendarEvent[]; calendar_ids: string[] }>(url)
+    .finally(() => {
+      if (calendarDbEventsInFlight.get(url) === pendingRequest) {
+        calendarDbEventsInFlight.delete(url)
+      }
+    })
+  calendarDbEventsInFlight.set(url, pendingRequest)
+  return pendingRequest
 }
 
 export function getCalendarDbEvent(eventId: string): Promise<CalendarEventDetail> {

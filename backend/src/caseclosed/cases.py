@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+from dataclasses import dataclass
 from datetime import date
 from email.message import EmailMessage
 from functools import cmp_to_key
@@ -475,13 +476,136 @@ def case_has_open_mail(session: DatabaseSession, case_id: str) -> bool:
     return open_mail_id is not None
 
 
+@dataclass
+class CaseListContext:
+    mail_counts: dict[str, int]
+    open_tasks: dict[str, list[Task]]
+    preview_tasks: dict[str, list[Task]]
+    open_mail_case_ids: set[str]
+    next_calendar_events: dict[str, dict[str, object]]
+
+
+def load_case_list_context(
+    session: DatabaseSession,
+    cases: list[Case],
+) -> CaseListContext:
+    case_ids = [case.id for case in cases]
+    if not case_ids:
+        return CaseListContext({}, {}, {}, set(), {})
+
+    today = jst_iso()[:10]
+    open_tasks: dict[str, list[Task]] = {}
+    preview_tasks: dict[str, list[Task]] = {}
+    tasks = session.scalars(
+        select(Task)
+        .where(Task.case_id.in_(case_ids))
+        .where(Task.deleted_at.is_(None))
+        .where(Task.status.in_(OPEN_TASK_STATUSES))
+    ).all()
+    for task in tasks:
+        if task_is_actionable_for_case(task, today):
+            open_tasks.setdefault(task.case_id, []).append(task)
+        elif task.status == "not_started":
+            preview_tasks.setdefault(task.case_id, []).append(task)
+    for task_group in list(open_tasks.values()) + list(preview_tasks.values()):
+        task_group.sort(key=cmp_to_key(compare_case_tasks))
+
+    effective_importance = func.coalesce(
+        MailUserState.user_importance,
+        MailAutoState.effective_importance,
+        "unclassified",
+    )
+    open_mail_case_ids = set(
+        session.scalars(
+            select(CaseMailLink.case_id)
+            .outerjoin(MailUserState, MailUserState.message_id == CaseMailLink.message_id)
+            .outerjoin(MailAutoState, MailAutoState.message_id == CaseMailLink.message_id)
+            .where(CaseMailLink.case_id.in_(case_ids))
+            .where(or_(MailUserState.id.is_(None), MailUserState.processed_status != "processed"))
+            .where(effective_importance.notin_(["low", "skip"]))
+            .distinct()
+        ).all()
+    )
+
+    mail_counts = {
+        case_id: int(mail_count)
+        for case_id, mail_count in session.execute(
+            select(
+                CaseMailLink.case_id,
+                func.count(func.distinct(GmailMessage.thread_id)),
+            )
+            .join(GmailMessage, GmailMessage.id == CaseMailLink.message_id)
+            .where(CaseMailLink.case_id.in_(case_ids))
+            .group_by(CaseMailLink.case_id)
+        )
+    }
+
+    now = jst_iso()
+    ranked_events = (
+        select(
+            CalendarEventLink.linked_id.label("case_id"),
+            CalendarEventLink.calendar_event_id.label("event_id"),
+            func.row_number()
+            .over(
+                partition_by=CalendarEventLink.linked_id,
+                order_by=(
+                    CalendarEvent.start_at.asc(),
+                    CalendarEvent.summary.asc(),
+                    CalendarEvent.id.asc(),
+                ),
+            )
+            .label("event_rank"),
+        )
+        .join(CalendarEvent, CalendarEvent.id == CalendarEventLink.calendar_event_id)
+        .where(CalendarEventLink.linked_type == "case")
+        .where(CalendarEventLink.linked_id.in_(case_ids))
+        .where(CalendarEvent.sync_status != "missing_from_google")
+        .where(CalendarEvent.sync_status != "cancelled")
+        .where(
+            (CalendarEvent.google_status.is_(None))
+            | (CalendarEvent.google_status != "cancelled"),
+        )
+        .where(CalendarEvent.end_at > now)
+        .subquery()
+    )
+    next_calendar_events = {
+        case_id: {
+            "id": event.id,
+            "title": event.summary,
+            "starts_at": event.start_at,
+            "ends_at": event.end_at,
+            "all_day": bool(event.all_day),
+            "location": event.location,
+        }
+        for case_id, event in session.execute(
+            select(ranked_events.c.case_id, CalendarEvent)
+            .join(CalendarEvent, CalendarEvent.id == ranked_events.c.event_id)
+            .where(ranked_events.c.event_rank == 1)
+        )
+    }
+    return CaseListContext(
+        mail_counts=mail_counts,
+        open_tasks=open_tasks,
+        preview_tasks=preview_tasks,
+        open_mail_case_ids=open_mail_case_ids,
+        next_calendar_events=next_calendar_events,
+    )
+
+
 def case_effective_ball_status(
     case: Case,
     session: DatabaseSession | None = None,
+    list_context: CaseListContext | None = None,
 ) -> str:
     if case.closed_at is not None or case.archived_at is not None:
         return "none"
     if not is_case_open_by_date(case):
+        return "none"
+    if list_context is not None:
+        if list_context.open_tasks.get(case.id):
+            return "user"
+        if case.id in list_context.open_mail_case_ids:
+            return "user"
         return "none"
     if session is None:
         return case.ball_status
@@ -492,13 +616,33 @@ def case_effective_ball_status(
     return "none"
 
 
-def case_data(case: Case, session: DatabaseSession | None = None) -> dict[str, object]:
+def case_data(
+    case: Case,
+    session: DatabaseSession | None = None,
+    list_context: CaseListContext | None = None,
+) -> dict[str, object]:
     mail_count = 0
     open_task_count = 0
     overdue_task_count = 0
     next_task: dict[str, object] | None = None
     next_calendar_event: dict[str, object] | None = None
-    if session is not None:
+    if list_context is not None:
+        mail_count = list_context.mail_counts.get(case.id, 0)
+        open_tasks = list_context.open_tasks.get(case.id, [])
+        open_task_count = len(open_tasks)
+        now = jst_iso()
+        overdue_task_count = sum(
+            1 for task in open_tasks if task.due_at is not None and task.due_at < now
+        )
+        next_case_task = (
+            open_tasks[0]
+            if open_tasks
+            else next(iter(list_context.preview_tasks.get(case.id, [])), None)
+        )
+        if next_case_task is not None:
+            next_task = case_task_data(next_case_task)
+        next_calendar_event = list_context.next_calendar_events.get(case.id)
+    elif session is not None:
         mail_count = session.scalar(
             select(func.count(func.distinct(GmailMessage.thread_id)))
             .select_from(CaseMailLink)
@@ -524,7 +668,7 @@ def case_data(case: Case, session: DatabaseSession | None = None) -> dict[str, o
         "open_when_text": case.open_when_text,
         "closed_when_text": case.closed_when_text,
         "progress_status": case.progress_status,
-        "ball_status": case_effective_ball_status(case, session),
+        "ball_status": case_effective_ball_status(case, session, list_context),
         "closed_at": case.closed_at,
         "archived_at": case.archived_at,
         "is_system_case": bool(case.is_system_case),
@@ -1605,11 +1749,28 @@ def list_cases(
         cases = [case for case in cases if is_case_open_by_date(case, today)]
     if status == "not_started":
         cases = [case for case in cases if not is_case_open_by_date(case, today)]
+    list_context = load_case_list_context(session, cases)
     if should_filter_ball == "user":
-        cases = [case for case in cases if case_effective_ball_status(case, session) == "user"]
+        cases = [
+            case
+            for case in cases
+            if case_effective_ball_status(case, list_context=list_context) == "user"
+        ]
     elif should_filter_ball == "waiting":
-        cases = [case for case in cases if case_effective_ball_status(case, session) != "user"]
-    return {"ok": True, "data": {"items": [case_data(case, session) for case in cases]}}
+        cases = [
+            case
+            for case in cases
+            if case_effective_ball_status(case, list_context=list_context) != "user"
+        ]
+    return {
+        "ok": True,
+        "data": {
+            "items": [
+                case_data(case, list_context=list_context)
+                for case in cases
+            ]
+        },
+    }
 
 
 @router.post("/prefill")

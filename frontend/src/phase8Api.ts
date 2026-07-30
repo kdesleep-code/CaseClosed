@@ -184,6 +184,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return payload.data
 }
 
+const listTasksInFlight = new Map<string, Promise<TaskItem[]>>()
+
 export async function listTasks(params: {
   case_id?: string | null
   status?: string
@@ -203,8 +205,19 @@ export async function listTasks(params: {
   if (params.limit !== undefined) searchParams.set('limit', String(params.limit))
 
   const query = searchParams.toString()
-  const data = await request<ListResponse<TaskItem>>(`/api/v1/tasks${query === '' ? '' : `?${query}`}`)
-  return data.items
+  const url = '/api/v1/tasks' + (query === '' ? '' : '?' + query)
+  const existingRequest = listTasksInFlight.get(url)
+  if (existingRequest !== undefined) return existingRequest
+
+  const pendingRequest = request<ListResponse<TaskItem>>(url)
+    .then((data) => data.items)
+    .finally(() => {
+      if (listTasksInFlight.get(url) === pendingRequest) {
+        listTasksInFlight.delete(url)
+      }
+    })
+  listTasksInFlight.set(url, pendingRequest)
+  return pendingRequest
 }
 
 export async function createTask(payload: TaskCreatePayload): Promise<TaskItem> {

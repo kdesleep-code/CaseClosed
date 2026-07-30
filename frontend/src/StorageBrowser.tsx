@@ -13,6 +13,7 @@ import {
   deleteStorageDirectory,
   deleteStorageObject,
   listStorageDirectories,
+  listStorageExtensions,
   listStorageObjects,
   moveStorageDirectoryToDirectory,
   moveStorageObjectToDirectory,
@@ -400,7 +401,15 @@ export default function StorageBrowser({
   const [deleteBusyId, setDeleteBusyId] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const isSearchMode = searchQuery.trim() !== '' || extensionFilter !== null
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState(searchQuery)
+  const isSearchMode = debouncedSearchQuery.trim() !== '' || extensionFilter !== null
+
+  useEffect(() => {
+    const timerId = window.setTimeout(() => {
+      setDebouncedSearchQuery(searchQuery)
+    }, 250)
+    return () => window.clearTimeout(timerId)
+  }, [searchQuery])
 
   useEffect(() => {
     setInternalDirectoryId(controlledDirectoryId ?? rootDirectoryId)
@@ -411,7 +420,7 @@ export default function StorageBrowser({
     if (isSearchMode) {
       const [searchResult, nextDirectories] = await Promise.all([
         searchStorageObjects({
-          query: searchQuery,
+          query: debouncedSearchQuery,
           directory_id: currentDirectoryId,
           recursive: true,
           sort: sortMode,
@@ -434,19 +443,15 @@ export default function StorageBrowser({
     const [nextObjects, nextDirectories, nextExtensions] = await Promise.all([
       objectsRequest,
       listStorageDirectories(currentDirectoryId),
-      searchStorageObjects({
-        query: searchQuery,
+      listStorageExtensions({
         directory_id: currentDirectoryId,
         recursive: true,
-        sort: sortMode,
-        extension: null,
-        limit: 1,
       }),
     ])
     setObjects(nextObjects)
     setDirectories(nextDirectories.items)
     setBreadcrumbs(nextDirectories.breadcrumbs)
-    onAvailableExtensionsChange?.(nextExtensions.extensions)
+    onAvailableExtensionsChange?.(nextExtensions)
   }
 
   useEffect(() => {
@@ -462,7 +467,7 @@ export default function StorageBrowser({
     return () => {
       isMounted = false
     }
-  }, [currentDirectoryId, searchQuery, sortMode, extensionFilter, caseId, rootListMode])
+  }, [currentDirectoryId, debouncedSearchQuery, sortMode, extensionFilter, caseId, rootListMode])
 
   useEffect(() => {
     if (contextMenu === null) return undefined

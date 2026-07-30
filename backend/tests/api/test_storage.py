@@ -1051,8 +1051,14 @@ def test_storage_directories_scope_list_and_uploads(
     root_items = root_directories.json()["data"]["items"]
     assert directory["id"] in [item["id"] for item in root_items]
     assert "storage_directory_bookshelf" not in [item["id"] for item in root_items]
-    case_directories = [item for item in root_items if item["directory_kind"] == "case"]
-    assert any(item["case_id"] == "case_system_inbox" for item in case_directories)
+    unclassified_case_directories = client.get(
+        "/api/v1/storage/directories?parent_id=storage_directory_case_genre_none"
+    )
+    assert unclassified_case_directories.status_code == 200
+    assert any(
+        item["case_id"] == "case_system_inbox"
+        for item in unclassified_case_directories.json()["data"]["items"]
+    )
 
     child_directories = client.get(
         f"/api/v1/storage/directories?parent_id={directory['id']}"
@@ -1565,6 +1571,12 @@ def test_storage_object_search_uses_recursive_scope_source_subject_and_extension
     assert [item["id"] for item in pdf_response.json()["data"]["items"]] == [
         pdf_object["id"]
     ]
+
+    extensions_response = client.get(
+        "/api/v1/storage/extensions?directory_id=" + parent["id"]
+    )
+    assert extensions_response.status_code == 200
+    assert extensions_response.json()["data"]["extensions"] == ["csv", "pdf"]
 
     root_response = client.get("/api/v1/storage/search/objects?sort=name")
     assert root_response.status_code == 200

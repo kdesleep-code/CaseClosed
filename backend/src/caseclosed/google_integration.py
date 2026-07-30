@@ -849,10 +849,6 @@ def calendar_db_events(
         statement.order_by(CalendarEvent.start_at.asc(), CalendarEvent.summary.asc())
     ).all()
     events = deduplicated_calendar_events(events)
-    now = jst_iso()
-    for event in events:
-        inherit_calendar_event_links_from_recurring_master(session, event=event, now=now)
-    session.commit()
     return {
         "ok": True,
         "data": {

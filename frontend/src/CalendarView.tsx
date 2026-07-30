@@ -413,15 +413,13 @@ function CalendarWeekMeasuredTitle({
         '--calendar-event-title-line-clamp': String(lineClamp),
       } as CSSProperties
       setStyle(nextStyle)
-      void updateCalendarDbEventTitleFit(eventId, {
+      persistCalendarTitleFit(eventId, {
         title,
         font_size_px: selected.fontSizePx,
         line_height: selected.lineHeight,
         line_clamp: lineClamp,
         measured_width: width,
         measured_height: parentElement.clientHeight,
-      }).catch(() => {
-        // Display measurement is a performance hint. Ignore persistence failures.
       })
     })
   }, [eventId, title])
@@ -529,6 +527,63 @@ function initialSelectedCalendarIds() {
   }
   return ['primary']
 }
+
+type CalendarSourceSnapshot = {
+  status: Awaited<ReturnType<typeof getGoogleGmailStatus>>
+  calendarItems: GoogleCalendarListItem[]
+}
+
+const CALENDAR_SOURCE_CACHE_MILLISECONDS = 60_000
+let calendarSourceCache: { value: CalendarSourceSnapshot; expiresAt: number } | null = null
+let calendarSourceInFlight: Promise<CalendarSourceSnapshot> | null = null
+const persistedCalendarTitleFits = new Map<string, string>()
+
+function loadCalendarSources(): Promise<CalendarSourceSnapshot> {
+  if (calendarSourceCache !== null && calendarSourceCache.expiresAt > Date.now()) {
+    return Promise.resolve(calendarSourceCache.value)
+  }
+  if (calendarSourceInFlight !== null) return calendarSourceInFlight
+
+  const pendingRequest = getGoogleGmailStatus()
+    .then(async (status) => ({
+      status,
+      calendarItems:
+        status.connected === true && status.calendar_read_enabled === true
+          ? await listGoogleCalendars()
+          : [],
+    }))
+    .then((value) => {
+      calendarSourceCache = {
+        value,
+        expiresAt: Date.now() + CALENDAR_SOURCE_CACHE_MILLISECONDS,
+      }
+      return value
+    })
+    .finally(() => {
+      if (calendarSourceInFlight === pendingRequest) calendarSourceInFlight = null
+    })
+  calendarSourceInFlight = pendingRequest
+  return pendingRequest
+}
+
+function invalidateCalendarSourceCache() {
+  calendarSourceCache = null
+}
+
+function persistCalendarTitleFit(
+  eventId: string,
+  payload: Parameters<typeof updateCalendarDbEventTitleFit>[1],
+) {
+  const signature = JSON.stringify(payload)
+  if (persistedCalendarTitleFits.get(eventId) === signature) return
+  persistedCalendarTitleFits.set(eventId, signature)
+  void updateCalendarDbEventTitleFit(eventId, payload).catch(() => {
+    if (persistedCalendarTitleFits.get(eventId) === signature) {
+      persistedCalendarTitleFits.delete(eventId)
+    }
+  })
+}
+
 
 function CalendarView() {
   const today = useMemo(() => jstDateToday(), [])
@@ -729,7 +784,7 @@ function CalendarView() {
     setError(null)
     setIsLoading(true)
     try {
-      const status = await getGoogleGmailStatus()
+      const { status, calendarItems } = await loadCalendarSources()
       setCanRead(status.calendar_read_enabled === true)
       setLastCalendarSyncAt(status.calendar_auto_sync.last_success_at)
       setCalendarAutoSync(status.calendar_auto_sync)
@@ -742,7 +797,6 @@ function CalendarView() {
         )
         return
       }
-      const calendarItems = await listGoogleCalendars()
       setCalendars(calendarItems)
       const validIds = new Set(calendarItems.map((calendar) => calendar.id))
       const primaryCalendarId = calendarItems.find((calendar) => calendar.primary)?.id ?? 'primary'
@@ -801,6 +855,7 @@ function CalendarView() {
           updated: String(result.updated_count),
         }),
       )
+      invalidateCalendarSourceCache()
       await loadMonthEvents()
       setLastCalendarSyncAt(syncedAt)
       setCalendarAutoSync((current) =>
@@ -957,6 +1012,7 @@ function CalendarView() {
         month_count: calendarAutoSync.month_count,
       })
       setCalendarAutoSync(settings)
+      invalidateCalendarSourceCache()
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : t('app.requestFailed'))
     }

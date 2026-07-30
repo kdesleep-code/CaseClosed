@@ -143,6 +143,20 @@ function addDateDays(value: string, days: number) {
   ).padStart(2, '0')}`
 }
 
+export function endDateAfterStartDateChange(
+  previousStartDate: string,
+  nextStartDate: string,
+  currentEndDate: string,
+) {
+  if (nextStartDate.trim() === '') return currentEndDate
+  if (previousStartDate.trim() === '' || currentEndDate.trim() === '') return nextStartDate
+  const previousStart = new Date(previousStartDate + 'T00:00:00Z').getTime()
+  const nextStart = new Date(nextStartDate + 'T00:00:00Z').getTime()
+  if (!Number.isFinite(previousStart) || !Number.isFinite(nextStart)) return nextStartDate
+  const dayOffset = Math.round((nextStart - previousStart) / (24 * 60 * 60 * 1000))
+  return addDateDays(currentEndDate, dayOffset)
+}
+
 function firstWeeklyRecurrenceDate(startDate: string, weekdays: string[]) {
   if (weekdays.length === 0) return startDate
   const currentWeekday = numericWeekdayForDate(startDate)
@@ -975,10 +989,11 @@ export default function CalendarNewEventView() {
                         <input
                           disabled={isCreating}
                           onChange={(event) => {
-                            setStartDate(event.target.value)
-                            if (endDate.trim() === '' || endDate < event.target.value) {
-                              setEndDate(event.target.value)
-                            }
+                            const nextStartDate = event.target.value
+                            setEndDate(
+                              endDateAfterStartDateChange(startDate, nextStartDate, endDate),
+                            )
+                            setStartDate(nextStartDate)
                           }}
                           type="date"
                           value={startDate}

@@ -31,6 +31,7 @@ from caseclosed.db.runtime import ensure_task_storage_directory
 from caseclosed.db.runtime import get_session
 from caseclosed.db.runtime import jst_iso
 from caseclosed.db.runtime import jst_now
+from caseclosed.db.runtime import task_storage_directory_id
 from caseclosed.services.llm_provider import FUNCTION_TYPE_TASK_PREFILL_GENERATION
 from caseclosed.services.llm_provider import FUNCTION_TYPE_HANDOVER_TASK_BATCH_GENERATION
 from caseclosed.services.llm_provider import OpenAIProviderError
@@ -147,12 +148,23 @@ def task_data(
     include_links: bool = False,
     include_progress_entries: bool = False,
     include_subtasks: bool = False,
+    case_cache: dict[str, Case] | None = None,
+    directory_cache: dict[str, StorageDirectory] | None = None,
+    ensure_storage: bool = True,
 ) -> dict[str, object]:
-    case = session.get(Case, task.case_id)
-    if case is not None and task.deleted_at is None:
+    case = (
+        case_cache.get(task.case_id)
+        if case_cache is not None
+        else session.get(Case, task.case_id)
+    )
+    if ensure_storage and case is not None and task.deleted_at is None:
         directory = ensure_task_storage_directory(session, task)
     elif task.storage_directory_id is not None:
-        directory = session.get(StorageDirectory, task.storage_directory_id)
+        directory = (
+            directory_cache.get(task.storage_directory_id)
+            if directory_cache is not None
+            else session.get(StorageDirectory, task.storage_directory_id)
+        )
     else:
         directory = None
     data: dict[str, object] = {
@@ -161,7 +173,16 @@ def task_data(
         "case_name": case.name if case is not None else None,
         "case_open_when_date": case.open_when_date if case is not None else None,
         "case_archived_at": case.archived_at if case is not None else None,
-        "storage_directory_id": directory.id if directory is not None else task.storage_directory_id,
+        "storage_directory_id": (
+            directory.id
+            if directory is not None
+            else task.storage_directory_id
+            or (
+                task_storage_directory_id(task.id)
+                if not ensure_storage and case is not None and task.deleted_at is None
+                else None
+            )
+        ),
         "parent_task_id": task.parent_task_id,
         "title": task.title,
         "description": task.description,
@@ -1047,9 +1068,24 @@ def activate_started_tasks(session: DatabaseSession) -> None:
         .where(Task.deleted_at.is_(None))
         .where(Task.status == "not_started")
     ).all()
+    case_ids = {task.case_id for task in tasks}
+    cases_by_id = (
+        {
+            case.id: case
+            for case in session.scalars(
+                select(Case).where(Case.id.in_(case_ids))
+            ).all()
+        }
+        if case_ids
+        else {}
+    )
+    today = jst_now().date().isoformat()
     now: str | None = None
     for task in tasks:
-        if task_is_waiting_to_start(session, task):
+        case = cases_by_id.get(task.case_id)
+        if not case_has_opened(case):
+            continue
+        if task.start_at is not None and task.start_at[:10] > today:
             continue
         if now is None:
             now = jst_iso()
@@ -1282,7 +1318,34 @@ def list_tasks(
         statement = statement.where(Task.due_at.is_not(None)).where(Task.due_at <= week_end.isoformat())
     statement = statement.order_by(Task.due_at.is_(None), Task.due_at.asc(), Task.updated_at.desc())
     tasks = session.scalars(statement.limit(safe_limit)).all()
-    items = [task_data(task, session) for task in tasks]
+    case_ids = {task.case_id for task in tasks}
+    cases_by_id = {
+        case.id: case
+        for case in session.scalars(
+            select(Case).where(Case.id.in_(case_ids))
+        ).all()
+    } if case_ids else {}
+    directory_ids = {
+        task.storage_directory_id
+        for task in tasks
+        if task.storage_directory_id is not None
+    }
+    directories_by_id = {
+        directory.id: directory
+        for directory in session.scalars(
+            select(StorageDirectory).where(StorageDirectory.id.in_(directory_ids))
+        ).all()
+    } if directory_ids else {}
+    items = [
+        task_data(
+            task,
+            session,
+            case_cache=cases_by_id,
+            directory_cache=directories_by_id,
+            ensure_storage=False,
+        )
+        for task in tasks
+    ]
     session.commit()
     return {
         "ok": True,

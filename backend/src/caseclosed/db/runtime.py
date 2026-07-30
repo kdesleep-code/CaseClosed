@@ -117,6 +117,54 @@ def bootstrap_database() -> None:
 def ensure_runtime_schema() -> None:
     inspector = inspect(engine)
     table_names = inspector.get_table_names()
+    if "storage_objects" in table_names:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_storage_objects_list_directory
+                    ON storage_objects (scope, status, directory_id, created_at)
+                    """
+                )
+            )
+    if "storage_directories" in table_names:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_storage_directories_children
+                    ON storage_directories (parent_id, status, directory_kind, name)
+                    """
+                )
+            )
+    if "tasks" in table_names:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_tasks_list_status_due
+                    ON tasks (deleted_at, status, due_at, updated_at)
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_tasks_case_id
+                    ON tasks (case_id)
+                    """
+                )
+            )
+    if "calendar_events" in table_names:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_calendar_events_source_range
+                    ON calendar_events (external_calendar_id, start_at, end_at)
+                    """
+                )
+            )
     if "cases" in table_names:
         case_columns = {column["name"] for column in inspector.get_columns("cases")}
         with engine.begin() as connection:

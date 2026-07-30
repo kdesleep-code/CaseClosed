@@ -570,17 +570,15 @@ function StorageObjectDetailView({ storageObjectId }: { storageObjectId: string 
     setIsLoading(true)
     setError(null)
     setSelectedVersionId('current')
-    getStorageObject(storageObjectId)
-      .then(async (nextObject) => {
+    Promise.all([
+      getStorageObject(storageObjectId),
+      listStorageObjectVersions(storageObjectId).catch(() => []),
+    ])
+      .then(([nextObject, nextVersions]) => {
         if (!isMounted) return
         setObject(nextObject)
         setRenameDraft(nextObject.original_filename ?? nextObject.id)
-        try {
-          const nextVersions = await listStorageObjectVersions(storageObjectId)
-          if (isMounted) setVersions(nextVersions)
-        } catch {
-          if (isMounted) setVersions([])
-        }
+        setVersions(nextVersions)
       })
       .catch((requestError) => {
         if (isMounted) setError(describeError(requestError))
