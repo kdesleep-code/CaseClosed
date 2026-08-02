@@ -14,6 +14,8 @@ from caseclosed.db.models import Job
 from caseclosed.db.models import LlmRun
 from caseclosed.db.models import MailAutoState
 from caseclosed.services.llm_provider import LlmProvider
+from caseclosed.services.llm_provider import llm_applied_instruction_rule_ids
+from caseclosed.services.llm_provider import with_llm_personalization
 from caseclosed.services.llm_provider import build_mail_importance_provider
 from caseclosed.services.mail_summary import SUMMARY_TARGET_IMPORTANCE
 from caseclosed.services.mail_summary import enqueue_mail_summary_job
@@ -139,9 +141,7 @@ def handle_mail_importance_classification(
             }
 
         profile_context = read_mail_importance_profile_context(session)
-        provider_response = llm_provider.complete_json(
-            function_type=FUNCTION_TYPE,
-            input_payload={
+        input_payload = {
                 "message_id": message.id,
                 "gmail_message_id": message.gmail_message_id,
                 "subject": message.subject,
@@ -149,7 +149,13 @@ def handle_mail_importance_classification(
                 "body_text": message.body_text,
                 "additional_instruction": llm_instruction,
                 "profile_context": profile_context,
-            },
+        }
+        provider_input_payload = with_llm_personalization(
+            session, FUNCTION_TYPE, input_payload
+        )
+        provider_response = llm_provider.complete_json(
+            function_type=FUNCTION_TYPE,
+            input_payload=provider_input_payload,
         )
         suggested_importance = str(provider_response.output["importance"])
         input_source = {
@@ -187,7 +193,10 @@ def handle_mail_importance_classification(
                 ensure_ascii=True,
                 sort_keys=True,
             ),
-            applied_instruction_rule_ids_json=json.dumps([], ensure_ascii=True),
+            applied_instruction_rule_ids_json=json.dumps(
+                llm_applied_instruction_rule_ids(provider_input_payload),
+                ensure_ascii=True,
+            ),
             output_json=json.dumps(
                 provider_response.output,
                 ensure_ascii=True,

@@ -5,6 +5,7 @@ import re
 from uuid import uuid4
 
 from sqlalchemy import select
+from sqlalchemy.orm import Session as DatabaseSession
 
 from caseclosed.db import runtime
 from caseclosed.db.models import GmailMessage
@@ -15,6 +16,8 @@ from caseclosed.db.models import MailAutoState
 from caseclosed.db.models import MailThreadSummary
 from caseclosed.services.llm_provider import LlmProvider
 from caseclosed.services.llm_provider import LlmProviderResponse
+from caseclosed.services.llm_provider import llm_applied_instruction_rule_ids
+from caseclosed.services.llm_provider import with_llm_personalization
 from caseclosed.services.llm_provider import build_mail_thread_summary_provider
 from caseclosed.services.mail_ingestion import message_is_sent
 
@@ -157,6 +160,7 @@ def handle_mail_thread_summary(
         ]
         provider_response, chunk_count = complete_thread_summary(
             llm_provider,
+            session=session,
             thread_id=thread.id,
             gmail_thread_id=thread.gmail_thread_id,
             subject=thread.subject_snapshot,
@@ -210,7 +214,12 @@ def handle_mail_thread_summary(
                 ensure_ascii=True,
                 sort_keys=True,
             ),
-            applied_instruction_rule_ids_json=json.dumps([], ensure_ascii=True),
+            applied_instruction_rule_ids_json=json.dumps(
+                llm_applied_instruction_rule_ids(
+                    with_llm_personalization(session, FUNCTION_TYPE, {})
+                ),
+                ensure_ascii=True,
+            ),
             output_json=json.dumps(output, ensure_ascii=True, sort_keys=True),
             output_text_preview=provider_response.output_preview,
             status="succeeded",
@@ -378,6 +387,7 @@ def looks_like_quoted_reply_intro(line: str) -> bool:
 def complete_thread_summary(
     provider: LlmProvider,
     *,
+    session: DatabaseSession,
     thread_id: str,
     gmail_thread_id: str,
     subject: str | None,
@@ -398,7 +408,9 @@ def complete_thread_summary(
         return (
             provider.complete_json(
                 function_type=FUNCTION_TYPE,
-                input_payload=base_payload,
+                input_payload=with_llm_personalization(
+                    session, FUNCTION_TYPE, base_payload
+                ),
             ),
             1,
         )
@@ -421,7 +433,9 @@ def complete_thread_summary(
         )
         partial_response = provider.complete_json(
             function_type=FUNCTION_TYPE,
-            input_payload=partial_payload,
+            input_payload=with_llm_personalization(
+                session, FUNCTION_TYPE, partial_payload
+            ),
         )
         partial_responses.append(partial_response)
         partial_summaries.append(
@@ -445,7 +459,9 @@ def complete_thread_summary(
     )
     final_response = provider.complete_json(
         function_type=FUNCTION_TYPE,
-        input_payload=final_payload,
+        input_payload=with_llm_personalization(
+            session, FUNCTION_TYPE, final_payload
+        ),
     )
     return combine_thread_summary_responses(final_response, partial_responses), len(chunks)
 

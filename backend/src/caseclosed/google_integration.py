@@ -60,6 +60,8 @@ from caseclosed.services.mail_ingestion import MockMailInput
 from caseclosed.services.mail_ingestion import ingest_mock_mail
 from caseclosed.services.llm_provider import FUNCTION_TYPE_CALENDAR_EVENT_PREFILL_GENERATION
 from caseclosed.services.llm_provider import OpenAIProviderError
+from caseclosed.services.llm_provider import llm_applied_instruction_rule_ids
+from caseclosed.services.llm_provider import with_llm_personalization
 from caseclosed.services.llm_provider import build_calendar_event_prefill_provider
 from caseclosed.services.mail_thread_summary import split_quoted_reply_sections
 from caseclosed.settings import get_google_gmail_scopes
@@ -3471,11 +3473,14 @@ def run_calendar_event_prefill(
     input_payload: dict[str, object],
 ) -> tuple[dict[str, object], str]:
     provider = build_calendar_event_prefill_provider()
+    provider_input_payload = with_llm_personalization(
+        session, FUNCTION_TYPE_CALENDAR_EVENT_PREFILL_GENERATION, input_payload
+    )
     now = jst_iso()
     try:
         provider_response = provider.complete_json(
             function_type=FUNCTION_TYPE_CALENDAR_EVENT_PREFILL_GENERATION,
-            input_payload=input_payload,
+            input_payload=provider_input_payload,
         )
         status = "succeeded"
         error_type = None
@@ -3496,7 +3501,10 @@ def run_calendar_event_prefill(
         input_hash=None,
         input_source_json=json.dumps(input_payload, ensure_ascii=False),
         input_diagnostic_json=None,
-        applied_instruction_rule_ids_json=None,
+        applied_instruction_rule_ids_json=json.dumps(
+            llm_applied_instruction_rule_ids(provider_input_payload),
+            ensure_ascii=True,
+        ),
         output_json=json.dumps(output, ensure_ascii=False) if output else None,
         output_text_preview=provider_response.output_preview if provider_response else None,
         status=status,

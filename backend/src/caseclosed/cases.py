@@ -61,6 +61,8 @@ from caseclosed.email_addressing import normalize_email_address
 from caseclosed.services.case_mail_stakeholders import sync_all_case_stakeholders_from_linked_mail_senders
 from caseclosed.services.llm_provider import FUNCTION_TYPE_CASE_PREFILL_GENERATION
 from caseclosed.services.llm_provider import OpenAIProviderError
+from caseclosed.services.llm_provider import llm_applied_instruction_rule_ids
+from caseclosed.services.llm_provider import with_llm_personalization
 from caseclosed.services.llm_provider import build_case_current_situation_provider
 from caseclosed.services.llm_provider import build_case_prefill_provider
 from caseclosed.storage import delete_storage_object
@@ -269,11 +271,14 @@ def run_case_prefill(
     input_payload: dict[str, object],
 ) -> tuple[dict[str, object], str]:
     provider = build_case_prefill_provider()
+    provider_input_payload = with_llm_personalization(
+        session, FUNCTION_TYPE_CASE_PREFILL_GENERATION, input_payload
+    )
     now = jst_iso()
     try:
         provider_response = provider.complete_json(
             function_type=FUNCTION_TYPE_CASE_PREFILL_GENERATION,
-            input_payload=input_payload,
+            input_payload=provider_input_payload,
         )
         status = "succeeded"
         error_type = None
@@ -294,7 +299,10 @@ def run_case_prefill(
         input_hash=None,
         input_source_json=json.dumps(input_payload, ensure_ascii=False),
         input_diagnostic_json=None,
-        applied_instruction_rule_ids_json=None,
+        applied_instruction_rule_ids_json=json.dumps(
+            llm_applied_instruction_rule_ids(provider_input_payload),
+            ensure_ascii=True,
+        ),
         output_json=json.dumps(output, ensure_ascii=False) if output else None,
         output_text_preview=provider_response.output_preview if provider_response else None,
         status=status,
@@ -2298,9 +2306,12 @@ def regenerate_case_current_situation(
     now = jst_iso()
     provider = build_case_current_situation_provider()
     input_payload = case_current_situation_input_payload(session, case)
+    provider_input_payload = with_llm_personalization(
+        session, "case_current_situation_summary", input_payload
+    )
     provider_response = provider.complete_json(
         function_type="case_current_situation_summary",
-        input_payload=input_payload,
+        input_payload=provider_input_payload,
     )
     output = provider_response.output
     context_markdown = case_current_situation_markdown(output)
@@ -2341,7 +2352,10 @@ def regenerate_case_current_situation(
             ensure_ascii=True,
             sort_keys=True,
         ),
-        applied_instruction_rule_ids_json=json.dumps([], ensure_ascii=True),
+        applied_instruction_rule_ids_json=json.dumps(
+            llm_applied_instruction_rule_ids(provider_input_payload),
+            ensure_ascii=True,
+        ),
         output_json=json.dumps(output, ensure_ascii=True, sort_keys=True),
         output_text_preview=provider_response.output_preview,
         status="succeeded",
@@ -2434,9 +2448,12 @@ def generate_case_handover(
         for message, summary in mail_rows
     ]
     provider = build_case_current_situation_provider()
+    provider_input_payload = with_llm_personalization(
+        session, "case_handover_generation", input_payload
+    )
     provider_response = provider.complete_json(
         function_type="case_current_situation_summary",
-        input_payload=input_payload,
+        input_payload=provider_input_payload,
     )
     output = provider_response.output
     llm_run = LlmRun(
@@ -2454,7 +2471,10 @@ def generate_case_handover(
         input_diagnostic_json=json.dumps({
             "input_payload_size": len(json.dumps(input_payload, ensure_ascii=False)),
         }, ensure_ascii=True, sort_keys=True),
-        applied_instruction_rule_ids_json=json.dumps([], ensure_ascii=True),
+        applied_instruction_rule_ids_json=json.dumps(
+            llm_applied_instruction_rule_ids(provider_input_payload),
+            ensure_ascii=True,
+        ),
         output_json=json.dumps(output, ensure_ascii=True, sort_keys=True),
         output_text_preview=provider_response.output_preview,
         status="succeeded",

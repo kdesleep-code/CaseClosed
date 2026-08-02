@@ -11,6 +11,8 @@ from caseclosed.db.models import ContactRegistrationSuggestion
 from caseclosed.db.models import Job
 from caseclosed.db.models import LlmRun
 from caseclosed.services.llm_provider import LlmProvider
+from caseclosed.services.llm_provider import llm_applied_instruction_rule_ids
+from caseclosed.services.llm_provider import with_llm_personalization
 from caseclosed.services.llm_provider import MockContactPrefillProvider
 
 FUNCTION_TYPE = "contact_registration_prefill"
@@ -56,13 +58,17 @@ def handle_contact_registration_prefill(
                 "llm_run_id": existing_suggestion.llm_run_id,
             }
 
-        provider_response = llm_provider.complete_json(
-            function_type=FUNCTION_TYPE,
-            input_payload={
+        input_payload = {
                 "email_address_id": email_address.id,
                 "email_address": email_address_text,
                 "message_id": source_message_id,
-            },
+        }
+        provider_input_payload = with_llm_personalization(
+            session, FUNCTION_TYPE, input_payload
+        )
+        provider_response = llm_provider.complete_json(
+            function_type=FUNCTION_TYPE,
+            input_payload=provider_input_payload,
         )
         output = provider_response.output
         llm_run = LlmRun(
@@ -88,7 +94,10 @@ def handle_contact_registration_prefill(
                 ensure_ascii=True,
                 sort_keys=True,
             ),
-            applied_instruction_rule_ids_json=json.dumps([], ensure_ascii=True),
+            applied_instruction_rule_ids_json=json.dumps(
+                llm_applied_instruction_rule_ids(provider_input_payload),
+                ensure_ascii=True,
+            ),
             output_json=json.dumps(output, ensure_ascii=True, sort_keys=True),
             output_text_preview=provider_response.output_preview,
             status="succeeded",

@@ -161,6 +161,10 @@ function replyToMessageIdFromQuery() {
   return params.get('reply_to_message_id')
 }
 
+function relatedCaseIdFromQuery() {
+  return new URLSearchParams(window.location.search).get('case_id') ?? ''
+}
+
 function contactStatusRank(status: string) {
   if (status === 'active') {
     return 0
@@ -278,6 +282,9 @@ export default function ComposeMailView() {
   >([])
   const [contacts, setContacts] = useState<Contact[]>([])
   const [caseContexts, setCaseContexts] = useState<ContactSelectorCaseContext[]>([])
+  const [relatedCaseId, setRelatedCaseId] = useState(relatedCaseIdFromQuery)
+  const [relatedCaseEditing, setRelatedCaseEditing] = useState(false)
+  const [relatedCaseInput, setRelatedCaseInput] = useState('')
   const [selectedSignatureId, setSelectedSignatureId] = useState(() =>
     loadSelectedSignatureId(loadStoredSignatures()),
   )
@@ -348,6 +355,7 @@ export default function ComposeMailView() {
           autoBody: '',
         })
         setReplyToMessageId(sendRequest.reply_to_message_id)
+        setRelatedCaseId(sendRequest.case_ids?.[0] ?? '')
         setSelectedSignatureId(noneSignature.id)
         setAttachments(loadedAttachments)
         setScheduledAt(isoToLocalDateTime(sendRequest.scheduled_at))
@@ -399,12 +407,10 @@ export default function ComposeMailView() {
   useEffect(() => {
     let canceled = false
     async function loadCaseContexts() {
-      const caseLists = await Promise.all([
-        listCases('user_ball'),
-        listCases('waiting'),
-        listCases('completed'),
-      ])
-      const cases = caseLists.flat()
+      const caseLists = await Promise.all([listCases('all')])
+      const cases = Array.from(
+        new Map(caseLists.flat().map((caseItem) => [caseItem.id, caseItem])).values(),
+      )
       const stakeholders = await Promise.all(
         cases.map(async (caseItem) => ({
           case: caseItem,
@@ -646,6 +652,7 @@ export default function ComposeMailView() {
         attachments: encodedAttachments,
         reply_to_message_id: replyToMessageId,
         scheduled_at: scheduledAtIso,
+        case_ids: relatedCaseId === '' ? [] : [relatedCaseId],
       })
       setFeedback(t('mail.compose.scheduleQueued'))
       navigateTo(
@@ -656,6 +663,25 @@ export default function ComposeMailView() {
     } finally {
       setIsSending(false)
     }
+  }
+
+  function selectedRelatedCase() {
+    return caseContexts.find(({ case: caseItem }) => caseItem.id === relatedCaseId)?.case ?? null
+  }
+
+  function applyRelatedCaseInput() {
+    const normalized = relatedCaseInput.trim().toLowerCase()
+    const selected = caseContexts.find(({ case: caseItem }) =>
+      caseItem.id.toLowerCase() === normalized || caseItem.name.toLowerCase() === normalized
+    )?.case ?? null
+    if (selected === null) {
+      setError(t('mail.thread.caseAssignInvalid'))
+      return
+    }
+    setRelatedCaseId(selected.id)
+    setRelatedCaseInput(selected.name)
+    setRelatedCaseEditing(false)
+    setError(null)
   }
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -850,26 +876,6 @@ export default function ComposeMailView() {
     }
   }
 
-  async function saveLlmGenerationStandardPrompt() {
-    const prompt = llmGenerationStandardPrompt.trimEnd()
-    try {
-      const setting = await updateMailDraftGenerationStandardPrompt(
-        prompt,
-        llmGenerationLanguage,
-      )
-      setLlmGenerationStandardPrompt(setting.standard_prompt)
-      setLlmGenerationLanguage(
-        normalizeLlmGenerationLanguage(setting.generation_language, llmGenerationLanguage),
-      )
-      window.localStorage.removeItem(llmGenerationStandardPromptStorageKey)
-      setFeedback(t('mail.compose.llmGeneration.standardPromptSaved'))
-      setError(null)
-    } catch (requestError) {
-      setError(describeError(requestError))
-      setFeedback(null)
-    }
-  }
-
   async function handleLlmGenerationLanguageChange(language: LlmGenerationLanguage) {
     setLlmGenerationLanguage(language)
     try {
@@ -1006,8 +1012,77 @@ export default function ComposeMailView() {
                 />
               </label>
 
+              <div className="mail-thread-related-badge-row compose-related-case-row">
+                <div className="mail-thread-case-links">
+                  <span>{t("mail.compose.relatedCase")}</span>
+                  <div className="mail-thread-case-badges">
+                    {selectedRelatedCase() === null ? (
+                      <span className="mail-thread-case-empty">
+                        {t("mail.compose.relatedCaseNone")}
+                      </span>
+                    ) : (
+                      <span className="mail-thread-case-badge-wrap">
+                        <span className={`mail-thread-case-badge${relatedCaseEditing ? " mail-thread-case-badge-editing" : ""}`}>
+                          {selectedRelatedCase()?.name}
+                        </span>
+                        {relatedCaseEditing && (
+                          <button
+                            aria-label={t("mail.thread.caseUnassign", { name: selectedRelatedCase()?.name ?? "" })}
+                            className="mail-thread-case-badge-remove"
+                            onClick={() => {
+                              setRelatedCaseId("")
+                              setRelatedCaseInput("")
+                            }}
+                            type="button"
+                          >×</button>
+                        )}
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    aria-expanded={relatedCaseEditing}
+                    className="mail-thread-case-settings"
+                    onClick={() => {
+                      setRelatedCaseEditing((current) => !current)
+                      setRelatedCaseInput(selectedRelatedCase()?.name ?? "")
+                    }}
+                    title={t("mail.thread.caseAssignSettings")}
+                    type="button"
+                  >
+                    <img alt="" aria-hidden="true" src={settingsGearIconUrl} />
+                  </button>
+                </div>
+              </div>
+              {relatedCaseEditing && (
+                <div className="mail-thread-case-editor compose-related-case-editor">
+                  <div className="mail-thread-case-editor-input">
+                    <label>{t("mail.thread.caseAssignInput")}</label>
+                    <SuggestInput
+                      ariaLabel={t("mail.thread.caseAssignInput")}
+                      autoComplete="off"
+                      maxItems={1}
+                      onChange={setRelatedCaseInput}
+                      options={caseContexts.map(({ case: caseItem }) => ({
+                        key: caseItem.id,
+                        value: caseItem.name,
+                        label: caseItem.name,
+                        badgeLabel: caseItem.name,
+                      }))}
+                      placeholder={t("mail.thread.caseAssignPlaceholder")}
+                      value={relatedCaseInput}
+                    />
+                    <button
+                      disabled={relatedCaseInput.trim() === ""}
+                      onClick={applyRelatedCaseInput}
+                      type="button"
+                    >
+                      {t("common.ok")}
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <label className="compose-field compose-body-field">
-                <span className="visually-hidden">{t('mail.compose.body')}</span>
                 <textarea
                   aria-label={t('mail.compose.body')}
                   onChange={(event) => updateField('body', event.target.value)}
@@ -1248,24 +1323,10 @@ export default function ComposeMailView() {
               {showLlmGenerationSettings && (
                 <div className="compose-tool-settings">
                   <h2>{t('mail.compose.llmGeneration.settingsHeading')}</h2>
-                  <label className="compose-field">
-                    <span>{t('mail.compose.llmGeneration.standardPrompt')}</span>
-                    <textarea
-                      onChange={(event) =>
-                        setLlmGenerationStandardPrompt(event.target.value)
-                      }
-                      value={llmGenerationStandardPrompt}
-                    />
-                  </label>
-                  <button
-                    className="compose-tool-button"
-                    onClick={() => {
-                      void saveLlmGenerationStandardPrompt()
-                    }}
-                    type="button"
-                  >
-                    {t('mail.compose.llmGeneration.saveStandardPrompt')}
-                  </button>
+                  <p>{t("mail.compose.llmGeneration.settingsMoved")}</p>
+                  <a className="compose-tool-button" href="/settings?tab=llm">
+                    {t("mail.compose.llmGeneration.openLlmSettings")}
+                  </a>
                 </div>
               )}
             </section>

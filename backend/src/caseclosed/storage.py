@@ -75,6 +75,8 @@ from caseclosed.db.runtime import jst_iso
 from caseclosed.settings import get_storage_root
 from caseclosed.services.llm_provider import FUNCTION_TYPE_FILE_SUMMARY
 from caseclosed.services.llm_provider import OpenAIProviderError
+from caseclosed.services.llm_provider import llm_applied_instruction_rule_ids
+from caseclosed.services.llm_provider import with_llm_personalization
 from caseclosed.services.llm_provider import build_file_summary_provider
 
 router = APIRouter(prefix="/api/v1/storage", tags=["storage"])
@@ -3866,10 +3868,13 @@ def ensure_storage_object_llm_digest(
         "source_text": "" if incremental_payload is not None else source["source_text"],
         "incremental_source": incremental_payload,
     }
+    provider_input_payload = with_llm_personalization(
+        session, FUNCTION_TYPE_FILE_SUMMARY, input_payload
+    )
     try:
         provider_response = provider.complete_json(
             function_type=FUNCTION_TYPE_FILE_SUMMARY,
-            input_payload=input_payload,
+            input_payload=provider_input_payload,
         )
     except OpenAIProviderError as error:
         raise json_error(
@@ -3926,7 +3931,10 @@ def ensure_storage_object_llm_digest(
             ensure_ascii=True,
             sort_keys=True,
         ),
-        applied_instruction_rule_ids_json=json.dumps([], ensure_ascii=True),
+        applied_instruction_rule_ids_json=json.dumps(
+            llm_applied_instruction_rule_ids(provider_input_payload),
+            ensure_ascii=True,
+        ),
         output_json=json.dumps(output, ensure_ascii=True, sort_keys=True),
         output_text_preview=provider_response.output_preview,
         status="succeeded",

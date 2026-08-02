@@ -40,6 +40,7 @@ from caseclosed.db.models import GmailMessageAttachment
 from caseclosed.db.models import GmailThread
 from caseclosed.db.models import Job
 from caseclosed.db.models import LlmRun
+from caseclosed.db.models import LlmInstructionRule
 from caseclosed.db.models import MailAutoState
 from caseclosed.db.models import MailLlmBlockFilter
 from caseclosed.db.models import MailSendRequest
@@ -70,6 +71,7 @@ from caseclosed.services.mail_attachment_fetch import (
     enqueue_mail_attachment_fetch_job,
 )
 from caseclosed.services.llm_provider import LLM_FUNCTION_TYPES
+from caseclosed.services.llm_provider import LLM_SETTINGS_RULE_ID_PREFIX
 from caseclosed.services.llm_provider import (
     FUNCTION_TYPE_NEW_MAIL_DRAFT_GENERATION,
 )
@@ -78,6 +80,8 @@ from caseclosed.services.llm_provider import OpenAIProviderError
 from caseclosed.services.llm_provider import build_mail_draft_generation_provider
 from caseclosed.services.llm_provider import list_llm_model_profiles
 from caseclosed.services.llm_provider import llm_function_config_data
+from caseclosed.services.llm_provider import llm_applied_instruction_rule_ids
+from caseclosed.services.llm_provider import with_llm_personalization
 from caseclosed.services.llm_provider import llm_model_profile_data
 from caseclosed.services.mail_summary import SUMMARY_TARGET_IMPORTANCE
 from caseclosed.services.mail_summary import enqueue_mail_summary_job
@@ -155,6 +159,7 @@ class MailSendRequestPayload(BaseModel):
     attachments: list[MailSendAttachmentPayload] | None = None
     reply_to_message_id: str | None = None
     scheduled_at: str | None = None
+    case_ids: list[str] | None = None
 
 
 class MailDraftGenerationRequest(BaseModel):
@@ -192,6 +197,12 @@ class MailLlmBlockFilterUpdatePayload(BaseModel):
 class LlmModelAssignmentPayload(BaseModel):
     function_type: str
     profile_id: str
+
+
+class LlmFunctionInstructionPayload(BaseModel):
+    function_type: str
+    instruction_text: str
+    is_enabled: bool = True
 
 
 IMPORTANCE_RANKS = {
@@ -245,6 +256,93 @@ def write_mail_draft_generation_standard_prompt(
         return
     setting.value_json = value_json
     setting.updated_at = now
+
+
+def llm_settings_rule_id(function_type: str) -> str:
+    return f"{LLM_SETTINGS_RULE_ID_PREFIX}{function_type}"
+
+
+def read_llm_settings_rule(
+    session: DatabaseSession,
+    function_type: str,
+) -> LlmInstructionRule | None:
+    return session.get(LlmInstructionRule, llm_settings_rule_id(function_type))
+
+
+def llm_function_instruction_data(
+    session: DatabaseSession,
+    function_type: str,
+) -> dict[str, object]:
+    rule = read_llm_settings_rule(session, function_type)
+    instruction_text = ""
+    is_enabled = False
+    source = "settings"
+    updated_at = None
+    if rule is not None and rule.deleted_at is None:
+        instruction_text = rule.instruction_text
+        is_enabled = bool(rule.is_enabled and rule.instruction_text.strip())
+        updated_at = rule.updated_at
+    elif function_type in {
+        FUNCTION_TYPE_REPLY_DRAFT_GENERATION,
+        FUNCTION_TYPE_NEW_MAIL_DRAFT_GENERATION,
+    }:
+        legacy_prompt = read_mail_draft_generation_standard_prompt(session)
+        if legacy_prompt.strip():
+            instruction_text = legacy_prompt
+            is_enabled = True
+            source = "legacy_mail_standard_prompt"
+    config = llm_function_config_data(function_type)
+    return {
+        "function_type": function_type,
+        "label": config["label"],
+        "instruction_text": instruction_text,
+        "is_enabled": is_enabled,
+        "source": source,
+        "updated_at": updated_at,
+        "is_available": function_type not in {
+            "mail_case_selection",
+            "preparation_task_suggestion",
+        },
+    }
+
+
+def upsert_llm_settings_rule(
+    session: DatabaseSession,
+    payload: LlmFunctionInstructionPayload,
+    now: str,
+) -> LlmInstructionRule:
+    function_type = payload.function_type.strip()
+    if function_type not in LLM_FUNCTION_TYPES:
+        raise json_error(422, "VALIDATION_ERROR", "Unknown LLM function type.")
+    instruction_text = payload.instruction_text.strip()
+    enabled = bool(payload.is_enabled and instruction_text)
+    rule = read_llm_settings_rule(session, function_type)
+    if rule is None:
+        rule = LlmInstructionRule(
+            id=llm_settings_rule_id(function_type),
+            name=f"Settings: {llm_function_config_data(function_type)['label']}",
+            condition_json=json.dumps({"always": True}, ensure_ascii=True),
+            instruction_text=instruction_text,
+            function_types_json=json.dumps([function_type], ensure_ascii=True),
+            priority_order=100,
+            is_enabled=1 if enabled else 0,
+            created_at=now,
+            updated_at=now,
+            deleted_at=None,
+            version=1,
+        )
+        session.add(rule)
+        return rule
+    rule.name = f"Settings: {llm_function_config_data(function_type)['label']}"
+    rule.condition_json = json.dumps({"always": True}, ensure_ascii=True)
+    rule.instruction_text = instruction_text
+    rule.function_types_json = json.dumps([function_type], ensure_ascii=True)
+    rule.priority_order = 100
+    rule.is_enabled = 1 if enabled else 0
+    rule.updated_at = now
+    rule.deleted_at = None
+    rule.version += 1
+    return rule
 
 
 def normalize_generation_language(value: str | None) -> str:
@@ -2524,6 +2622,15 @@ def send_mail(
         if reply_to_message is None:
             raise json_error(404, "NOT_FOUND", "Reply target mail not found.")
 
+    selected_cases: list[Case] = []
+    seen_case_ids: set[str] = set()
+    for case_id in payload.case_ids or []:
+        normalized_case_id = case_id.strip()
+        if normalized_case_id == "" or normalized_case_id in seen_case_ids:
+            continue
+        selected_cases.append(ensure_case_for_mail_assignment(session, normalized_case_id))
+        seen_case_ids.add(normalized_case_id)
+
     now = jst_iso()
     attachment_names = [name.strip() for name in payload.attachment_names or [] if name.strip() != ""]
     attachment_data_json = attachment_payloads_json(payload.attachments)
@@ -2568,6 +2675,20 @@ def send_mail(
         version=1,
     )
     session.add(send_request)
+    session.flush()
+    for case in selected_cases:
+        session.add(
+            MailSendRequestCaseLink(
+                id=new_id("mail_send_case_link"),
+                send_request_id=send_request.id,
+                case_id=case.id,
+                created_at=now,
+                updated_at=now,
+                version=1,
+            )
+        )
+        case.updated_at = now
+        case.version += 1
     enqueue_mail_send_mock_job(
         session,
         send_request,
@@ -2576,6 +2697,35 @@ def send_mail(
     )
     session.commit()
     return {"ok": True, "data": mail_send_request_data(send_request)}
+
+
+@router.get("/llm-personalization")
+def get_llm_personalization(
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    return {
+        "ok": True,
+        "data": {
+            "functions": [
+                llm_function_instruction_data(session, function_type)
+                for function_type in LLM_FUNCTION_TYPES
+            ]
+        },
+    }
+
+
+@router.patch("/llm-personalization")
+def update_llm_personalization(
+    payload: LlmFunctionInstructionPayload,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    function_type = payload.function_type.strip()
+    upsert_llm_settings_rule(session, payload, jst_iso())
+    session.commit()
+    return {
+        "ok": True,
+        "data": llm_function_instruction_data(session, function_type),
+    }
 
 
 @router.get("/draft-generation-standard-prompt")
@@ -2668,9 +2818,16 @@ def generate_mail_draft(
             "LLM_PROVIDER_ERROR",
             f"Mail draft generation failed: {error}",
         ) from error
+    active_settings_rule = read_llm_settings_rule(session, function_type)
+    has_active_settings_rule = bool(
+        active_settings_rule is not None
+        and active_settings_rule.deleted_at is None
+        and active_settings_rule.is_enabled
+        and active_settings_rule.instruction_text.strip()
+    )
     input_payload = {
         "instruction": payload.instruction or "",
-        "standard_prompt": payload.standard_prompt or "",
+        "standard_prompt": "" if has_active_settings_rule else (payload.standard_prompt or ""),
         "language_generation_prompt": generation_language_prompt(expected_language),
         "reply_language": language_label(expected_language),
         "language_policy": language_policy_text(
@@ -2696,11 +2853,14 @@ def generate_mail_draft(
         ),
         "related_case_summaries": related_case_summaries,
     }
+    provider_input_payload = with_llm_personalization(
+        session, function_type, input_payload
+    )
     now = jst_iso()
     try:
         provider_response = provider.complete_json(
             function_type=function_type,
-            input_payload=input_payload,
+            input_payload=provider_input_payload,
         )
     except OpenAIProviderError as error:
         raise json_error(
@@ -2724,7 +2884,7 @@ def generate_mail_draft(
                 "cc_addresses": cc_addresses,
                 "bcc_addresses": bcc_addresses,
                 "has_instruction": bool((payload.instruction or "").strip()),
-                "has_standard_prompt": bool((payload.standard_prompt or "").strip()),
+                "has_standard_prompt": bool(str(input_payload["standard_prompt"]).strip()),
                 "generation_language": selected_generation_language,
                 "reply_language": language_label(expected_language),
                 "language_retry_count": retry_count,
@@ -2736,7 +2896,7 @@ def generate_mail_draft(
         input_diagnostic_json=json.dumps(
             {
                 "instruction_length": len(payload.instruction or ""),
-                "standard_prompt_length": len(payload.standard_prompt or ""),
+                "standard_prompt_length": len(str(input_payload["standard_prompt"])),
                 "language_generation_prompt": generation_language_prompt(
                     expected_language
                 ),
@@ -2748,7 +2908,10 @@ def generate_mail_draft(
             ensure_ascii=True,
             sort_keys=True,
         ),
-        applied_instruction_rule_ids_json=json.dumps([], ensure_ascii=True),
+        applied_instruction_rule_ids_json=json.dumps(
+            llm_applied_instruction_rule_ids(provider_input_payload),
+            ensure_ascii=True,
+        ),
         output_json=json.dumps(output, ensure_ascii=True, sort_keys=True),
         output_text_preview=provider_response.output_preview,
         status="succeeded",
@@ -2804,7 +2967,12 @@ def get_mail_send_request(
     session: DatabaseSession = Depends(get_session),
 ) -> dict[str, object]:
     send_request = get_send_request_or_404(session, send_request_id)
-    return {"ok": True, "data": mail_send_request_data(send_request)}
+    data = mail_send_request_data(send_request)
+    data["case_ids"] = [
+        str(item["case_id"])
+        for item in send_request_case_link_items(session, send_request.id)
+    ]
+    return {"ok": True, "data": data}
 
 
 def get_send_request_or_404(

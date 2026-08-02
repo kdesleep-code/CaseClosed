@@ -10,18 +10,21 @@ import {
   disconnectGoogleGmail,
   getGoogleGmailStatus,
   getLlmModelConfig,
+  getLlmPersonalization,
   listLlmBlockFilters,
   listLlmBlockedMails,
   updateGoogleCalendarAutoSyncSettings,
   updateGoogleGmailAutoImportSettings,
   updateLlmBlockFilter,
   updateLlmModelAssignment,
+  updateLlmFunctionInstruction,
 } from './phase4Api'
 import type {
   GoogleGmailStatus,
   LlmBlockedMail,
   LlmBlockFilter,
   LlmModelConfig,
+  LlmPersonalizationConfig,
 } from './phase4Api'
 type SettingsTab = 'google' | 'llm' | 'budget' | 'language'
 
@@ -57,13 +60,20 @@ function initialSettingsNotice() {
   return null
 }
 
+function initialSettingsTab(): SettingsTab {
+  const tab = new URLSearchParams(window.location.search).get("tab")
+  return settingsTabs.some((item) => item.key === tab) ? tab as SettingsTab : "google"
+}
+
 function SettingsView() {
-  const [activeTab, setActiveTab] = useState<SettingsTab>('google')
+  const [activeTab, setActiveTab] = useState<SettingsTab>(initialSettingsTab)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(initialSettingsNotice)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [googleStatus, setGoogleStatus] = useState<GoogleGmailStatus | null>(null)
   const [llmModelConfig, setLlmModelConfig] = useState<LlmModelConfig | null>(null)
+  const [llmPersonalization, setLlmPersonalization] = useState<LlmPersonalizationConfig | null>(null)
+  const [llmInstructionDrafts, setLlmInstructionDrafts] = useState<Record<string, string>>({})
   const [llmBlockFilters, setLlmBlockFilters] = useState<LlmBlockFilter[] | null>(null)
   const [llmBlockedMails, setLlmBlockedMails] = useState<LlmBlockedMail[] | null>(null)
   const [llmCostHistory, setLlmCostHistory] = useState<LlmCostHistory | null>(null)
@@ -113,9 +123,14 @@ function SettingsView() {
   useEffect(() => {
     if (activeTab !== 'llm' || llmModelConfig !== null) return
     let isMounted = true
-    getLlmModelConfig()
-      .then((config) => {
-        if (isMounted) setLlmModelConfig(config)
+    Promise.all([getLlmModelConfig(), getLlmPersonalization()])
+      .then(([config, personalization]) => {
+        if (!isMounted) return
+        setLlmModelConfig(config)
+        setLlmPersonalization(personalization)
+        setLlmInstructionDrafts(Object.fromEntries(
+          personalization.functions.map((item) => [item.function_type, item.instruction_text]),
+        ))
       })
       .catch((requestError) => {
         if (isMounted) setError(describeError(requestError))
@@ -123,7 +138,7 @@ function SettingsView() {
     return () => {
       isMounted = false
     }
-  }, [activeTab, llmModelConfig])
+  }, [activeTab, llmModelConfig, llmPersonalization])
 
   useEffect(() => {
     if (
@@ -268,6 +283,30 @@ function SettingsView() {
     setError(null)
     try {
       setLlmModelConfig(await updateLlmModelAssignment(functionType, profileId))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function handleLlmInstructionSave(functionType: string, clear = false) {
+    const busyKey = `llm-instruction-`
+    setBusyId(busyKey)
+    setError(null)
+    setNotice(null)
+    try {
+      const instructionText = clear ? "" : (llmInstructionDrafts[functionType] ?? "")
+      const updated = await updateLlmFunctionInstruction(
+        functionType, instructionText, instructionText.trim() !== "",
+      )
+      setLlmPersonalization((current) => current === null ? current : {
+        functions: current.functions.map((item) =>
+          item.function_type === functionType ? updated : item
+        ),
+      })
+      setLlmInstructionDrafts((current) => ({ ...current, [functionType]: updated.instruction_text }))
+      setNotice(t("settings.llmInstructionSaved"))
     } catch (requestError) {
       setError(describeError(requestError))
     } finally {
@@ -536,6 +575,57 @@ function SettingsView() {
                     </tbody>
                   </table>
                 </div>
+
+                <section className="maintenance-section" aria-labelledby="settings-llm-instructions-heading">
+                  <div className="section-heading">
+                    <div>
+                      <h2 id="settings-llm-instructions-heading">{t("settings.llmInstructionsTitle")}</h2>
+                      <p>{t("settings.llmInstructionsDescription")}</p>
+                    </div>
+                  </div>
+                  <div className="settings-card-grid">
+                    {llmPersonalization === null && <p>{t("maintenance.debug.loading")}</p>}
+                    {llmPersonalization?.functions.map((item) => (
+                      <article className="mail-panel" key={item.function_type}>
+                        <div className="section-heading">
+                          <div><h3>{item.label}</h3><small>{item.function_type}</small></div>
+                          {!item.is_available && (
+                            <span className="status-chip">{t("settings.llmInstructionUnavailable")}</span>
+                          )}
+                          {item.source === "legacy_mail_standard_prompt" && (
+                            <span className="status-chip">{t("settings.llmInstructionLegacy")}</span>
+                          )}
+                        </div>
+                        <label className="settings-form">
+                          <span>{t("settings.llmInstructionLabel")}</span>
+                          <textarea
+                            onChange={(event) => setLlmInstructionDrafts((current) => ({
+                              ...current, [item.function_type]: event.target.value,
+                            }))}
+                            disabled={!item.is_available}
+                            placeholder={t("settings.llmInstructionPlaceholder")}
+                            rows={5}
+                            value={llmInstructionDrafts[item.function_type] ?? ""}
+                          />
+                        </label>
+                        <div className="settings-actions">
+                          <button
+                            className={`button-loading-dot${busyId === `llm-instruction-${item.function_type}` ? " is-loading" : ""}`}
+                            disabled={busyId !== null || !item.is_available}
+                            onClick={() => handleLlmInstructionSave(item.function_type)}
+                            type="button"
+                          >{t("common.save")}</button>
+                          <button
+                            className="secondary-button"
+                            disabled={busyId !== null || !item.is_available || (llmInstructionDrafts[item.function_type] ?? "").trim() === ""}
+                            onClick={() => handleLlmInstructionSave(item.function_type, true)}
+                            type="button"
+                          >{t("common.clear")}</button>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </section>
 
                 <section
                   aria-labelledby="settings-llm-block-heading"

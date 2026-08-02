@@ -14,6 +14,8 @@ from caseclosed.db.models import Job
 from caseclosed.db.models import LlmRun
 from caseclosed.services.llm_provider import FUNCTION_TYPE_CONTACT_AI_MEMO_UPDATE
 from caseclosed.services.llm_provider import LlmProvider
+from caseclosed.services.llm_provider import llm_applied_instruction_rule_ids
+from caseclosed.services.llm_provider import with_llm_personalization
 from caseclosed.services.llm_provider import build_contact_ai_memo_update_provider
 
 FUNCTION_TYPE = FUNCTION_TYPE_CONTACT_AI_MEMO_UPDATE
@@ -195,9 +197,7 @@ def handle_contact_ai_memo_update(
                 "reason": "no_new_contact_messages",
             }
 
-        provider_response = llm_provider.complete_json(
-            function_type=FUNCTION_TYPE,
-            input_payload={
+        input_payload = {
                 "contact_id": contact.id,
                 "contact_display_name": contact.display_name,
                 "current_ai_memo": contact.ai_memo,
@@ -209,7 +209,13 @@ def handle_contact_ai_memo_update(
                 "snippet": messages[-1].snippet,
                 "body_text": messages[-1].body_text,
                 "messages": [contact_ai_memo_message_payload(item) for item in messages],
-            },
+        }
+        provider_input_payload = with_llm_personalization(
+            session, FUNCTION_TYPE, input_payload
+        )
+        provider_response = llm_provider.complete_json(
+            function_type=FUNCTION_TYPE,
+            input_payload=provider_input_payload,
         )
         output = provider_response.output
         ai_memo = str(output["ai_memo"])
@@ -243,7 +249,10 @@ def handle_contact_ai_memo_update(
                 ensure_ascii=True,
                 sort_keys=True,
             ),
-            applied_instruction_rule_ids_json=json.dumps([], ensure_ascii=True),
+            applied_instruction_rule_ids_json=json.dumps(
+                llm_applied_instruction_rule_ids(provider_input_payload),
+                ensure_ascii=True,
+            ),
             output_json=json.dumps(output, ensure_ascii=True, sort_keys=True),
             output_text_preview=provider_response.output_preview,
             status="succeeded",

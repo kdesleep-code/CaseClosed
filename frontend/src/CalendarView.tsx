@@ -1269,7 +1269,10 @@ function CalendarView() {
 
           <aside className="calendar-gadget-column">
             <section className="case-gadget-card">
-              <AppLink className="case-gadget-action" href="/calendar/new">
+              <AppLink
+                className="case-gadget-action"
+                href={`/calendar/new?date=${encodeURIComponent(selectedDate)}&return_to=${encodeURIComponent(`/calendar?date=${selectedDate}`)}`}
+              >
                 {t('calendar.create.submit')}
               </AppLink>
             </section>

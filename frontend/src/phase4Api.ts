@@ -226,6 +226,7 @@ export type MailSendPayload = {
   }>
   reply_to_message_id?: string | null
   scheduled_at?: string | null
+  case_ids?: string[]
 }
 
 export type MailSendRequest = {
@@ -244,6 +245,7 @@ export type MailSendRequest = {
   created_at: string
   updated_at: string
   version: number
+  case_ids?: string[]
 }
 
 export type MailDraftGenerationPayload = {
@@ -377,6 +379,20 @@ export type LlmFunctionConfig = {
 export type LlmModelConfig = {
   profiles: LlmModelProfile[]
   functions: LlmFunctionConfig[]
+}
+
+export type LlmFunctionInstructionConfig = {
+  function_type: string
+  label: string
+  instruction_text: string
+  is_enabled: boolean
+  source: "settings" | "legacy_mail_standard_prompt"
+  updated_at: string | null
+  is_available: boolean
+}
+
+export type LlmPersonalizationConfig = {
+  functions: LlmFunctionInstructionConfig[]
 }
 
 export type GoogleGmailStatus = {
@@ -962,6 +978,26 @@ export function updateLlmModelAssignment(
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ function_type: functionType, profile_id: profileId }),
+  })
+}
+
+export function getLlmPersonalization(): Promise<LlmPersonalizationConfig> {
+  return request("/api/v1/mails/llm-personalization")
+}
+
+export function updateLlmFunctionInstruction(
+  functionType: string,
+  instructionText: string,
+  isEnabled: boolean,
+): Promise<LlmFunctionInstructionConfig> {
+  return request("/api/v1/mails/llm-personalization", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      function_type: functionType,
+      instruction_text: instructionText,
+      is_enabled: isEnabled,
+    }),
   })
 }
 

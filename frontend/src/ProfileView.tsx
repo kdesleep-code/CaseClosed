@@ -51,6 +51,16 @@ const academicContextFields: ProfileTextField[] = [
   { key: 'research_fields', label: 'Research fields', multiline: true },
 ]
 
+const llmContextFields: ProfileTextField[] = [
+  { key: "llm_self_description", label: t("profile.llmSelfDescription"), multiline: true },
+  { key: "priority_keywords", label: t("profile.priorityKeywords"), multiline: true },
+  { key: "low_priority_keywords", label: t("profile.lowPriorityKeywords"), multiline: true },
+  { key: "important_senders_or_domains", label: t("profile.importantSenders"), multiline: true },
+  { key: "expected_response_policy", label: t("profile.expectedResponsePolicy"), multiline: true },
+  { key: "unavailable_times", label: t("profile.unavailableTimes"), multiline: true },
+  { key: "mail_importance_notes", label: t("profile.mailImportanceNotes"), multiline: true },
+]
+
 const academicContextListFields: ProfileTextField[] = [
   {
     key: 'teaching_responsibilities',
@@ -381,6 +391,18 @@ function ProfileEditor({
           ))}
         </div>
       </section>
+      <section>
+        <h2>{t("profile.section.llmContext")}</h2>
+        <p>{t("profile.llmContextDescription")}</p>
+        <div className="profile-form-grid">
+          {llmContextFields.map((field) => (
+            <label className="profile-form-wide" key={field.key}>
+              <span>{field.label}</span>
+              {fieldControl(field)}
+            </label>
+          ))}
+        </div>
+      </section>
       <div className="profile-editor-actions">
         <button disabled={isSaving} onClick={onCancel} type="button">
           {t('common.cancel')}
@@ -594,6 +616,11 @@ export default function ProfileView() {
                     title={t('profile.contactGroups.collaborators')}
                   />
                 </div>
+              </section>
+              <section>
+                <h2>{t("profile.section.llmContext")}</h2>
+                <p>{t("profile.llmContextDescription")}</p>
+                <ProfileFieldList fields={llmContextFields} profile={profile} />
               </section>
             </div>
           )}

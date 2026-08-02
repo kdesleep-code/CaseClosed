@@ -3374,16 +3374,16 @@ def test_scheduled_send_case_link_is_transferred_to_sent_mail(
             "subject": "Scheduled Case Link",
             "body_text": "Keep this Case assignment after sending.",
             "scheduled_at": "2099-07-29T15:00:00+09:00",
+            "case_ids": [case_id],
         },
     )
     send_request_id = send_response.json()["data"]["id"]
 
-    assign_response = client.post(
-        f"{MAILS_URL}/{send_request_id}/case-links",
-        json={"case_id": case_id},
-    )
-    assert assign_response.status_code == 200
-    assert assign_response.json()["data"]["case_links"] == [
+    queued_detail_response = client.get(f"{MAILS_URL}/send-requests/{send_request_id}")
+    assert queued_detail_response.status_code == 200
+    assert queued_detail_response.json()["data"]["case_ids"] == [case_id]
+    provisional_detail = client.get(f"{MAILS_URL}/{send_request_id}").json()["data"]
+    assert provisional_detail["case_links"] == [
         {"id": case_id, "case_id": case_id, "title": "Scheduled Send Case"}
     ]
 
@@ -3415,3 +3415,54 @@ def test_scheduled_send_case_link_is_transferred_to_sent_mail(
             (case_id, sent_message_id),
         ).fetchone()[0]
     assert transferred == 1
+
+
+def test_llm_personalization_lists_and_saves_function_instruction(
+    client,
+    database_path,
+) -> None:
+    initial_response = client.get(f"{MAILS_URL}/llm-personalization")
+
+    assert initial_response.status_code == 200
+    initial_items = initial_response.json()["data"]["functions"]
+    importance = next(
+        item
+        for item in initial_items
+        if item["function_type"] == "mail_importance_classification"
+    )
+    assert importance["instruction_text"] == ""
+    assert importance["is_enabled"] is False
+
+    update_response = client.patch(
+        f"{MAILS_URL}/llm-personalization",
+        json={
+            "function_type": "mail_importance_classification",
+            "instruction_text": "Teaching deadlines should be treated as important.\n",
+            "is_enabled": True,
+        },
+    )
+
+    assert update_response.status_code == 200
+    updated = update_response.json()["data"]
+    assert updated["instruction_text"] == (
+        "Teaching deadlines should be treated as important."
+    )
+    assert updated["is_enabled"] is True
+    assert updated["source"] == "settings"
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT instruction_text, function_types_json, is_enabled
+            FROM llm_instruction_rules
+            WHERE id = ?
+            """,
+            (
+                "llm_instruction_rule_settings_"
+                "mail_importance_classification",
+            ),
+        ).fetchone()
+    assert row == (
+        "Teaching deadlines should be treated as important.",
+        "[\"mail_importance_classification\"]",
+        1,
+    )

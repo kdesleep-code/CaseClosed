@@ -6,9 +6,10 @@ import {
   createGoogleCalendarEvent,
   getGoogleGmailStatus,
   listGoogleCalendars,
+  listCalendarDbEvents,
   toJstIsoDateTime,
 } from './phase4Api'
-import type { GoogleCalendarListItem } from './phase4Api'
+import type { GoogleCalendarEvent, GoogleCalendarListItem } from './phase4Api'
 import { isCaseOpenForSuggestion, listCases } from './phase7Api'
 import type { CaseItem } from './phase7Api'
 import { listTasks } from './phase8Api'
@@ -77,31 +78,54 @@ function jstDateToday() {
   return `${parts.year}-${parts.month}-${parts.day}`
 }
 
-function roundedDefaultTime(offsetHours: number) {
-  const now = new Date()
-  now.setMinutes(now.getMinutes() < 30 ? 30 : 60, 0, 0)
-  now.setHours(now.getHours() + offsetHours)
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Tokyo',
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23',
+function initialEventDate() {
+  const value = new URLSearchParams(window.location.search).get("date")?.trim() ?? ""
+  const isDate = value.length === 10
+    && value[4] === "-"
+    && value[7] === "-"
+    && !Number.isNaN(Date.parse(value + "T00:00:00Z"))
+  return isDate ? value : jstDateToday()
+}
+
+function timeValueFromMinutes(totalMinutes: number) {
+  const hour = Math.floor(totalMinutes / 60)
+  const minute = totalMinutes % 60
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`
+}
+
+export function closestAvailableNoonSlot(
+  events: GoogleCalendarEvent[],
+  date: string,
+): { startTime: string; endTime: string } {
+  const durationMinutes = 60
+  const noonMinutes = 12 * 60
+  const candidates = Array.from(
+    { length: (20 * 60 - 6 * 60) / 15 + 1 },
+    (_, index) => 6 * 60 + index * 15,
+  ).sort((left, right) => {
+    const distance = Math.abs(left - noonMinutes) - Math.abs(right - noonMinutes)
+    return distance !== 0 ? distance : right - left
   })
-    .formatToParts(now)
-    .reduce<Record<string, string>>((values, part) => {
-      values[part.type] = part.value
-      return values
-    }, {})
-  const value = `${parts.hour}:${parts.minute}`
-  if (value < visibleTimeOptions[0]) return visibleTimeOptions[0]
-  if (value > visibleTimeOptions[visibleTimeOptions.length - 1]) {
-    return visibleTimeOptions[visibleTimeOptions.length - 1]
+
+  for (const startMinutes of candidates) {
+    const endMinutes = startMinutes + durationMinutes
+    const startTime = timeValueFromMinutes(startMinutes)
+    const endTime = timeValueFromMinutes(endMinutes)
+    const candidateStart = Date.parse(`${date}T${startTime}:00+09:00`)
+    const candidateEnd = Date.parse(`${date}T${endTime}:00+09:00`)
+    const overlaps = events.some((event) => {
+      if (event.status === "cancelled") return false
+      const eventStartValue = event.start.dateTime
+      const eventEndValue = event.end.dateTime
+      if (typeof eventStartValue !== "string" || typeof eventEndValue !== "string") return false
+      const eventStart = Date.parse(eventStartValue)
+      const eventEnd = Date.parse(eventEndValue)
+      return Number.isFinite(eventStart) && Number.isFinite(eventEnd)
+        && eventStart < candidateEnd && eventEnd > candidateStart
+    })
+    if (!overlaps) return { startTime, endTime }
   }
-  return visibleTimeOptions.reduce((closest, option) => {
-    const currentDistance = Math.abs(timeMinutes(option) - timeMinutes(value))
-    const closestDistance = Math.abs(timeMinutes(closest) - timeMinutes(value))
-    return currentDistance < closestDistance ? option : closest
-  }, visibleTimeOptions[0])
+  return { startTime: "12:00", endTime: "13:00" }
 }
 
 function describeError(error: unknown) {
@@ -364,36 +388,40 @@ function displayPeriodTime(value: string) {
 }
 
 export default function CalendarNewEventView() {
-  const preselectedCaseId = new URLSearchParams(window.location.search).get('case_id')
+  const queryParams = new URLSearchParams(window.location.search)
+  const preselectedCaseId = queryParams.get('case_id')
+  const initialDate = initialEventDate()
   const cancelHref = returnToOrFallback(
-    preselectedCaseId === null ? '/calendar' : `/cases/${encodeURIComponent(preselectedCaseId)}`,
+    preselectedCaseId === null
+      ? `/calendar?date=${encodeURIComponent(initialDate)}`
+      : `/cases/${encodeURIComponent(preselectedCaseId)}`,
   )
   const [calendars, setCalendars] = useState<GoogleCalendarListItem[]>([])
   const [cases, setCases] = useState<CaseItem[]>([])
   const [tasks, setTasks] = useState<TaskItem[]>([])
   const [calendarId, setCalendarId] = useState('primary')
   const [summary, setSummary] = useState('')
-  const [startDate, setStartDate] = useState(jstDateToday)
-  const [endDate, setEndDate] = useState(jstDateToday)
-  const [startTime, setStartTime] = useState(() => roundedDefaultTime(0))
-  const [endTime, setEndTime] = useState(() => roundedDefaultTime(1))
-  const [hasEditedStartTime, setHasEditedStartTime] = useState(false)
+  const [startDate, setStartDate] = useState(initialDate)
+  const [endDate, setEndDate] = useState(initialDate)
+  const [startTime, setStartTime] = useState('12:00')
+  const [endTime, setEndTime] = useState('13:00')
+  const [hasEditedTime, setHasEditedTime] = useState(false)
   const [location, setLocation] = useState('')
   const [description, setDescription] = useState('')
   const [recurrenceType, setRecurrenceType] = useState('')
   const [recurrenceMonthDay, setRecurrenceMonthDay] = useState(() =>
-    String(datePart(jstDateToday(), 1, 2)),
+    String(datePart(initialDate, 1, 2)),
   )
   const [recurrenceMonthPattern, setRecurrenceMonthPattern] = useState<'day' | 'weekday'>('day')
   const [recurrenceMonthWeek, setRecurrenceMonthWeek] = useState('1')
   const [recurrenceMonthWeekday, setRecurrenceMonthWeekday] = useState<string>(() =>
-    weekdayForDate(jstDateToday()),
+    weekdayForDate(initialDate),
   )
   const [recurrenceYearMonth, setRecurrenceYearMonth] = useState(() =>
-    String(datePart(jstDateToday(), 1, 1)),
+    String(datePart(initialDate, 1, 1)),
   )
   const [recurrenceYearDay, setRecurrenceYearDay] = useState(() =>
-    String(datePart(jstDateToday(), 1, 2)),
+    String(datePart(initialDate, 1, 2)),
   )
   const [recurrenceWeekdayValues, setRecurrenceWeekdayValues] = useState<string[]>([])
   const [recurrenceUntil, setRecurrenceUntil] = useState('')
@@ -654,6 +682,27 @@ export default function CalendarNewEventView() {
       isMounted = false
     }
   }, [preselectedCaseId])
+
+  useEffect(() => {
+    if (startDate.trim() === "" || hasEditedTime) return
+    let isMounted = true
+    listCalendarDbEvents({
+      time_min: `${startDate}T00:00:00+09:00`,
+      time_max: `${addDateDays(startDate, 1)}T00:00:00+09:00`,
+    })
+      .then(({ items }) => {
+        if (!isMounted) return
+        const slot = closestAvailableNoonSlot(items, startDate)
+        setStartTime(slot.startTime)
+        setEndTime(slot.endTime)
+      })
+      .catch(() => {
+        // Keep the noon default when calendar availability cannot be loaded.
+      })
+    return () => {
+      isMounted = false
+    }
+  }, [hasEditedTime, startDate])
 
   useEffect(() => {
     if (selectedAcademicYearId === '') {
@@ -926,12 +975,12 @@ export default function CalendarNewEventView() {
   function handleStartTimeChange(nextStartTime: string) {
     const previousStartMinutes = timeMinutes(startTime)
     const nextStartMinutes = timeMinutes(nextStartTime)
-    const nextEndTime = hasEditedStartTime
+    const nextEndTime = hasEditedTime
       ? visibleTimeFromMinutes(timeMinutes(endTime) + nextStartMinutes - previousStartMinutes)
       : visibleTimeFromMinutes(nextStartMinutes + 60)
     setStartTime(nextStartTime)
     setEndTime(nextEndTime)
-    setHasEditedStartTime(true)
+    setHasEditedTime(true)
   }
 
   function isEndTimeUnavailable(option: string) {
@@ -1031,7 +1080,10 @@ export default function CalendarNewEventView() {
                         />
                         <select
                           disabled={isCreating}
-                          onChange={(event) => setEndTime(event.target.value)}
+                          onChange={(event) => {
+                            setEndTime(event.target.value)
+                            setHasEditedTime(true)
+                          }}
                           value={endTime}
                         >
                           {visibleTimeOptions.map((option) => (
@@ -1254,6 +1306,7 @@ export default function CalendarNewEventView() {
                       onChange={(event) => {
                         setEndDate(startDate)
                         setEndTime(event.target.value)
+                        setHasEditedTime(true)
                       }}
                       value={endTime}
                     >

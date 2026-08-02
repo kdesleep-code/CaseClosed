@@ -513,6 +513,7 @@ describe('Phase 4 mail screen', () => {
       attachments: [],
       reply_to_message_id: null,
       scheduled_at: null,
+      case_ids: [],
     })
   })
 

@@ -12,6 +12,8 @@ from caseclosed.db.models import LlmRun
 from caseclosed.db.models import MailAutoState
 from caseclosed.db.models import MailSummary
 from caseclosed.services.llm_provider import LlmProvider
+from caseclosed.services.llm_provider import llm_applied_instruction_rule_ids
+from caseclosed.services.llm_provider import with_llm_personalization
 from caseclosed.services.llm_provider import build_mail_summary_provider
 from caseclosed.services.mail_ingestion import message_is_sent
 from caseclosed.services.mail_thread_summary import enqueue_mail_thread_summary_job
@@ -110,9 +112,7 @@ def handle_mail_summary(
         current_body_text, quoted_reply_context = split_quoted_reply_sections(
             message.body_text or ""
         )
-        provider_response = llm_provider.complete_json(
-            function_type=FUNCTION_TYPE,
-            input_payload={
+        input_payload = {
                 "message_id": message.id,
                 "gmail_message_id": message.gmail_message_id,
                 "thread_id": message.thread_id,
@@ -125,7 +125,13 @@ def handle_mail_summary(
                 "current_body_text": current_body_text,
                 "quoted_reply_context": quoted_reply_context,
                 "importance": auto_state.effective_importance,
-            },
+        }
+        provider_input_payload = with_llm_personalization(
+            session, FUNCTION_TYPE, input_payload
+        )
+        provider_response = llm_provider.complete_json(
+            function_type=FUNCTION_TYPE,
+            input_payload=provider_input_payload,
         )
         output = provider_response.output
         llm_run = LlmRun(
@@ -157,7 +163,10 @@ def handle_mail_summary(
                 ensure_ascii=True,
                 sort_keys=True,
             ),
-            applied_instruction_rule_ids_json=json.dumps([], ensure_ascii=True),
+            applied_instruction_rule_ids_json=json.dumps(
+                llm_applied_instruction_rule_ids(provider_input_payload),
+                ensure_ascii=True,
+            ),
             output_json=json.dumps(output, ensure_ascii=True, sort_keys=True),
             output_text_preview=provider_response.output_preview,
             status="succeeded",

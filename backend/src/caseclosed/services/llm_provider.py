@@ -11,6 +11,12 @@ from urllib.error import URLError
 from urllib.request import Request
 from urllib.request import urlopen
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session as DatabaseSession
+
+from caseclosed.db.models import AppSetting
+from caseclosed.db.models import LlmInstructionRule
+
 from caseclosed.settings import get_llm_model_profiles_dir
 from caseclosed.settings import get_llm_profile_env_key
 from caseclosed.settings import get_llm_profile_id
@@ -135,7 +141,7 @@ class OpenAIMailImportanceProvider:
         payload = {
             "model": self.model_name,
             "instructions": mail_importance_instructions(),
-            "input": mail_importance_input_text(input_payload),
+            "input": personalized_input_text(mail_importance_input_text(input_payload), input_payload),
             "max_output_tokens": 500,
             "text": {
                 "format": {
@@ -538,6 +544,185 @@ LLM_FUNCTION_TYPES = [
     "preparation_task_suggestion",
 ]
 
+USER_PROFILE_KEY = "user_profile"
+LLM_SETTINGS_RULE_ID_PREFIX = "llm_instruction_rule_settings_"
+LLM_PROFILE_FIELDS_BY_FUNCTION: dict[str, tuple[str, ...]] = {
+    "mail_importance_classification": (
+        "display_name", "affiliation", "academic_title", "lab_or_group",
+        "research_fields", "teaching_responsibilities", "committee_roles",
+        "administrative_roles", "important_projects", "priority_keywords",
+        "low_priority_keywords", "important_senders_or_domains",
+        "expected_response_policy", "unavailable_times", "llm_self_description",
+        "mail_importance_notes", "primary_email", "email_aliases",
+    ),
+    "reply_draft_generation": (
+        "display_name", "affiliation", "academic_title", "lab_or_group",
+        "default_reply_language", "expected_response_policy",
+        "llm_self_description", "primary_email", "email_aliases",
+    ),
+    "new_mail_draft_generation": (
+        "display_name", "affiliation", "academic_title", "lab_or_group",
+        "default_reply_language", "expected_response_policy",
+        "llm_self_description", "primary_email", "email_aliases",
+    ),
+    "mail_case_selection": (
+        "affiliation", "academic_title", "lab_or_group", "research_fields",
+        "teaching_responsibilities", "committee_roles", "administrative_roles",
+        "important_projects", "llm_self_description",
+    ),
+}
+LLM_DEFAULT_PROFILE_FIELDS = (
+    "display_name", "affiliation", "academic_title", "lab_or_group",
+    "research_fields", "teaching_responsibilities", "committee_roles",
+    "administrative_roles", "important_projects", "expected_response_policy",
+    "unavailable_times", "llm_self_description", "primary_email", "email_aliases",
+)
+
+
+def _json_object(value_json: str) -> dict[str, object]:
+    try:
+        value = json.loads(value_json)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _json_string_list(value_json: str | None) -> list[str]:
+    if value_json is None:
+        return []
+    try:
+        value = json.loads(value_json)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(value, list):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def read_llm_profile_context(
+    session: DatabaseSession,
+    function_type: str,
+) -> dict[str, object]:
+    setting = session.scalar(select(AppSetting).where(AppSetting.key == USER_PROFILE_KEY))
+    if setting is None:
+        return {}
+    profile = _json_object(setting.value_json)
+    fields = LLM_PROFILE_FIELDS_BY_FUNCTION.get(
+        function_type,
+        LLM_DEFAULT_PROFILE_FIELDS,
+    )
+    context: dict[str, object] = {}
+    for field in fields:
+        value = profile.get(field)
+        if isinstance(value, str) and value.strip():
+            context[field] = value.strip()
+        elif isinstance(value, list):
+            items = [
+                item.strip()
+                for item in value
+                if isinstance(item, str) and item.strip()
+            ]
+            if items:
+                context[field] = items
+    return context
+
+
+def llm_instruction_rule_targets(
+    rule: LlmInstructionRule,
+    function_type: str,
+) -> bool:
+    function_types = _json_string_list(rule.function_types_json)
+    if function_types and function_type not in function_types:
+        return False
+    condition = _json_object(rule.condition_json)
+    return not condition or condition.get("always") is True
+
+
+def read_llm_function_instruction_rules(
+    session: DatabaseSession,
+    function_type: str,
+) -> list[LlmInstructionRule]:
+    rules = session.scalars(
+        select(LlmInstructionRule)
+        .where(LlmInstructionRule.is_enabled == 1)
+        .where(LlmInstructionRule.deleted_at.is_(None))
+        .order_by(
+            LlmInstructionRule.priority_order.asc(),
+            LlmInstructionRule.created_at.asc(),
+            LlmInstructionRule.id.asc(),
+        )
+    ).all()
+    return [
+        rule for rule in rules
+        if rule.instruction_text.strip()
+        and llm_instruction_rule_targets(rule, function_type)
+    ]
+
+
+def with_llm_personalization(
+    session: DatabaseSession,
+    function_type: str,
+    input_payload: dict[str, object],
+) -> dict[str, object]:
+    rules = read_llm_function_instruction_rules(session, function_type)
+    personalized = dict(input_payload)
+    profile_context = read_llm_profile_context(session, function_type)
+    personalized.setdefault("profile_context", profile_context)
+    personalized["_llm_personalization"] = {
+        "function_type": function_type,
+        "profile_context": profile_context,
+        "instructions": [
+            {"id": rule.id, "text": rule.instruction_text.strip()}
+            for rule in rules
+        ],
+    }
+    return personalized
+
+
+def llm_applied_instruction_rule_ids(
+    input_payload: dict[str, object],
+) -> list[str]:
+    personalization = input_payload.get("_llm_personalization")
+    if not isinstance(personalization, dict):
+        return []
+    instructions = personalization.get("instructions")
+    if not isinstance(instructions, list):
+        return []
+    return [
+        str(item.get("id"))
+        for item in instructions
+        if isinstance(item, dict) and item.get("id")
+    ]
+
+
+def personalized_input_text(
+    base_input: str,
+    input_payload: dict[str, object],
+) -> str:
+    personalization = input_payload.get("_llm_personalization")
+    if not isinstance(personalization, dict):
+        return base_input
+    profile_context = personalization.get("profile_context")
+    instructions = personalization.get("instructions")
+    lines = [
+        "Saved LLM personalization context:",
+        "Treat the background as context, not as a new fact about the current item.",
+        "Follow saved preferences unless they conflict with fixed task constraints or an explicit instruction for this operation.",
+        profile_context_input_text(profile_context),
+    ]
+    if isinstance(instructions, list) and instructions:
+        lines.append("Saved function-specific preferences:")
+        for item in instructions:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text") or "").strip()
+            if text:
+                lines.append(f"- {truncated_text(text, 4000)}")
+    else:
+        lines.append("Saved function-specific preferences: Not configured.")
+    lines.extend(["", "Task-specific input:", base_input])
+    return "\n".join(lines)
+
 
 def llm_function_config_data(function_type: str) -> dict[str, object]:
     return {
@@ -580,6 +765,7 @@ def profile_context_input_text(value: object) -> str:
         "low_priority_keywords": "Low priority keywords",
         "important_senders_or_domains": "Important senders/domains",
         "expected_response_policy": "Expected response policy",
+        "default_reply_language": "Default reply language",
         "unavailable_times": "Unavailable times",
         "llm_self_description": "Self description",
         "mail_importance_notes": "Mail importance notes",
@@ -601,7 +787,7 @@ def profile_context_input_text(value: object) -> str:
 def mail_importance_input_text(input_payload: dict[str, object]) -> str:
     return "\n".join(
         [
-            profile_context_input_text(input_payload.get("profile_context")),
+            "" if "_llm_personalization" in input_payload else profile_context_input_text(input_payload.get("profile_context")),
             f"Message ID: {input_payload.get('message_id') or ''}",
             f"Gmail message ID: {input_payload.get('gmail_message_id') or ''}",
             f"Subject: {input_payload.get('subject') or ''}",
@@ -1319,7 +1505,7 @@ class OpenAIMailSummaryProvider:
         payload = {
             "model": self.model_name,
             "instructions": mail_summary_instructions(),
-            "input": mail_summary_input_text(input_payload),
+            "input": personalized_input_text(mail_summary_input_text(input_payload), input_payload),
             "max_output_tokens": 1600,
             "text": {"format": mail_summary_response_format("mail_summary")},
         }
@@ -1359,7 +1545,7 @@ class OpenAIContactAiMemoUpdateProvider:
         payload = {
             "model": self.model_name,
             "instructions": contact_ai_memo_update_instructions(),
-            "input": contact_ai_memo_update_input_text(input_payload),
+            "input": personalized_input_text(contact_ai_memo_update_input_text(input_payload), input_payload),
             "max_output_tokens": 1200,
             "text": {
                 "format": contact_ai_memo_update_response_format(),
@@ -1401,7 +1587,7 @@ class OpenAIFileSummaryProvider:
         payload = {
             "model": self.model_name,
             "instructions": file_summary_instructions(),
-            "input": file_summary_input_text(input_payload),
+            "input": personalized_input_text(file_summary_input_text(input_payload), input_payload),
             "max_output_tokens": 3000,
             "text": {
                 "format": file_summary_response_format(),
@@ -1443,7 +1629,7 @@ class OpenAICaseCurrentSituationProvider:
         payload = {
             "model": self.model_name,
             "instructions": case_current_situation_instructions(),
-            "input": case_current_situation_input_text(input_payload),
+            "input": personalized_input_text(case_current_situation_input_text(input_payload), input_payload),
             "max_output_tokens": 1400,
             "text": {"format": case_current_situation_response_format()},
         }
@@ -1483,7 +1669,7 @@ class OpenAITaskPrefillProvider:
         payload = {
             "model": self.model_name,
             "instructions": task_prefill_instructions(),
-            "input": task_prefill_input_text(input_payload),
+            "input": personalized_input_text(task_prefill_input_text(input_payload), input_payload),
             "max_output_tokens": 900,
             "text": {"format": task_prefill_response_format()},
         }
@@ -1523,7 +1709,7 @@ class OpenAIHandoverTaskBatchProvider:
         payload = {
             "model": self.model_name,
             "instructions": handover_task_batch_instructions(),
-            "input": handover_task_batch_input_text(input_payload),
+            "input": personalized_input_text(handover_task_batch_input_text(input_payload), input_payload),
             "max_output_tokens": 2400,
             "text": {"format": handover_task_batch_response_format()},
         }
@@ -1563,7 +1749,7 @@ class OpenAICalendarEventPrefillProvider:
         payload = {
             "model": self.model_name,
             "instructions": calendar_event_prefill_instructions(),
-            "input": calendar_event_prefill_input_text(input_payload),
+            "input": personalized_input_text(calendar_event_prefill_input_text(input_payload), input_payload),
             "max_output_tokens": 800,
             "text": {"format": calendar_event_prefill_response_format()},
         }
@@ -1603,7 +1789,7 @@ class OpenAICasePrefillProvider:
         payload = {
             "model": self.model_name,
             "instructions": case_prefill_instructions(),
-            "input": case_prefill_input_text(input_payload),
+            "input": personalized_input_text(case_prefill_input_text(input_payload), input_payload),
             "max_output_tokens": 900,
             "text": {"format": case_prefill_response_format()},
         }
@@ -1646,7 +1832,7 @@ class OpenAIMailDraftGenerationProvider:
         payload = {
             "model": self.model_name,
             "instructions": mail_draft_generation_instructions(function_type),
-            "input": mail_draft_generation_input_text(input_payload),
+            "input": personalized_input_text(mail_draft_generation_input_text(input_payload), input_payload),
             "max_output_tokens": 2500,
             "text": {
                 "format": mail_draft_generation_response_format(function_type),
@@ -1688,7 +1874,7 @@ class OpenAIMailThreadSummaryProvider:
         payload = {
             "model": self.model_name,
             "instructions": mail_thread_summary_instructions(),
-            "input": mail_thread_summary_input_text(input_payload),
+            "input": personalized_input_text(mail_thread_summary_input_text(input_payload), input_payload),
             "max_output_tokens": 1800,
             "text": {"format": mail_summary_response_format("mail_thread_summary")},
         }
@@ -2661,7 +2847,7 @@ def case_current_situation_input_text(input_payload: dict[str, object]) -> str:
         [
             (
                 "Case current situation input JSON:\n"
-                f"{truncated_text(json_text(input_payload), 50000)}"
+                f"{truncated_text(json_text({key: value for key, value in input_payload.items() if not key.startswith('_')}), 50000)}"
             )
         ]
     )
