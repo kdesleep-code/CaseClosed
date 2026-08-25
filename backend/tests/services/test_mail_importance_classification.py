@@ -326,11 +326,17 @@ def test_mail_importance_classification_keeps_llm_skip_as_skip(
     assert orchestrator.run_once() == job_id
 
     with sqlite3.connect(database_path) as connection:
-        auto_row = connection.execute(
+        state_row = connection.execute(
             """
-            SELECT suggested_importance, effective_importance, llm_run_id
+            SELECT mail_auto_state.suggested_importance,
+                   mail_auto_state.effective_importance,
+                   mail_auto_state.llm_run_id,
+                   mail_user_state.processed_status,
+                   mail_user_state.processed_at
             FROM mail_auto_state
-            WHERE message_id = ?
+            JOIN mail_user_state
+              ON mail_user_state.message_id = mail_auto_state.message_id
+            WHERE mail_auto_state.message_id = ?
             """,
             (message_id,),
         ).fetchone()
@@ -342,8 +348,10 @@ def test_mail_importance_classification_keeps_llm_skip_as_skip(
     result = json.loads(job_row[1])
     assert job_row[0] == "succeeded"
     assert result["suggested_importance"] == "skip"
-    assert auto_row[0:2] == ("skip", "skip")
-    assert auto_row[2] == result["llm_run_id"]
+    assert state_row[0:2] == ("skip", "skip")
+    assert state_row[2] == result["llm_run_id"]
+    assert state_row[3] == "processed"
+    assert state_row[4] is not None
 
 
 def test_mail_importance_classification_uses_profile_context(

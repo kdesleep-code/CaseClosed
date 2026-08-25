@@ -117,6 +117,34 @@ def bootstrap_database() -> None:
 def ensure_runtime_schema() -> None:
     inspector = inspect(engine)
     table_names = inspector.get_table_names()
+    if "dictionary_entry_aliases" in table_names:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_dictionary_entry_aliases_entry_id
+                    ON dictionary_entry_aliases (entry_id)
+                    """
+                )
+            )
+    if "dictionary_entry_links" in table_names:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_dictionary_entry_links_source
+                    ON dictionary_entry_links (source_entry_id)
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_dictionary_entry_links_target
+                    ON dictionary_entry_links (target_entry_id)
+                    """
+                )
+            )
     if "storage_objects" in table_names:
         with engine.begin() as connection:
             connection.execute(

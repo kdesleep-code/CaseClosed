@@ -70,6 +70,9 @@ from caseclosed.services.background_worker import kick_job_drain
 from caseclosed.services.mail_attachment_fetch import (
     enqueue_mail_attachment_fetch_job,
 )
+from caseclosed.services.mail_attachment_visibility import (
+    is_probable_generated_inline_image,
+)
 from caseclosed.services.llm_provider import LLM_FUNCTION_TYPES
 from caseclosed.services.llm_provider import LLM_SETTINGS_RULE_ID_PREFIX
 from caseclosed.services.llm_provider import (
@@ -85,6 +88,7 @@ from caseclosed.services.llm_provider import with_llm_personalization
 from caseclosed.services.llm_provider import llm_model_profile_data
 from caseclosed.services.mail_summary import SUMMARY_TARGET_IMPORTANCE
 from caseclosed.services.mail_summary import enqueue_mail_summary_job
+from caseclosed.services.mail_state_transitions import clear_done_after_leaving_skip
 from caseclosed.storage import delete_storage_object
 from caseclosed.storage import save_storage_object
 from caseclosed.storage import storage_object_data
@@ -1103,19 +1107,11 @@ def mail_attachment_data(
     }
 
 
-LEGACY_INLINE_IMAGE_FILENAME_PATTERN = re.compile(
-    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-    re.IGNORECASE,
-)
-
-
 def is_legacy_inline_image(attachment: GmailMessageAttachment) -> bool:
-    return (
-        (attachment.mime_type or "").lower().startswith("image/")
-        and attachment.byte_size <= 32 * 1024
-        and LEGACY_INLINE_IMAGE_FILENAME_PATTERN.fullmatch(
-            attachment.filename.strip()
-        ) is not None
+    return is_probable_generated_inline_image(
+        filename=attachment.filename,
+        mime_type=attachment.mime_type,
+        byte_size=attachment.byte_size,
     )
 
 
@@ -2613,6 +2609,10 @@ def send_mail(
     if len(to_addresses) == 0:
         raise json_error(422, "VALIDATION_ERROR", "At least one recipient is required.")
 
+    subject = (payload.subject or "").strip()
+    if subject == "":
+        raise json_error(422, "VALIDATION_ERROR", "Subject is required.")
+
     body_text = payload.body_text
     if body_text.strip() == "":
         raise json_error(422, "VALIDATION_ERROR", "Body text is required.")
@@ -2663,7 +2663,7 @@ def send_mail(
             ),
             ensure_ascii=True,
         ),
-        subject=payload.subject,
+        subject=subject,
         body_text=body_text,
         attachment_names_json=json.dumps(attachment_names, ensure_ascii=True),
         attachment_data_json=attachment_data_json,
@@ -3184,7 +3184,13 @@ def promote_review_mail_to_middle(
         raise json_error(409, "CONFLICT", "Mail is not available for review.")
 
     now = jst_iso()
+    previous_importance = user_state.user_importance or auto_state.effective_importance
     user_state.user_importance = "middle"
+    clear_done_after_leaving_skip(
+        user_state,
+        previous_importance=previous_importance,
+        new_importance="middle",
+    )
     user_state.updated_at = now
     user_state.version += 1
     auto_state.effective_importance = "middle"
@@ -4045,7 +4051,13 @@ def update_mail_importance(
 
     importance = normalize_importance(payload.importance)
     now = jst_iso()
+    previous_importance = user_state.user_importance or auto_state.effective_importance
     user_state.user_importance = importance
+    clear_done_after_leaving_skip(
+        user_state,
+        previous_importance=previous_importance,
+        new_importance=importance,
+    )
     user_state.updated_at = now
     user_state.version += 1
     auto_state.effective_importance = importance

@@ -485,8 +485,14 @@ describe('Phase 4 mail screen', () => {
     expect(screen.getByRole('button', { name: 'Schedule send' })).toBeDisabled()
 
     await user.type(screen.getByLabelText('To'), 'receiver@example.com')
-    await user.type(screen.getByLabelText('Subject'), 'Draft subject')
     await user.type(screen.getByLabelText('Body'), 'Draft body')
+
+    expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled()
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    expect(await screen.findByText('Enter a subject before sending.')).toBeInTheDocument()
+    expect(sentPayload).toBeNull()
+
+    await user.type(screen.getByLabelText('Subject'), 'Draft subject')
 
     expect(screen.getByLabelText('To')).toHaveValue('receiver@example.com')
     expect(screen.getByLabelText('Subject')).toHaveValue('Draft subject')
@@ -678,6 +684,7 @@ describe('Phase 4 mail screen', () => {
       await screen.findByRole('heading', { level: 1, name: 'Compose Mail' }),
     ).toBeInTheDocument()
     await user.type(screen.getByLabelText('To'), 'receiver@example.com')
+    await user.type(screen.getByLabelText('Subject'), 'Attachment notice')
     await user.type(screen.getByLabelText('Body'), '資料を添付します。')
     await user.click(screen.getByRole('button', { name: 'Send' }))
 

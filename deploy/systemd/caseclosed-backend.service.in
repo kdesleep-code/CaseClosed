@@ -1,0 +1,18 @@
+[Unit]
+Description=CaseClosed backend
+Wants=network-online.target tailscaled.service
+After=network-online.target tailscaled.service
+
+[Service]
+Type=simple
+User=@CASECLOSED_SERVICE_USER@
+Group=@CASECLOSED_SERVICE_GROUP@
+WorkingDirectory=@CASECLOSED_ROOT@
+ExecStart="@CASECLOSED_ROOT@/.venv/bin/uvicorn" caseclosed.main:app --app-dir backend/src --env-file .env --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

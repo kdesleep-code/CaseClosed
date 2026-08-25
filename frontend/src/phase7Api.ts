@@ -217,6 +217,10 @@ export function isCaseOpenForSuggestion(item: CaseItem, today = new Date()): boo
   return item.open_when_date <= localToday
 }
 
+export function isCaseAvailableForMailAssignment(item: CaseItem): boolean {
+  return item.archived_at === null && item.closed_at === null
+}
+
 type ListResponse<T> = {
   items: T[]
 }

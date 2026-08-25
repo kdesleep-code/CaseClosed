@@ -35,6 +35,7 @@ import CaseAutoAssignRulesView from './CaseAutoAssignRulesView'
 import CaseView from './CaseView'
 import ComposeMailView from './ComposeMailView'
 import ContactsView from './ContactsView'
+import DictionaryView from './DictionaryView'
 import ContactAutoTagRulesView from './ContactAutoTagRulesView'
 import type { ContactsInitialData } from './ContactsView'
 import ExtensionLaunchView from './ExtensionLaunchView'
@@ -192,6 +193,7 @@ const pageLinks: LinkItem[] = [
   { labelKey: 'nav.contacts', href: '/contacts', iconUrl: topContactsTanukiIconUrl },
   { labelKey: 'nav.files', href: '/files', iconUrl: topFilesTanukiIconUrl },
   { labelKey: 'nav.bookshelf', href: '/bookshelf', iconUrl: topBookshelfTanukiIconUrl },
+  { labelKey: 'nav.dictionary', href: '/dictionary', iconUrl: topBookshelfTanukiIconUrl },
   { labelKey: 'nav.papers', href: '/papers', iconUrl: topPapersTanukiIconUrl },
   { labelKey: 'nav.pomodoro', href: '/pomodoro', target: '_blank', rel: 'noopener noreferrer', iconUrl: topPomodoroTanukiIconUrl },
   { labelKey: 'nav.externalTools', href: '/external-tools', iconUrl: topExternalToolsTanukiIconUrl },
@@ -2538,6 +2540,24 @@ function App() {
           {pendingContactNoticeElement}
           {navigationError !== null && <p className="route-error">{navigationError}</p>}
           <BookshelfView />
+        </>
+      )
+    }
+    if (path === '/dictionary') {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <DictionaryView />
+        </>
+      )
+    }
+    if (path.startsWith('/dictionary/')) {
+      return (
+        <>
+          {pendingContactNoticeElement}
+          {navigationError !== null && <p className="route-error">{navigationError}</p>}
+          <DictionaryView entryId={decodeURIComponent(path.slice('/dictionary/'.length))} />
         </>
       )
     }

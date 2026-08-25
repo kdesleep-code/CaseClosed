@@ -2127,6 +2127,11 @@ function CaseDetailView({ caseId }: { caseId: string }) {
                       <AppLink href={`/cases/${encodeURIComponent(item.id)}/mails`}>
                         {t('cases.mail.viewAll')}
                       </AppLink>
+                      <AppLink
+                        href={`/mail/compose?case_id=${encodeURIComponent(item.id)}&return_to=${encodeURIComponent(`/cases/${item.id}`)}`}
+                      >
+                        {t('cases.mailCompose.button')}
+                      </AppLink>
                       <AppLink href={`/cases/${encodeURIComponent(item.id)}/mails?assign=1`}>
                         {t('cases.mail.assign')}
                       </AppLink>
@@ -2258,16 +2263,6 @@ function CaseDetailView({ caseId }: { caseId: string }) {
             </div>
             <aside aria-label={t('cases.gadgets')} className="case-gadget-column">
               <CaseCalendarGadget caseItem={item} calendarEvents={detail.calendar_events} />
-              <section className="case-gadget-card">
-                <h2>{t("cases.mailCompose.heading")}</h2>
-                <p className="task-gadget-empty">{t("cases.mailCompose.description")}</p>
-                <AppLink
-                  className="case-gadget-action"
-                  href={`/mail/compose?case_id=${encodeURIComponent(item.id)}&return_to=${encodeURIComponent(`/cases/${item.id}`)}`}
-                >
-                  {t("cases.mailCompose.button")}
-                </AppLink>
-              </section>
               <CaseToolsGadget caseId={item.id} initialTools={detail.tool_links ?? []} />
               {!item.is_system_case && (
                 <>

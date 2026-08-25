@@ -610,9 +610,11 @@ def test_marking_contact_spam_updates_existing_from_and_reply_to_mail(
     with sqlite3.connect(database_path) as connection:
         rows = connection.execute(
             """
-            SELECT gm.gmail_message_id, mas.effective_importance, mas.pending_reason
+            SELECT gm.gmail_message_id, mas.effective_importance,
+                   mas.pending_reason, mus.processed_status
             FROM gmail_messages gm
             JOIN mail_auto_state mas ON mas.message_id = gm.id
+            JOIN mail_user_state mus ON mus.message_id = gm.id
             WHERE gm.gmail_message_id IN (
                 'gmail_existing_from_spam',
                 'gmail_existing_reply_to_spam'
@@ -622,8 +624,8 @@ def test_marking_contact_spam_updates_existing_from_and_reply_to_mail(
         ).fetchall()
 
     assert rows == [
-        ("gmail_existing_from_spam", "skip", None),
-        ("gmail_existing_reply_to_spam", "skip", None),
+        ("gmail_existing_from_spam", "skip", None, "processed"),
+        ("gmail_existing_reply_to_spam", "skip", None, "processed"),
     ]
 
 

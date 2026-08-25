@@ -1,0 +1,19 @@
+[Unit]
+Description=CaseClosed frontend
+Wants=network-online.target tailscaled.service caseclosed-backend.service
+After=network-online.target tailscaled.service caseclosed-backend.service
+
+[Service]
+Type=simple
+User=@CASECLOSED_SERVICE_USER@
+Group=@CASECLOSED_SERVICE_GROUP@
+WorkingDirectory=@CASECLOSED_ROOT@/frontend
+ExecStart="@NPM_BIN@" run dev -- --host 0.0.0.0 --port 8443 --strictPort
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+Environment="HOME=@CASECLOSED_USER_HOME@"
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+[Install]
+WantedBy=multi-user.target

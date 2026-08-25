@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { DragEvent, FormEvent } from 'react'
 import { t } from './i18n'
+import { authoredBodyMentionsAttachment } from './mailAttachmentReminder'
 import { TopNav, navigateTo } from './navigation'
 import { listContacts } from './phase3Api'
 import type { Contact } from './phase3Api'
@@ -263,10 +264,6 @@ function fileFromBase64(
     bytes[index] = binary.charCodeAt(index)
   }
   return new File([bytes], filename, { type: contentType })
-}
-
-function bodyMentionsAttachment(bodyText: string) {
-  return /添付|送付|attach(?:ed|ment)?|enclos(?:e|ed|ure)/i.test(bodyText)
 }
 
 export default function ComposeMailView() {
@@ -612,9 +609,14 @@ export default function ComposeMailView() {
 
   async function submitMail(scheduledAtIso: string | null = null) {
     const bodyText = composedBodyText()
+    if (form.subject.trim() === '') {
+      setFeedback(null)
+      setError(t('mail.compose.subjectRequired'))
+      return
+    }
     if (
       attachments.length === 0 &&
-      bodyMentionsAttachment(form.body) &&
+      authoredBodyMentionsAttachment(form.body, form.autoBody) &&
       !window.confirm(t('mail.compose.missingAttachmentConfirm'))
     ) {
       return

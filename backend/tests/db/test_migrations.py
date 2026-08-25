@@ -19,6 +19,28 @@ def test_phase_1_migrations_upgrade_a_new_sqlite_database(
     assert PHASE_1_TABLES <= table_names
 
 
+def test_dictionary_migration_adds_entry_tables_and_indexes(migrated_database) -> None:
+    table_names = sqlite_table_names(migrated_database)
+    assert {
+        "dictionary_entries",
+        "dictionary_entry_aliases",
+        "dictionary_entry_links",
+    } <= table_names
+
+    with sqlite3.connect(migrated_database) as connection:
+        index_names = {
+            row[1]
+            for table_name in ("dictionary_entry_aliases", "dictionary_entry_links")
+            for row in connection.execute(f"PRAGMA index_list({table_name})").fetchall()
+        }
+
+    assert {
+        "ix_dictionary_entry_aliases_entry_id",
+        "ix_dictionary_entry_links_source",
+        "ix_dictionary_entry_links_target",
+    } <= index_names
+
+
 def test_phase_2_migrations_add_job_and_writer_tables(
     migrated_database,
 ) -> None:

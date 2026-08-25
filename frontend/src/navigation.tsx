@@ -143,6 +143,7 @@ const standardNavigationAreas: Record<string, string> = {
   '/case-auto-assign-rules': 'cases',
   '/contacts': 'contacts',
   '/contact-auto-tag-rules': 'contacts',
+  '/dictionary': 'dictionary',
   '/extensions': 'extensions',
   '/external-tools': 'external-tools',
   '/files': 'files',
@@ -181,6 +182,7 @@ function navigationAreaForPathname(pathname: string) {
   }
   if (pathname === '/file-icons' || pathname.startsWith('/files/')) return 'files'
   if (pathname === '/bookshelf/tag-hierarchy' || pathname.startsWith('/bookshelf/')) return 'bookshelf'
+  if (pathname.startsWith('/dictionary/')) return 'dictionary'
   if (pathname === '/paper-journal-icons' || pathname.startsWith('/papers/')) return 'papers'
   if (pathname === '/extensions/help' || pathname === '/extensions/launch') return 'extensions'
   return standardNavigationAreas[pathname] ?? null
@@ -263,6 +265,7 @@ function topNavRank(href: string) {
   if (pathname === '/academic-calendar') return 55
   if (pathname === '/files' || pathname === '/file-icons') return 60
   if (pathname === '/external-tools') return 65
+  if (pathname === '/dictionary') return 64
   if (pathname === '/extensions' || pathname.startsWith('/extensions/')) return 66
   if (pathname === '/profile') return 70
   if (pathname === '/settings') return 75

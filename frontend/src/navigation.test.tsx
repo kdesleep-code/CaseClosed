@@ -108,4 +108,14 @@ describe('resolveTopNavHref', () => {
     window.history.replaceState({}, '', '/tasks/task_1')
     expect(resolveTopNavHref('/tasks')).toBe('/tasks')
   })
+
+  it('restores a dictionary detail for the related dictionary button', () => {
+    window.history.replaceState(
+      {},
+      '',
+      '/settings?return_to=%2Fdictionary%2Fentry_1',
+    )
+
+    expect(resolveTopNavHref('/dictionary')).toBe('/dictionary/entry_1')
+  })
 })

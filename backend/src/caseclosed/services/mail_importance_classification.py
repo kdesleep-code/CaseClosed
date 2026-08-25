@@ -13,12 +13,14 @@ from caseclosed.db.models import GmailThread
 from caseclosed.db.models import Job
 from caseclosed.db.models import LlmRun
 from caseclosed.db.models import MailAutoState
+from caseclosed.db.models import MailUserState
 from caseclosed.services.llm_provider import LlmProvider
 from caseclosed.services.llm_provider import llm_applied_instruction_rule_ids
 from caseclosed.services.llm_provider import with_llm_personalization
 from caseclosed.services.llm_provider import build_mail_importance_provider
 from caseclosed.services.mail_summary import SUMMARY_TARGET_IMPORTANCE
 from caseclosed.services.mail_summary import enqueue_mail_summary_job
+from caseclosed.services.mail_state_transitions import mark_skip_mail_done
 
 FUNCTION_TYPE = "mail_importance_classification"
 USER_PROFILE_KEY = "user_profile"
@@ -224,6 +226,16 @@ def handle_mail_importance_classification(
             suggested_importance=suggested_importance,
             case_linked=mail_thread_has_case_link(session, message.thread_id),
         )
+        user_state = session.scalar(
+            select(MailUserState).where(MailUserState.message_id == message.id)
+        )
+        if user_state is not None and mark_skip_mail_done(
+            user_state,
+            effective_importance=auto_state.effective_importance,
+            now=now,
+        ):
+            user_state.updated_at = now
+            user_state.version += 1
         auto_state.updated_at = now
         auto_state.version += 1
         queued_summary_job_id = None

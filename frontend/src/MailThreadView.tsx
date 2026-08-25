@@ -35,7 +35,7 @@ import {
 import type { GoogleCalendarEvent, MailAttachment, MailDetail, MailSendRequest, MailThreadMessage } from './phase4Api'
 import type { CalendarEventFromMailPrefill } from './phase4Api'
 import type { MailRecipient } from './phase4Api'
-import { isCaseOpenForSuggestion, listCases } from './phase7Api'
+import { isCaseAvailableForMailAssignment, listCases } from './phase7Api'
 import type { CaseItem } from './phase7Api'
 import { createTaskFromMail } from './phase8Api'
 import { getProfile } from './profileApi'
@@ -1746,7 +1746,7 @@ function MailThreadView({ messageId }: MailThreadViewProps) {
     listCases('all')
       .then((items) => {
         if (isMounted) {
-          setCaseCandidates(items.filter((item) => isCaseOpenForSuggestion(item)))
+          setCaseCandidates(items.filter((item) => isCaseAvailableForMailAssignment(item)))
         }
       })
       .catch((requestError) => {

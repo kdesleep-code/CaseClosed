@@ -64,6 +64,9 @@ from caseclosed.services.llm_provider import llm_applied_instruction_rule_ids
 from caseclosed.services.llm_provider import with_llm_personalization
 from caseclosed.services.llm_provider import build_calendar_event_prefill_provider
 from caseclosed.services.mail_thread_summary import split_quoted_reply_sections
+from caseclosed.services.mail_attachment_visibility import (
+    is_probable_generated_inline_image,
+)
 from caseclosed.settings import get_google_gmail_scopes
 from caseclosed.settings import get_google_oauth_client_id
 from caseclosed.settings import get_google_oauth_client_secret
@@ -4213,37 +4216,32 @@ def collect_message_attachments(payload: dict[str, object]) -> list[MailAttachme
         ).strip().lower()
         content_id = (first_header(headers, "content-id") or "").strip()
         mime_type = part.get("mimeType")
-        is_inline = (
-            content_disposition == "inline"
-            or content_disposition.startswith("inline;")
-            or (
-                content_id != ""
-                and isinstance(mime_type, str)
-                and mime_type.lower().startswith("image/")
-            )
-        )
         if (
-            not is_inline
-            and isinstance(filename, str)
+            isinstance(filename, str)
             and filename.strip() != ""
             and isinstance(body, dict)
         ):
             attachment_id = body.get("attachmentId")
             if isinstance(attachment_id, str) and attachment_id.strip() != "":
                 size = body.get("size")
-                attachments.append(
-                    MailAttachmentInput(
-                        gmail_attachment_id=attachment_id.strip(),
-                        filename=filename.strip(),
-                        mime_type=(
-                            mime_type
-                            if isinstance(mime_type, str)
-                            else None
-                        ),
-                        byte_size=size if isinstance(size, int) else 0,
-                        part_id=part.get("partId") if isinstance(part.get("partId"), str) else None,
+                byte_size = size if isinstance(size, int) else 0
+                normalized_mime_type = mime_type if isinstance(mime_type, str) else None
+                if not is_probable_generated_inline_image(
+                    filename=filename,
+                    mime_type=normalized_mime_type,
+                    byte_size=byte_size,
+                    content_disposition=content_disposition,
+                    content_id=content_id,
+                ):
+                    attachments.append(
+                        MailAttachmentInput(
+                            gmail_attachment_id=attachment_id.strip(),
+                            filename=filename.strip(),
+                            mime_type=normalized_mime_type,
+                            byte_size=byte_size,
+                            part_id=part.get("partId") if isinstance(part.get("partId"), str) else None,
+                        )
                     )
-                )
         parts = part.get("parts")
         if isinstance(parts, list):
             for child in parts:

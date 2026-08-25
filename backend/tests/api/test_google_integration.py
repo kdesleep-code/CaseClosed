@@ -18,7 +18,7 @@ def test_google_gmail_status_reports_not_configured(client) -> None:
     assert data["mail_loading_enabled"] is False
 
 
-def test_collect_message_attachments_excludes_inline_images() -> None:
+def test_collect_message_attachments_only_excludes_generated_small_inline_images() -> None:
     from caseclosed.google_integration import collect_message_attachments
 
     payload = {
@@ -36,6 +36,26 @@ def test_collect_message_attachments_excludes_inline_images() -> None:
             },
             {
                 "partId": "2",
+                "mimeType": "image/jpeg",
+                "filename": "20260820_tatebe_03.jpg",
+                "headers": [
+                    {"name": "Content-Disposition", "value": "inline"},
+                    {"name": "Content-ID", "value": "<inserted-photo>"},
+                ],
+                "body": {"attachmentId": "visible-inline-image", "size": 73086},
+            },
+            {
+                "partId": "3",
+                "mimeType": "image/png",
+                "filename": "5f86a462-f47c-4f7c-a58d-e470793ad7aa",
+                "headers": [
+                    {"name": "Content-Disposition", "value": "attachment"},
+                    {"name": "Content-ID", "value": "<explicit-attachment>"},
+                ],
+                "body": {"attachmentId": "explicit-small-image", "size": 2048},
+            },
+            {
+                "partId": "4",
                 "mimeType": "application/pdf",
                 "filename": "研究概要.pdf",
                 "headers": [
@@ -51,9 +71,16 @@ def test_collect_message_attachments_excludes_inline_images() -> None:
 
     attachments = collect_message_attachments(payload)
 
-    assert len(attachments) == 1
-    assert attachments[0].gmail_attachment_id == "actual-file"
-    assert attachments[0].filename == "研究概要.pdf"
+    assert [attachment.gmail_attachment_id for attachment in attachments] == [
+        "visible-inline-image",
+        "explicit-small-image",
+        "actual-file",
+    ]
+    assert [attachment.filename for attachment in attachments] == [
+        "20260820_tatebe_03.jpg",
+        "5f86a462-f47c-4f7c-a58d-e470793ad7aa",
+        "研究概要.pdf",
+    ]
 
 
 def test_calendar_event_time_accepts_canonical_and_legacy_datetime_inputs() -> None:

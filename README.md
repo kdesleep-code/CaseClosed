@@ -98,6 +98,36 @@ tmux kill-session -t caseclosed-dev
 
 初回起動時に、SQLiteデータベース、Storageディレクトリ、初期設定などが自動作成されます。新規インストールでは、通常は手動で`alembic upgrade`を実行する必要はありません。
 
+### UbuntuでOS起動時に自動起動する
+
+`deploy/systemd/`には、BackendとFrontendをsystemdで管理するための環境非依存テンプレートがあります。次のインストーラーを一般ユーザーとして実行すると、現在のユーザー名、リポジトリの絶対パス、`npm`の場所を使ってローカル用サービスを生成し、OS起動時の自動起動を有効にします。
+
+```bash
+./deploy/systemd/install.sh
+```
+
+生成された環境固有のサービス定義は`deploy/systemd/generated/`に置かれ、Git管理対象にはなりません。テンプレートとインストーラーだけがGitで共有されます。
+
+インストールせず、ローカル用サービスの生成と検証だけを行う場合は`--generate-only`を使用できます。
+
+```bash
+./deploy/systemd/install.sh --generate-only
+```
+
+現在のプロセスもsystemd管理へ切り替える場合は、先に同じポートを使うtmuxセッションを停止してから`--start`を付けます。
+
+```bash
+tmux kill-session -t caseclosed-dev
+./deploy/systemd/install.sh --start
+```
+
+状態とログは次のコマンドで確認できます。
+
+```bash
+systemctl status caseclosed-backend.service caseclosed-frontend.service
+journalctl -u caseclosed-backend.service -u caseclosed-frontend.service
+```
+
 ## Windowsでのセットアップと起動
 
 PowerShellでリポジトリのルートを開きます。

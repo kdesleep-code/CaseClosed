@@ -18,6 +18,7 @@ from caseclosed.contacts import router as contacts_router
 from caseclosed.db.runtime import bootstrap_database
 from caseclosed.db.runtime import rebuild_runtime_database
 from caseclosed.db.runtime import SessionLocal
+from caseclosed.dictionary import router as dictionary_router
 from caseclosed.external_operations import router as external_operations_router
 from caseclosed.external_tools import router as external_tools_router
 from caseclosed.followups import router as followups_router
@@ -81,6 +82,7 @@ app.include_router(academic_calendar_router)
 app.include_router(auth_router)
 app.include_router(cases_router)
 app.include_router(contacts_router)
+app.include_router(dictionary_router)
 app.include_router(jobs_router)
 app.include_router(external_operations_router)
 app.include_router(external_tools_router)

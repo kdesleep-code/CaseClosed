@@ -158,8 +158,9 @@ def test_mail_thread_can_be_assigned_to_case(client) -> None:
         json={
             "name": "Assigned Thread Case",
             "description": None,
-            "progress_status": "in_progress",
-            "ball_status": "user",
+            "open_when_date": "2099-01-01",
+            "progress_status": "not_started",
+            "ball_status": "date_wait",
         },
     )
     assert case_response.status_code == 200
@@ -208,6 +209,11 @@ def test_mail_thread_can_be_assigned_to_case(client) -> None:
             "title": "Assigned Thread Case",
         }
     ]
+    case_after_assignment = client.get(f"{CASES_URL}/{case_id}").json()["data"]["case"]
+    assert case_after_assignment["open_when_date"] == "2099-01-01"
+    assert case_after_assignment["progress_status"] == "not_started"
+    assert case_after_assignment["closed_at"] is None
+    assert case_after_assignment["archived_at"] is None
 
     second_detail = client.get(f"{MAILS_URL}/{second_message_id}")
     assert second_detail.status_code == 200
@@ -811,6 +817,32 @@ def test_mail_detail_hides_legacy_inline_uuid_images(client, database_path) -> N
     assert message["attachments"] == []
     assert message["attachment_count"] == 0
     assert message["has_attachments"] is False
+
+
+def test_mail_detail_shows_named_inline_image_attachments(client, database_path) -> None:
+    message_id = create_known_sender_mail(
+        client,
+        subject="Named inline photo",
+        body_text="A photo was inserted into the message.",
+    )
+    insert_received_attachment(
+        database_path,
+        attachment_id="mail_attachment_named_inline_image",
+        message_id=message_id,
+        gmail_message_id="gmail_mail_api_1",
+        gmail_attachment_id="gmail_named_inline_image",
+        filename="20260820_tatebe_03.jpg",
+        mime_type="image/jpeg",
+        byte_size=73086,
+    )
+
+    detail_response = client.get(f"{MAILS_URL}/{message_id}")
+
+    assert detail_response.status_code == 200
+    message = detail_response.json()["data"]["message"]
+    assert message["attachment_count"] == 1
+    assert message["has_attachments"] is True
+    assert message["attachments"][0]["filename"] == "20260820_tatebe_03.jpg"
 
 
 def test_mail_attachment_download_caches_gmail_data(
@@ -2159,10 +2191,19 @@ def test_send_mail_requires_recipient_and_existing_reply_target(client) -> None:
         f"{MAILS_URL}/send",
         json={"to_addresses": [], "body_text": "Body."},
     )
+    missing_subject_response = client.post(
+        f"{MAILS_URL}/send",
+        json={
+            "to_addresses": ["reply@example.com"],
+            "subject": "   ",
+            "body_text": "Body.",
+        },
+    )
     missing_reply_target_response = client.post(
         f"{MAILS_URL}/send",
         json={
             "to_addresses": ["reply@example.com"],
+            "subject": "Reply subject",
             "body_text": "Body.",
             "reply_to_message_id": "mail_missing",
         },
@@ -2170,6 +2211,8 @@ def test_send_mail_requires_recipient_and_existing_reply_target(client) -> None:
 
     assert missing_recipient_response.status_code == 422
     assert missing_recipient_response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert missing_subject_response.status_code == 422
+    assert missing_subject_response.json()["error"]["message"] == "Subject is required."
     assert missing_reply_target_response.status_code == 404
     assert missing_reply_target_response.json()["error"]["code"] == "NOT_FOUND"
 
@@ -2663,7 +2706,9 @@ def test_mail_list_needs_action_matches_unprocessed_high_or_middle_messages(
     assert items_by_thread_id["thread_needs_high_low_same_thread"]["id"] == high_same_thread_id
 
 
-def test_spam_contact_mail_appears_in_skip_tab_with_contact_status(client) -> None:
+def test_skip_mail_defaults_done_prefers_skip_tab_and_manual_promotion_reopens(
+    client,
+) -> None:
     client.post(
         CONTACTS_URL,
         json={
@@ -2684,12 +2729,35 @@ def test_spam_contact_mail_appears_in_skip_tab_with_contact_status(client) -> No
     )
 
     skip_response = client.get(f"{MAILS_URL}?tab=skip")
+    processed_response = client.get(f"{MAILS_URL}?tab=processed")
 
     assert skip_response.status_code == 200
     items = skip_response.json()["data"]["items"]
     assert [item["id"] for item in items] == [message_id]
     assert items[0]["effective_importance"] == "skip"
+    assert items[0]["processed_status"] == "processed"
     assert items[0]["sender_contact"]["status"] == "spam"
+    assert message_id not in {
+        item["id"] for item in processed_response.json()["data"]["items"]
+    }
+
+    importance_response = client.post(
+        f"{MAILS_URL}/{message_id}/importance",
+        json={"importance": "Middle"},
+    )
+
+    assert importance_response.status_code == 200
+    detail = importance_response.json()["data"]
+    assert detail["auto_state"]["effective_importance"] == "middle"
+    assert detail["user_state"]["processed_status"] == "unprocessed"
+    assert message_id not in {
+        item["id"]
+        for item in client.get(f"{MAILS_URL}?tab=skip").json()["data"]["items"]
+    }
+    assert message_id in {
+        item["id"]
+        for item in client.get(f"{MAILS_URL}?tab=unprocessed").json()["data"]["items"]
+    }
 
 
 def test_mail_list_aggregates_inbound_messages_by_thread(client) -> None:

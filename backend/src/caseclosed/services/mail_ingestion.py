@@ -31,6 +31,7 @@ from caseclosed.services.contact_ai_memo_update import (
 )
 from caseclosed.services.follow_up_rules import create_follow_up_for_sent_message
 from caseclosed.services.follow_up_rules import resolve_follow_ups_for_reply
+from caseclosed.services.mail_state_transitions import mark_skip_mail_done
 
 SUMMARY_TARGET_IMPORTANCE = {"high", "middle"}
 SPAM_SUBJECT_PATTERN = re.compile(r"\[\s*spam\s*\]", re.IGNORECASE)
@@ -151,6 +152,18 @@ def ingest_mock_mail(
             existing_auto_state.llm_blocked_at = None
             existing_auto_state.updated_at = now
             existing_auto_state.version += 1
+            existing_user_state = session.scalar(
+                select(MailUserState).where(
+                    MailUserState.message_id == existing_message.id
+                )
+            )
+            if existing_user_state is not None and mark_skip_mail_done(
+                existing_user_state,
+                effective_importance="skip",
+                now=now,
+            ):
+                existing_user_state.updated_at = now
+                existing_user_state.version += 1
         session.commit()
         pending_email_address = (
             session.get(ContactEmailAddress, existing_auto_state.pending_from_address_id)
@@ -210,21 +223,6 @@ def ingest_mock_mail(
     )
     session.add(message)
     upsert_message_attachments(session, message, mail_input, now)
-    session.add(
-        MailUserState(
-            id=new_id("mail_user_state"),
-            message_id=message.id,
-            user_importance=None,
-            processed_status="processed" if is_sent else "unprocessed",
-            processed_at=now if is_sent else None,
-            read_status="read" if is_sent else "unread",
-            read_at=now if is_sent else None,
-            created_at=now,
-            updated_at=now,
-            version=1,
-        )
-    )
-
     subject_marked_spam = mail_input_subject_marked_spam(mail_input)
     sender_resolution = (
         SenderResolution(
@@ -261,6 +259,21 @@ def ingest_mock_mail(
         effective_importance = "high" if mail_input.external_starred else "low"
     if force_skip:
         effective_importance = "skip"
+    starts_done = is_sent or effective_importance == "skip"
+    session.add(
+        MailUserState(
+            id=new_id("mail_user_state"),
+            message_id=message.id,
+            user_importance=None,
+            processed_status="processed" if starts_done else "unprocessed",
+            processed_at=now if starts_done else None,
+            read_status="read" if is_sent else "unread",
+            read_at=now if is_sent else None,
+            created_at=now,
+            updated_at=now,
+            version=1,
+        )
+    )
     queued_job_id = None
     if (
         not force_skip
@@ -711,6 +724,7 @@ def apply_contact_mail_importance_rule(
     auto_state: MailAutoState,
     contact: Contact,
     now: str,
+    user_state: MailUserState | None = None,
 ) -> AppliedContactMailRule:
     auto_state.pending_reason = None
     auto_state.pending_from_address_id = None
@@ -729,6 +743,16 @@ def apply_contact_mail_importance_rule(
     sender_resolution = sender_resolution_for_resolved_contact(contact)
     if sender_resolution.skipped:
         auto_state.effective_importance = "skip"
+        resolved_user_state = user_state or session.scalar(
+            select(MailUserState).where(MailUserState.message_id == message.id)
+        )
+        if resolved_user_state is not None and mark_skip_mail_done(
+            resolved_user_state,
+            effective_importance="skip",
+            now=now,
+        ):
+            resolved_user_state.updated_at = now
+            resolved_user_state.version += 1
         return AppliedContactMailRule(
             changed=True,
             reason="released_to_skip",
@@ -854,6 +878,7 @@ def apply_fixed_importance_rule_to_existing_contact_mail(
             auto_state=auto_state,
             contact=contact,
             now=now,
+            user_state=user_state,
         )
         if result.changed:
             updated += 1
@@ -890,7 +915,8 @@ def apply_spam_status_to_existing_contact_mail(
         return {"matched": 0, "updated": 0, "preserved": 0}
 
     rows = session.execute(
-        select(GmailMessage, MailAutoState)
+        select(GmailMessage, MailUserState, MailAutoState)
+        .join(MailUserState, MailUserState.message_id == GmailMessage.id)
         .join(MailAutoState, MailAutoState.message_id == GmailMessage.id)
         .where(
             (GmailMessage.from_address.in_(normalized_addresses))
@@ -900,7 +926,7 @@ def apply_spam_status_to_existing_contact_mail(
 
     updated = 0
     preserved = 0
-    for message, auto_state in rows:
+    for message, user_state, auto_state in rows:
         if message_is_sent(message):
             preserved += 1
             continue
@@ -909,13 +935,29 @@ def apply_spam_status_to_existing_contact_mail(
             and auto_state.pending_reason is None
             and auto_state.pending_from_address_id is None
         ):
-            preserved += 1
+            if mark_skip_mail_done(
+                user_state,
+                effective_importance="skip",
+                now=now,
+            ):
+                user_state.updated_at = now
+                user_state.version += 1
+                updated += 1
+            else:
+                preserved += 1
             continue
         auto_state.effective_importance = "skip"
         auto_state.pending_reason = None
         auto_state.pending_from_address_id = None
         auto_state.updated_at = now
         auto_state.version += 1
+        if mark_skip_mail_done(
+            user_state,
+            effective_importance="skip",
+            now=now,
+        ):
+            user_state.updated_at = now
+            user_state.version += 1
         updated += 1
 
     return {"matched": len(rows), "updated": updated, "preserved": preserved}

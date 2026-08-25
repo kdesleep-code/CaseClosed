@@ -337,6 +337,46 @@ class ExternalToolLink(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
 
+class DictionaryEntry(Base):
+    __tablename__ = "dictionary_entries"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    headword: Mapped[str] = mapped_column(Text, nullable=False)
+    normalized_headword: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    interpretation: Mapped[str] = mapped_column(Text, nullable=False)
+    examples: Mapped[str | None] = mapped_column(Text)
+    source_urls_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class DictionaryEntryAlias(Base):
+    __tablename__ = "dictionary_entry_aliases"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    entry_id: Mapped[str] = mapped_column(
+        ForeignKey("dictionary_entries.id"), nullable=False, index=True
+    )
+    alias: Mapped[str] = mapped_column(Text, nullable=False)
+    normalized_alias: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class DictionaryEntryLink(Base):
+    __tablename__ = "dictionary_entry_links"
+    __table_args__ = (UniqueConstraint("source_entry_id", "target_entry_id"),)
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    source_entry_id: Mapped[str] = mapped_column(
+        ForeignKey("dictionary_entries.id"), nullable=False, index=True
+    )
+    target_entry_id: Mapped[str] = mapped_column(
+        ForeignKey("dictionary_entries.id"), nullable=False, index=True
+    )
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class ExtensionDefinition(Base):
     __tablename__ = "extension_definitions"
 
