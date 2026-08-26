@@ -13,6 +13,7 @@ import {
   fileExtension,
   isPreviewableImageFile,
   isPreviewableDelimitedTableFile,
+  isEditableTextFile,
   isPreviewableEmlFile,
   isPreviewableMarkdownFile,
   isPreviewablePdfFile,
@@ -38,6 +39,7 @@ import {
   uploadStorageObjectVersion,
   updateStorageObjectFilename,
   updateStorageObjectLlmInput,
+  updateTextStorageObject,
 } from './phase3Api'
 import type { StorageObject } from './phase3Api'
 import type { StorageDirectory } from './phase3Api'
@@ -64,6 +66,12 @@ type StoragePreviewFile = {
 
 function describeError(error: unknown) {
   return error instanceof Error ? error.message : t('storage.requestFailed')
+}
+
+function fitTextareaToContent(textarea: HTMLTextAreaElement | null) {
+  if (textarea === null) return
+  textarea.style.height = 'auto'
+  textarea.style.height = String(textarea.scrollHeight) + 'px'
 }
 
 function formatBytes(bytes: number) {
@@ -560,6 +568,9 @@ function StorageObjectDetailView({ storageObjectId }: { storageObjectId: string 
   const [renameBusy, setRenameBusy] = useState(false)
   const [deleteBusy, setDeleteBusy] = useState(false)
   const [versionBusy, setVersionBusy] = useState(false)
+  const [isTextEditing, setIsTextEditing] = useState(false)
+  const [textEditDraft, setTextEditDraft] = useState("")
+  const [textSaveBusy, setTextSaveBusy] = useState(false)
   const [isVersionDragOver, setIsVersionDragOver] = useState(false)
   const [selectedVersionId, setSelectedVersionId] = useState('current')
   const [error, setError] = useState<string | null>(null)
@@ -974,6 +985,28 @@ function StorageObjectDetailView({ storageObjectId }: { storageObjectId: string 
     }
   }
 
+  async function handleTextSave() {
+    if (object === null || textSaveBusy) return
+    setTextSaveBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const response = await updateTextStorageObject(object.id, textEditDraft)
+      const nextVersions = await listStorageObjectVersions(object.id)
+      setObject(response.storage_object)
+      setVersions(nextVersions)
+      setSelectedVersionId("current")
+      setTextPreview(textEditDraft)
+      setTextPreviewStatus("loaded")
+      setIsTextEditing(false)
+      setNotice(response.skipped ? t("storage.version.skippedDuplicate") : t("storage.text.savedVersion"))
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setTextSaveBusy(false)
+    }
+  }
+
   async function handleVersionDrop(file: File) {
     if (object === null || versionBusy) return
     const currentExtension = fileExtension(object.original_filename)
@@ -1282,9 +1315,15 @@ function StorageObjectDetailView({ storageObjectId }: { storageObjectId: string 
                 )}
               </section>
               <div
-                className={`storage-file-preview storage-version-drop-zone button-loading-dot${
-                  versionBusy ? ' is-loading' : ''
-                }${isVersionDragOver ? ' is-drag-over' : ''}`}
+                className={[
+                  'storage-file-preview storage-version-drop-zone button-loading-dot',
+                  versionBusy ? 'is-loading' : '',
+                  isVersionDragOver ? 'is-drag-over' : '',
+                  previewFile !== null && selectedVersion === null &&
+                    isEditableTextFile(previewFile.original_filename) && textPreviewStatus === 'loaded'
+                    ? 'is-editable-text'
+                    : '',
+                ].filter(Boolean).join(' ')}
                 onDragEnter={(event) => {
                   event.preventDefault()
                   event.stopPropagation()
@@ -1318,7 +1357,17 @@ function StorageObjectDetailView({ storageObjectId }: { storageObjectId: string 
                     <strong>{t('storage.version.dropHeading')}</strong>
                   </div>
                 )}
-                {previewFile === null ? (
+                {isTextEditing ? (
+                  <textarea
+                    aria-label={t("storage.text.content")}
+                    autoFocus
+                    className="storage-text-inline-editor"
+                    onChange={(event) => setTextEditDraft(event.target.value)}
+                    onInput={(event) => fitTextareaToContent(event.currentTarget)}
+                    ref={fitTextareaToContent}
+                    value={textEditDraft}
+                  />
+                ) : previewFile === null ? (
                   <p>{t('storage.preview.unavailable')}</p>
                 ) : isPreviewableImage(previewFile) ? (
                   <img
@@ -1375,6 +1424,27 @@ function StorageObjectDetailView({ storageObjectId }: { storageObjectId: string 
                 ) : (
                   <p>{t('storage.preview.unavailable')}</p>
                 )}
+                {isTextEditing ? (
+                  <div className="storage-detail-toolbar storage-text-edit-toolbar">
+                    <button
+                      className={'button-loading-dot' + (textSaveBusy ? ' is-loading' : '')}
+                      disabled={textSaveBusy}
+                      onClick={() => void handleTextSave()}
+                      type="button"
+                    >
+                      {t("storage.text.saveVersion")}
+                    </button>
+                    <button disabled={textSaveBusy} onClick={() => setIsTextEditing(false)} type="button">
+                      {t("common.cancel")}
+                    </button>
+                  </div>
+                ) : previewFile !== null && selectedVersion === null && isEditableTextFile(previewFile.original_filename) && textPreviewStatus === "loaded" ? (
+                  <div className="storage-detail-toolbar storage-text-edit-toolbar">
+                    <button onClick={() => { setTextEditDraft(textPreview ?? ""); setIsTextEditing(true) }} type="button">
+                      {t("storage.text.edit")}
+                    </button>
+                  </div>
+                ) : null}
               </div>
               <FileSummaryCard
                 isStale={fileSummaryIsStale}

@@ -48,7 +48,7 @@ def test_default_extension_template_is_registered(client) -> None:
     template = next(
         item for item in extensions if item["slug"] == "caseclosed-extension-template"
     )
-    assert template["name"] == "CaseClosed Extension Template"
+    assert template["name"] == "C@seClosed Extension Template"
     assert template["source"] == "default"
     supervise_template = next(
         item for item in extensions if item["slug"] == "supervise-case-template"

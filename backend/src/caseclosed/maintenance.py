@@ -236,7 +236,12 @@ def start_usb_restore(payload: UsbRestorePayload) -> dict[str, object]:
         raise json_error(404, "BACKUP_NOT_FOUND", "Backup was not found on this USB device.")
     backup_path = Path(str(device["mount_point"])) / BACKUP_DIRECTORY_NAME / str(backup["filename"])
     operation = launch_usb_operation(
-        ["--backup-path", str(backup_path), "--restart-script", str(PROJECT_ROOT / "restart-caseclosed-dev.ubuntu.sh")],
+        [
+            "--backup-path",
+            str(backup_path),
+            "--restart-script",
+            str(PROJECT_ROOT / "scripts" / "restart-caseclosed-services.ubuntu.sh"),
+        ],
         payload.passphrase,
         "restore",
     )

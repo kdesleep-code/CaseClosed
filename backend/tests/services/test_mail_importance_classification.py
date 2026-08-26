@@ -5,10 +5,19 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
+from caseclosed.db.runtime import SessionLocal
 from caseclosed.services.llm_provider import LlmProviderResponse
 
 CONTACTS_URL = "/api/v1/contacts"
 MOCK_MAILS_URL = "/api/v1/mails/mock-ingest"
+
+
+@pytest.fixture
+def llm_session(client):
+    with SessionLocal() as session:
+        yield session
 
 
 def test_mock_mail_importance_classification_marks_high_mail(
@@ -626,7 +635,7 @@ def test_thread_summary_cuts_quoted_reply_sections_before_llm_input() -> None:
     )
 
 
-def test_thread_summary_splits_long_input_and_integrates_partial_summaries() -> None:
+def test_thread_summary_splits_long_input_and_integrates_partial_summaries(llm_session) -> None:
     service = importlib.import_module("caseclosed.services.mail_thread_summary")
 
     class CapturingThreadSummaryProvider:
@@ -694,6 +703,7 @@ def test_thread_summary_splits_long_input_and_integrates_partial_summaries() -> 
 
     response, chunk_count = service.complete_thread_summary(
         provider,
+        session=llm_session,
         thread_id="thread_1",
         gmail_thread_id="gmail_thread_1",
         subject="Long thread",
@@ -708,7 +718,7 @@ def test_thread_summary_splits_long_input_and_integrates_partial_summaries() -> 
     assert len(provider.payloads[-1]["partial_summaries"]) == chunk_count
 
 
-def test_thread_summary_incremental_payload_uses_current_summary() -> None:
+def test_thread_summary_incremental_payload_uses_current_summary(llm_session) -> None:
     service = importlib.import_module("caseclosed.services.mail_thread_summary")
 
     class CapturingThreadSummaryProvider:
@@ -745,6 +755,7 @@ def test_thread_summary_incremental_payload_uses_current_summary() -> None:
     provider = CapturingThreadSummaryProvider()
     response, chunk_count = service.complete_thread_summary(
         provider,
+        session=llm_session,
         thread_id="thread_1",
         gmail_thread_id="gmail_thread_1",
         subject="Incremental thread",

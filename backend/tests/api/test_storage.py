@@ -326,6 +326,58 @@ def test_storage_objects_can_be_listed_and_managed_object_uploaded(
     assert not (database_path.parent / "storage" / storage_path).exists()
 
 
+def test_text_storage_object_can_be_created_and_edited_with_version_history(
+    client, database_path: Path,
+) -> None:
+    directory_response = client.post(
+        "/api/v1/storage/directories", json={"name": "Notes", "parent_id": None},
+    )
+    directory_id = directory_response.json()["data"]["directory"]["id"]
+    create_response = client.post(
+        "/api/v1/storage/objects/text",
+        json={"filename": "meeting.md", "content": "", "directory_id": directory_id},
+    )
+    assert create_response.status_code == 200
+    storage_object = create_response.json()["data"]["storage_object"]
+    assert storage_object["directory_id"] == directory_id
+    assert storage_object["byte_size"] == 0
+    assert client.get(storage_object["url"]).content == b""
+
+    update_response = client.put(
+        f'/api/v1/storage/objects/{storage_object["id"]}/text',
+        json={"content": "睡眠チーム議事録\n次回確認"},
+    )
+    assert update_response.status_code == 200
+    update_data = update_response.json()["data"]
+    assert update_data["skipped"] is False
+    assert update_data["version"]["version_number"] == 1
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT version FROM storage_objects WHERE id = ?", (storage_object["id"],),
+        ).fetchone() == (2,)
+    assert client.get(update_data["storage_object"]["url"]).content.decode("utf-8") == "睡眠チーム議事録\n次回確認"
+    previous_response = client.get(
+        f'/api/v1/storage/objects/{storage_object["id"]}/versions/{update_data["version"]["id"]}/content'
+    )
+    assert previous_response.status_code == 200
+    assert previous_response.content == b""
+
+    duplicate_response = client.put(
+        f'/api/v1/storage/objects/{storage_object["id"]}/text',
+        json={"content": "睡眠チーム議事録\n次回確認"},
+    )
+    assert duplicate_response.status_code == 200
+    assert duplicate_response.json()["data"]["skipped"] is True
+
+
+def test_text_storage_object_rejects_non_text_extension(client) -> None:
+    response = client.post(
+        "/api/v1/storage/objects/text",
+        json={"filename": "unsafe.pdf", "content": "not a pdf"},
+    )
+    assert response.status_code == 422
+
+
 def test_managed_object_upload_accepts_multipart_file(
     client,
     database_path: Path,

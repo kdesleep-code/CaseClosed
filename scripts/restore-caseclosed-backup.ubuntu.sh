@@ -35,5 +35,5 @@ cd "$ROOT_DIR"
   --backup-path "$BACKUP_PATH" \
   --passphrase-file "$PASS_FILE" \
   --status-file "$STATUS_FILE"
-./restart-caseclosed-dev.ubuntu.sh
+./scripts/restart-caseclosed-services.ubuntu.sh
 echo "Restore completed. Status: $STATUS_FILE"

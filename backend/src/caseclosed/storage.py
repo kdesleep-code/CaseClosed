@@ -120,6 +120,12 @@ NO_STORE_FILE_HEADERS = {"Cache-Control": "no-store"}
 CACHEABLE_IMAGE_FILE_HEADERS = {"Cache-Control": "private, max-age=604800, immutable"}
 ACTIVE_STORAGE_DIRECTORY_KINDS = ("normal", "case", "task")
 HIDDEN_STORAGE_DIRECTORY_IDS = {BOOKSHELF_STORAGE_DIRECTORY_ID, PAPERS_STORAGE_DIRECTORY_ID}
+EDITABLE_TEXT_EXTENSIONS = {
+    ".bib", ".cfg", ".conf", ".css", ".csv", ".html", ".ini", ".js",
+    ".json", ".jsonl", ".jsx", ".log", ".markdown", ".md", ".py", ".sh",
+    ".sql", ".tex", ".toml", ".ts", ".tsx", ".tsv", ".txt", ".xml",
+    ".yaml", ".yml",
+}
 
 
 class ContactImageUpload(BaseModel):
@@ -139,6 +145,16 @@ class ManagedObjectUpload(BaseModel):
     content_type: str | None = None
     data_base64: str
     directory_id: str | None = None
+
+
+class TextStorageObjectCreate(BaseModel):
+    filename: str
+    content: str = ""
+    directory_id: str | None = None
+
+
+class TextStorageObjectUpdate(BaseModel):
+    content: str
 
 
 class FileIconSettingCreate(BaseModel):
@@ -1423,8 +1439,9 @@ def update_storage_object_from_bytes(
     now: str,
     operation_type: str = "updated",
     operation_details: dict[str, object] | None = None,
+    allow_empty: bool = False,
 ) -> StorageObjectVersion | None:
-    if len(data) == 0:
+    if len(data) == 0 and not allow_empty:
         raise json_error(422, "VALIDATION_ERROR", "Storage object is empty.")
     current_path = storage_object_absolute_path(storage_object, session)
     if not current_path.is_file():
@@ -4640,6 +4657,66 @@ def upload_managed_object(
         "ok": True,
         "data": {"storage_object": storage_object_data(storage_object, session)},
     }
+
+
+def normalized_text_storage_filename(filename: str) -> str:
+    normalized = filename.strip()
+    if normalized == "" or Path(normalized).name != normalized:
+        raise json_error(422, "VALIDATION_ERROR", "A valid filename is required.")
+    if Path(normalized).suffix.lower() not in EDITABLE_TEXT_EXTENSIONS:
+        raise json_error(422, "VALIDATION_ERROR", "File extension is not editable as UTF-8 text.")
+    return normalized
+
+
+def editable_text_storage_object(session: DatabaseSession, storage_object_id: str) -> StorageObject:
+    storage_object = session.get(StorageObject, storage_object_id)
+    if storage_object is None or storage_object.status != "active" or storage_object.scope != "managed":
+        raise json_error(404, "NOT_FOUND", "Storage object not found.")
+    normalized_text_storage_filename(storage_object.original_filename or "")
+    return storage_object
+
+
+@router.post("/objects/text")
+def create_text_storage_object(
+    payload: TextStorageObjectCreate,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    filename = normalized_text_storage_filename(payload.filename)
+    data = payload.content.encode("utf-8")
+    if len(data) > MAX_TMP_OBJECT_BYTES:
+        raise json_error(413, "PAYLOAD_TOO_LARGE", "Storage object is too large.")
+    directory = ensure_storage_directory(session, payload.directory_id)
+    storage_object = save_storage_object(
+        session, scope="managed", filename=filename, content_type="text/plain; charset=utf-8",
+        data=data, now=jst_iso(), directory_id=directory.id if directory is not None else None,
+        source_type="text_editor",
+    )
+    session.commit()
+    return {"ok": True, "data": {"storage_object": storage_object_data(storage_object, session)}}
+
+
+@router.put("/objects/{storage_object_id}/text")
+def update_text_storage_object(
+    storage_object_id: str,
+    payload: TextStorageObjectUpdate,
+    session: DatabaseSession = Depends(get_session),
+) -> dict[str, object]:
+    storage_object = editable_text_storage_object(session, storage_object_id)
+    data = payload.content.encode("utf-8")
+    if len(data) > MAX_TMP_OBJECT_BYTES:
+        raise json_error(413, "PAYLOAD_TOO_LARGE", "Storage object is too large.")
+    version = update_storage_object_from_bytes(
+        session, storage_object, data=data, filename=storage_object.original_filename,
+        content_type="text/plain; charset=utf-8", now=jst_iso(), allow_empty=True,
+        operation_type="text_edited",
+    )
+    session.commit()
+    return {"ok": True, "data": {
+        "storage_object": storage_object_data(storage_object, session),
+        "version": storage_object_version_data(version) if version is not None else None,
+        "skipped": version is None,
+        "skip_reason": "duplicate_content" if version is None else None,
+    }}
 
 
 @router.post("/objects/upload")

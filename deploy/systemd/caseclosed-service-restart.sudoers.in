@@ -1,0 +1,2 @@
+# Allow the CaseClosed service account to restart only the CaseClosed services.
+@CASECLOSED_SERVICE_USER@ ALL=(root) NOPASSWD: /usr/bin/systemctl restart caseclosed-backend.service caseclosed-frontend.service

@@ -131,6 +131,16 @@ export function storageImagePreviewUrl({
   return `${path.slice(0, -'/content'.length)}/image-preview${query ? `?${query}` : ''}`
 }
 
+const editableTextExtensions = new Set([
+  "bib", "cfg", "conf", "css", "csv", "html", "ini", "js", "json", "jsonl",
+  "jsx", "log", "markdown", "md", "py", "sh", "sql", "tex", "toml", "ts",
+  "tsx", "tsv", "txt", "xml", "yaml", "yml",
+])
+
+export function isEditableTextFile(filename: string | null) {
+  return editableTextExtensions.has(fileExtension(filename))
+}
+
 export function isPreviewableTextFile({
   contentType,
   filename,

@@ -979,6 +979,32 @@ export function deleteFileIconSetting(fileIconId: string): Promise<{ deleted: bo
   )
 }
 
+export function createTextStorageObject(payload: {
+  filename: string
+  content: string
+  directory_id: string | null
+}): Promise<TemporaryObjectUploadResponse> {
+  return request<TemporaryObjectUploadResponse>("/api/v1/storage/objects/text", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+}
+
+export function updateTextStorageObject(
+  storageObjectId: string,
+  content: string,
+): Promise<StorageObjectVersionUploadResponse> {
+  return request<StorageObjectVersionUploadResponse>(
+    "/api/v1/storage/objects/" + encodeURIComponent(storageObjectId) + "/text",
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    },
+  )
+}
+
 export function uploadManagedStorageObject(payload: {
   filename: string | null
   content_type: string | null

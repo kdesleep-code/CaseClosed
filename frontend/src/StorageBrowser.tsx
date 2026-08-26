@@ -10,6 +10,7 @@ import trashIconUrl from './assets/trash-icon.svg'
 import { fileExtension } from './storagePreview'
 import {
   createStorageDirectory,
+  createTextStorageObject,
   deleteStorageDirectory,
   deleteStorageObject,
   listStorageDirectories,
@@ -400,6 +401,9 @@ export default function StorageBrowser({
   const [llmBusyId, setLlmBusyId] = useState<string | null>(null)
   const [deleteBusyId, setDeleteBusyId] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const [isTextCreateOpen, setIsTextCreateOpen] = useState(false)
+  const [textFilename, setTextFilename] = useState("note.txt")
+  const [textContent, setTextContent] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState(searchQuery)
   const isSearchMode = debouncedSearchQuery.trim() !== '' || extensionFilter !== null
@@ -745,6 +749,31 @@ export default function StorageBrowser({
     navigateTo(`/files/${encodeURIComponent(object.id)}`)
   }
 
+  async function handleCreateTextFile() {
+    const filename = textFilename.trim()
+    if (filename === "") {
+      setError(t("storage.text.filenameRequired"))
+      return
+    }
+    setBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const response = await createTextStorageObject({
+        filename, content: textContent, directory_id: currentDirectoryId,
+      })
+      setIsTextCreateOpen(false)
+      setTextFilename("note.txt")
+      setTextContent("")
+      await refreshStorage()
+      handleOpenStorageObject(response.storage_object)
+    } catch (requestError) {
+      setError(describeError(requestError))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function createDirectoryByPrompt() {
     setContextMenu(null)
     const name = window.prompt(t('storage.directory.namePrompt'))?.trim() ?? ''
@@ -915,6 +944,34 @@ export default function StorageBrowser({
                 </div>
               </div>
             )}
+            {isTextCreateOpen && (
+              <section className="storage-text-editor storage-text-create-editor">
+                <label>
+                  <span>{t("storage.text.filename")}</span>
+                  <input
+                    autoFocus
+                    onChange={(event) => setTextFilename(event.target.value)}
+                    value={textFilename}
+                  />
+                </label>
+                <label>
+                  <span>{t("storage.text.content")}</span>
+                  <textarea
+                    onChange={(event) => setTextContent(event.target.value)}
+                    rows={10}
+                    value={textContent}
+                  />
+                </label>
+                <div className="settings-actions">
+                  <button disabled={busy} onClick={() => void handleCreateTextFile()} type="button">
+                    {t("storage.text.create")}
+                  </button>
+                  <button className="secondary-button" disabled={busy} onClick={() => setIsTextCreateOpen(false)} type="button">
+                    {t("common.cancel")}
+                  </button>
+                </div>
+              </section>
+            )}
             <div className={gridClassName}>
               {directories.map((directory) => (
                 <StorageDirectoryCard
@@ -970,6 +1027,15 @@ export default function StorageBrowser({
                     type="button"
                   >
                     {t('storage.context.newDirectory')}
+                  </button>
+                )}
+                {contextMenu.object === null && contextMenu.directory === null && (
+                  <button
+                    onClick={() => { setContextMenu(null); setIsTextCreateOpen(true) }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    {t("storage.context.newTextFile")}
                   </button>
                 )}
                 {contextMenu.directory !== null &&

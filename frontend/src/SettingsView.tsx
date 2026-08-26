@@ -65,6 +65,12 @@ function initialSettingsTab(): SettingsTab {
   return settingsTabs.some((item) => item.key === tab) ? tab as SettingsTab : "google"
 }
 
+function fitTextareaToContent(textarea: HTMLTextAreaElement | null) {
+  if (textarea === null) return
+  textarea.style.height = "auto"
+  textarea.style.height = `${textarea.scrollHeight}px`
+}
+
 function SettingsView() {
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialSettingsTab)
   const [error, setError] = useState<string | null>(null)
@@ -88,6 +94,12 @@ function SettingsView() {
   const [llmBlockReason, setLlmBlockReason] = useState('May contain password.')
   const [llmMonthlyBudget, setLlmMonthlyBudget] = useState('')
   const [uiLanguage, setUiLanguage] = useState(() => readUiLanguage())
+
+  useEffect(() => {
+    document
+      .querySelectorAll<HTMLTextAreaElement>(".settings-llm-instruction-form textarea")
+      .forEach(fitTextareaToContent)
+  }, [llmInstructionDrafts])
 
   useEffect(() => {
     if (!new URLSearchParams(window.location.search).has('google_gmail')) return
@@ -583,7 +595,7 @@ function SettingsView() {
                       <p>{t("settings.llmInstructionsDescription")}</p>
                     </div>
                   </div>
-                  <div className="settings-card-grid">
+                  <div className="settings-card-grid settings-llm-instruction-list">
                     {llmPersonalization === null && <p>{t("maintenance.debug.loading")}</p>}
                     {llmPersonalization?.functions.map((item) => (
                       <article className="mail-panel" key={item.function_type}>
@@ -596,15 +608,18 @@ function SettingsView() {
                             <span className="status-chip">{t("settings.llmInstructionLegacy")}</span>
                           )}
                         </div>
-                        <label className="settings-form">
+                        <div className="settings-llm-instruction-editor">
+                          <label className="settings-form settings-llm-instruction-form">
                           <span>{t("settings.llmInstructionLabel")}</span>
                           <textarea
+                            ref={fitTextareaToContent}
+                            onInput={(event) => fitTextareaToContent(event.currentTarget)}
                             onChange={(event) => setLlmInstructionDrafts((current) => ({
                               ...current, [item.function_type]: event.target.value,
                             }))}
                             disabled={!item.is_available}
                             placeholder={t("settings.llmInstructionPlaceholder")}
-                            rows={5}
+                            rows={1}
                             value={llmInstructionDrafts[item.function_type] ?? ""}
                           />
                         </label>
@@ -621,6 +636,7 @@ function SettingsView() {
                             onClick={() => handleLlmInstructionSave(item.function_type, true)}
                             type="button"
                           >{t("common.clear")}</button>
+                        </div>
                         </div>
                       </article>
                     ))}

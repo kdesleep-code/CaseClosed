@@ -94,10 +94,12 @@ render_unit() {
 mkdir -p "$GENERATED_DIR"
 render_unit "$SCRIPT_DIR/caseclosed-backend.service.in" "$GENERATED_DIR/caseclosed-backend.service"
 render_unit "$SCRIPT_DIR/caseclosed-frontend.service.in" "$GENERATED_DIR/caseclosed-frontend.service"
+render_unit "$SCRIPT_DIR/caseclosed-service-restart.sudoers.in" "$GENERATED_DIR/caseclosed-service-restart.sudoers"
 
 systemd-analyze verify \
   "$GENERATED_DIR/caseclosed-backend.service" \
   "$GENERATED_DIR/caseclosed-frontend.service"
+/usr/sbin/visudo -cf "$GENERATED_DIR/caseclosed-service-restart.sudoers"
 
 if [[ "$GENERATE_ONLY" == "1" ]]; then
   echo "Generated and verified local units: $GENERATED_DIR"
@@ -110,6 +112,9 @@ sudo install -o root -g root -m 0644 \
 sudo install -o root -g root -m 0644 \
   "$GENERATED_DIR/caseclosed-frontend.service" \
   /etc/systemd/system/caseclosed-frontend.service
+sudo install -o root -g root -m 0440 \
+  "$GENERATED_DIR/caseclosed-service-restart.sudoers" \
+  /etc/sudoers.d/caseclosed-service-restart
 sudo systemctl daemon-reload
 sudo systemctl enable caseclosed-backend.service caseclosed-frontend.service
 

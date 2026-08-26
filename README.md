@@ -38,7 +38,7 @@ C@seClosedは、メール、コンタクト、タスク、カレンダー、フ�
 - Python 3.12以上
 - Node.js `^20.19.0` または `>=22.12.0`（Vite 8の要件）
 - npm
-- tmux、curl、`ss`コマンドを含むiproute2
+- curl、`ss`コマンドを含むiproute2
 
 ### 2. リポジトリと依存関係の準備
 
@@ -71,54 +71,24 @@ CASECLOSED_BOOTSTRAP_PASSWORD=十分に長い初回ログイン用パスワー�
 
 通常ログイン用パスワードは8文字以上にしてください。`.env`にはAPIキーやOAuthクライアントシークレットが入るため、Gitへ追加しないでください。`.env`は既定で`.gitignore`の対象です。
 
-### 4. 起動
+### 4. systemdサービスのインストールと起動
 
 ```bash
-./restart-caseclosed-dev.ubuntu.sh
+./deploy/systemd/install.sh --start
 ```
 
-このスクリプトはBackendとFrontendをtmuxセッション`caseclosed-dev`で起動し、疎通確認まで行います。既定URLは次のとおりです。
+このインストーラーはBackendとFrontendのsystemd Unitを生成・インストールし、OS起動時の自動起動を有効にします。同時に、CaseClosedの2サービスだけをパスワードなしで再起動できる限定sudoers設定も導入します。既定URLは次のとおりです。
 
-- Frontend: `http://127.0.0.1:8443/`（証明書がある場合は`https://127.0.0.1:8443/`）
+- Frontend: `https://127.0.0.1:8443/`
 - Backend: `http://127.0.0.1:8000`
 - Health check: `http://127.0.0.1:8000/health`
 
-ログは`.tmp/dev-server-logs/`に保存されます。
-
-```bash
-# 起動中のログを見る
-tmux attach -t caseclosed-dev
-
-# 停止する
-tmux kill-session -t caseclosed-dev
-
-# HTTPS証明書があってもHTTPで起動する
-./restart-caseclosed-dev.ubuntu.sh --no-https
-```
-
 初回起動時に、SQLiteデータベース、Storageディレクトリ、初期設定などが自動作成されます。新規インストールでは、通常は手動で`alembic upgrade`を実行する必要はありません。
 
-### UbuntuでOS起動時に自動起動する
-
-`deploy/systemd/`には、BackendとFrontendをsystemdで管理するための環境非依存テンプレートがあります。次のインストーラーを一般ユーザーとして実行すると、現在のユーザー名、リポジトリの絶対パス、`npm`の場所を使ってローカル用サービスを生成し、OS起動時の自動起動を有効にします。
+コードや`.env`の変更を反映する場合は、次のリポジトリ内スクリプトを使用します。
 
 ```bash
-./deploy/systemd/install.sh
-```
-
-生成された環境固有のサービス定義は`deploy/systemd/generated/`に置かれ、Git管理対象にはなりません。テンプレートとインストーラーだけがGitで共有されます。
-
-インストールせず、ローカル用サービスの生成と検証だけを行う場合は`--generate-only`を使用できます。
-
-```bash
-./deploy/systemd/install.sh --generate-only
-```
-
-現在のプロセスもsystemd管理へ切り替える場合は、先に同じポートを使うtmuxセッションを停止してから`--start`を付けます。
-
-```bash
-tmux kill-session -t caseclosed-dev
-./deploy/systemd/install.sh --start
+./scripts/restart-caseclosed-services.ubuntu.sh
 ```
 
 状態とログは次のコマンドで確認できます。
@@ -126,6 +96,12 @@ tmux kill-session -t caseclosed-dev
 ```bash
 systemctl status caseclosed-backend.service caseclosed-frontend.service
 journalctl -u caseclosed-backend.service -u caseclosed-frontend.service
+```
+
+インストールせず、ローカル用Unitとsudoers設定の生成・検証だけを行う場合は`--generate-only`を使用できます。生成物はGit管理対象外の`deploy/systemd/generated/`に置かれます。
+
+```bash
+./deploy/systemd/install.sh --generate-only
 ```
 
 ## Windowsでのセットアップと起動
@@ -219,7 +195,7 @@ CASECLOSED_GOOGLE_GMAIL_SCOPES=https://www.googleapis.com/auth/gmail.readonly ht
 ### 3. 再起動して画面から接続
 
 ```bash
-./restart-caseclosed-dev.ubuntu.sh
+./scripts/restart-caseclosed-services.ubuntu.sh
 ```
 
 Windowsでは`restart-caseclosed-dev.windows.ps1`を実行します。その後、次の順に操作します。
@@ -256,7 +232,7 @@ CASECLOSED_OPENAI_API_KEY=your-secret-api-key
 Backendは起動時の環境変数を使うため、設定後にBackendとFrontendを再起動します。
 
 ```bash
-./restart-caseclosed-dev.ubuntu.sh
+./scripts/restart-caseclosed-services.ubuntu.sh
 ```
 
 ログイン後、`Settings` → `LLM`で、機能ごとのプロファイル、モデル、参照するAPIキー環境変数を確認・変更できます。APIキーそのものは画面へ表示されません。`Settings` → `予算`では、C@seClosedが記録した利用量に基づく概算コストと月額予算を確認できます。実際の請求額とは差があり得るため、OpenAI Platform側のUsage・Billingも併せて確認してください。
@@ -356,7 +332,7 @@ OAuthスコープに`https://www.googleapis.com/auth/gmail.send`が含まれて�
 
 ### 起動ログを確認したい
 
-Ubuntuでは`.tmp/dev-server-logs/`を確認するか、`tmux attach -t caseclosed-dev`を実行します。Windowsでも`.tmp/dev-server-logs/`へ標準出力・標準エラーが保存されます。
+Ubuntuでは`journalctl -u caseclosed-backend.service -u caseclosed-frontend.service`を実行します。Windowsでは`.tmp/dev-server-logs/`へ標準出力・標準エラーが保存されます。
 
 ## セキュリティ上の注意
 
